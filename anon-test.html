@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>تحقّق الحسابات — سوا</title>
+<style>
+  :root{--bg:#0c4854;--card:#0f5563;--ink:#eaf4f2;--soft:#9dc4c0;
+    --line:#1c6675;--accent:#38a878;--accent-ink:#062b21;--err:#e07d70;--ok:#4fb883;}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);
+    font-family:system-ui,"Segoe UI",Tahoma,sans-serif;line-height:1.6;
+    display:flex;align-items:flex-start;justify-content:center;padding:28px 16px}
+  .wrap{width:100%;max-width:420px}
+  h1{font-size:1.3rem;margin:0 0 4px}
+  .sub{color:var(--soft);font-size:.9rem;margin:0 0 22px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px 16px}
+  button{width:100%;padding:14px;font-size:1.05rem;font-weight:700;border:none;
+    border-radius:12px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
+  button:disabled{opacity:.5}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--soft);
+    font-size:.9rem;padding:11px;margin-top:12px}
+  .log{background:#062b33;border:1px solid var(--line);border-radius:12px;padding:13px 14px;
+    font-size:.86rem;min-height:64px;white-space:pre-wrap;word-break:break-word;
+    direction:ltr;text-align:left;font-family:ui-monospace,monospace;margin-top:16px}
+  .ok{color:var(--ok)} .err{color:var(--err)}
+  .step{font-size:.75rem;letter-spacing:.06em;color:var(--accent);font-weight:700;margin:0 0 12px}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>تحقّق طبقة الحسابات</h1>
+    <p class="sub">دخولٌ مجهول → إنشاء وثيقة الحساب → قراءتها. بلا SMS.</p>
+    <div class="card">
+      <p class="step">اضغط للتحقّق</p>
+      <button id="go">دخول تجريبي (مجهول)</button>
+      <button class="ghost" id="out">تسجيل الخروج ومسح</button>
+      <div class="log" id="log">جاهز.</div>
+    </div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+  <script>
+    var CFG = {
+      apiKey: "AIzaSyBmnt6-HMdEaR7LinHWuUnnV26Xu5akkvE",
+      authDomain: "sawa-test-9770f.firebaseapp.com",
+      projectId: "sawa-test-9770f",
+      storageBucket: "sawa-test-9770f.firebasestorage.app",
+      messagingSenderId: "98971055474",
+      appId: "1:98971055474:web:806f40756a2f4cdbdb19eb"
+    };
+    var logEl = document.getElementById("log");
+    function log(m,c){ logEl.textContent=m; logEl.className="log "+(c||""); }
+
+    var app, auth, db;
+    try {
+      app = firebase.initializeApp(CFG);
+      auth = firebase.auth();
+      db = firebase.firestore();
+      log("جاهز. اضغط «دخول تجريبي».");
+    } catch(e){ log("تهيئة فشلت: "+e.message, "err"); }
+
+    document.getElementById("go").addEventListener("click", function(){
+      log("جارٍ الدخول…");
+      auth.signInAnonymously().then(function(cred){
+        var u = cred.user, uid = u.uid;
+        var ref = db.collection("accounts").doc(uid);
+        var now = firebase.firestore.FieldValue.serverTimestamp();
+        // ① الكتابة (القاعدة تسمح: صاحب الملف، حقول محدّدة)
+        return ref.set({
+          displayName: null, phone: u.phoneNumber || null,
+          locale: navigator.language || "ar", createdTs: now, updatedTs: now
+        }).then(function(){
+          // ② القراءة للتأكّد
+          return ref.get();
+        }).then(function(snap){
+          if (snap.exists){
+            log("✓ نجح كلّ شيء:\n\n"
+              + "المصادقة: uid = " + uid + "\n"
+              + "الكتابة: accounts/" + uid + " أُنشئت ✓\n"
+              + "القراءة: القاعدة تسمح ✓\n"
+              + "locale = " + (snap.data().locale||"—") + "\n\n"
+              + "طبقة الحسابات تعمل من طرفٍ إلى طرف.", "ok");
+          } else {
+            log("الكتابة تمّت لكنّ القراءة رجعت فارغة.", "err");
+          }
+        });
+      }).catch(function(e){
+        var msg = "فشل: " + (e.code||"") + "\n" + e.message;
+        if ((e.code||"").indexOf("operation-not-allowed")>-1)
+          msg += "\n\n⛔ فعّل مزوّد Anonymous: Authentication → Sign-in method → Add new provider → Anonymous → Enable.";
+        if ((e.code||"").indexOf("permission-denied")>-1)
+          msg += "\n\n⛔ تأكّد أنّ قواعد الأمان منشورة (accounts self-write).";
+        log(msg, "err");
+      });
+    });
+
+    document.getElementById("out").addEventListener("click", function(){
+      auth.signOut().then(function(){ log("خرجت. اضغط «دخول تجريبي» من جديد."); });
+    });
+  </script>
+</body>
+</html>
