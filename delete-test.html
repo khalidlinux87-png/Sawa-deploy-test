@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>اختبار الحذف — سوا</title>
+<style>
+  :root{--bg:#0c4854;--card:#0f5563;--ink:#eaf4f2;--soft:#9dc4c0;
+    --line:#1c6675;--accent:#38a878;--accent-ink:#062b21;--err:#e07d70;--ok:#4fb883;--amber:#d5a54a;}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);
+    font-family:system-ui,"Segoe UI",Tahoma,sans-serif;line-height:1.6;
+    display:flex;align-items:flex-start;justify-content:center;padding:28px 16px}
+  .wrap{width:100%;max-width:460px}
+  h1{font-size:1.3rem;margin:0 0 4px}
+  .sub{color:var(--soft);font-size:.9rem;margin:0 0 20px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px}
+  button{width:100%;padding:14px;font-size:1.05rem;font-weight:700;border:none;
+    border-radius:12px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
+  .log{background:#062b33;border:1px solid var(--line);border-radius:12px;padding:12px 13px;
+    font-size:.8rem;min-height:120px;white-space:pre-wrap;word-break:break-word;
+    direction:ltr;text-align:left;font-family:ui-monospace,monospace;margin-top:14px;line-height:1.5}
+  .ok{color:var(--ok)} .err{color:var(--err)} .amber{color:var(--amber)}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>اختبار الحذف</h1>
+    <p class="sub">إزالة صلة (شاهدة) · حذف شخص (شاهدة) · تعديلٌ مقابل حذف ⇒ مراجعة.</p>
+    <div class="card">
+      <button id="go">شغّل دورة الحذف</button>
+      <div class="log" id="log">جاهز.</div>
+    </div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script>
+    var WORKER = "https://sawa-deploy-test.khalidlinux87.workers.dev";
+    var CFG = {
+      apiKey: "AIzaSyBmnt6-HMdEaR7LinHWuUnnV26Xu5akkvE",
+      authDomain: "sawa-test-9770f.firebaseapp.com",
+      projectId: "sawa-test-9770f",
+      storageBucket: "sawa-test-9770f.firebasestorage.app",
+      messagingSenderId: "98971055474",
+      appId: "1:98971055474:web:806f40756a2f4cdbdb19eb"
+    };
+    var logEl = document.getElementById("log"), lines = [];
+    function put(s,c){ lines.push((c==="err"?"✗ ":c==="ok"?"✓ ":c==="amber"?"⚠ ":"• ")+s); logEl.textContent=lines.join("\n"); }
+    var auth; try { firebase.initializeApp(CFG); auth = firebase.auth(); } catch(e){}
+    function call(op, payload){
+      return auth.currentUser.getIdToken().then(function(idt){
+        return fetch(WORKER,{method:"POST",headers:{"Authorization":"Bearer "+idt,"Content-Type":"application/json"},
+          body:JSON.stringify({op:op,payload:payload})});
+      }).then(function(r){return r.json();}).then(function(b){ if(!b.ok) throw new Error(op+": "+JSON.stringify(b)); return b; });
+    }
+
+    document.getElementById("go").addEventListener("click", function(){
+      lines=[]; logEl.className="log"; var S={};
+      put("الدخول…");
+      auth.signInAnonymously()
+      .then(function(){ return call("group.create",{name:"عائلة الحذف"}); })
+      .then(function(g){ S.gid=g.groupId; put("عائلة "+g.groupId.slice(0,8)+"…","ok");
+        return call("person.set",{groupId:S.gid,fields:{local_name:"خالد",gender:"male"}}); })
+      .then(function(p){ S.A=p.personId; put("شخص A «خالد»","ok");
+        return call("person.set",{groupId:S.gid,fields:{local_name:"أحمد",gender:"male"}}); })
+      .then(function(p){ S.B=p.personId; put("شخص B «أحمد»","ok");
+        return call("relation.add",{groupId:S.gid,type:"parent",from:S.A,to:S.B}); })
+      .then(function(r){ S.rel=r.relationId; put("صلة: خالد والد أحمد — طُبّقت","ok");
+        return call("relation.remove",{groupId:S.gid,relationId:S.rel}); })
+      .then(function(r){ put("إزالة الصلة (شاهدة): deleted="+r.deleted,"ok");
+        return call("person.delete",{groupId:S.gid,personId:S.A}); })
+      .then(function(r){ put("حذف «خالد» (شاهدة): deleted="+r.deleted+" — لم يُمحَ، وُسِم","ok");
+        return call("person.set",{groupId:S.gid,personId:S.A,fields:{notes:"تعديلٌ بعد الحذف"}}); })
+      .then(function(r){
+        if(r.queued){ put("تعديل «خالد» المحذوف ⇒ لم يُطبَّق، ذهب للمراجعة ("+r.reviewId.slice(0,8)+"…)","amber");
+          put("السبب: "+r.reason,"amber"); put("","");
+          put("دورة الحذف كاملة: الشاهدة تحفظ، والتعديلُ بعد الحذف يُراجَع.","ok");
+        } else { put("توقّعنا مراجعةً للتعديل بعد الحذف — تحقّق.","err"); }
+      }).catch(function(e){ put(String(e.message||e),"err"); });
+    });
+  </script>
+</body>
+</html>
