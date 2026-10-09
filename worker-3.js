@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v7-bridge";         // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v8-fields";         // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -264,7 +264,10 @@ async function opPersonSet(uid, payload, env) {
   const fields = (payload && payload.fields) || {};
   // ⛔ الحالة الصحّية لا تُخزَّن على السيرفر (قرار الخصوصية)
   if ("healthStatus" in fields) throw new Error("healthStatus is not stored on server");
-  const ALLOWED = ["local_name", "gender", "kinship", "birthYear", "deathYear", "phones", "notes", "alive", "motherId"];
+  // الحقول الفعليّة في التطبيق. ⛔ status_detail (الحالة الصحّية) و healthStatus
+  // و photo (حجمها) لا تُخزَّن على الخادم أبداً — ليست في القائمة فتُتجاهَل.
+  const ALLOWED = ["local_name", "gender", "kinship", "proximity", "birthYear", "birthday", "alive",
+                   "death_date", "deathYear", "contacts", "phones", "notes", "motherId"];
 
   const now = new Date().toISOString();
   let pid = payload.personId, creating = false;
@@ -314,7 +317,7 @@ async function opRelationAdd(uid, payload, env) {
   await requireEditor(token, groupId, uid);
 
   const type = payload.type, from = payload.from, to = payload.to; // parent: from=الوالد, to=الابن
-  if (["parent", "spouse", "ex_spouse"].indexOf(type) < 0) throw new Error("bad relation type");
+  if (["parent", "spouse", "ex_spouse", "sibling"].indexOf(type) < 0) throw new Error("bad relation type");
   if (!from || !to) throw new Error("from/to required");
   if (from === to) throw new Error("from equals to");
 
@@ -364,8 +367,9 @@ async function opRelationAdd(uid, payload, env) {
   const relId = (payload.relationId && String(payload.relationId)) || crypto.randomUUID();
   await fsCommit(token, [
     { update: { name: DOC_ROOT + "/groups/" + groupId + "/relations/" + relId,
-      fields: { type: { stringValue: type }, from: { stringValue: from }, to: { stringValue: to },
-                createdTs: { timestampValue: now }, deleted: { booleanValue: false } } } },
+      fields: Object.assign({ type: { stringValue: type }, from: { stringValue: from }, to: { stringValue: to },
+                createdTs: { timestampValue: now }, deleted: { booleanValue: false } },
+                payload.inferred ? { inferred: { stringValue: String(payload.inferred) } } : {}) } },
   ]);
   return { applied: true, relationId: relId };
 }
@@ -437,7 +441,10 @@ async function opBulkImport(uid, payload, env) {
   const name = (payload && payload.name) ? String(payload.name).slice(0, 100) : "عائلتي";
   const persons = (payload && Array.isArray(payload.persons)) ? payload.persons : [];
   const relations = (payload && Array.isArray(payload.relations)) ? payload.relations : [];
-  const ALLOWED = ["local_name", "gender", "kinship", "birthYear", "deathYear", "phones", "notes", "alive", "motherId"];
+  // الحقول الفعليّة في التطبيق. ⛔ status_detail (الحالة الصحّية) و healthStatus
+  // و photo (حجمها) لا تُخزَّن على الخادم أبداً — ليست في القائمة فتُتجاهَل.
+  const ALLOWED = ["local_name", "gender", "kinship", "proximity", "birthYear", "birthday", "alive",
+                   "death_date", "deathYear", "contacts", "phones", "notes", "motherId"];
 
   // خريطة المعرّفات المحلّية → الخادم. مع حفظ المعرّفات: fid = lid (لا تبديل).
   const map = {}; let selfCount = 0; const personWrites = [];
@@ -460,8 +467,9 @@ async function opBulkImport(uid, payload, env) {
     if (!from || !to) { orphans++; continue; }
     const rid = (r.localId && String(r.localId)) || crypto.randomUUID();
     relWrites.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/relations/" + rid,
-      fields: { type: { stringValue: r.type }, from: { stringValue: from }, to: { stringValue: to },
-                createdTs: { timestampValue: now }, deleted: { booleanValue: false } } } });
+      fields: Object.assign({ type: { stringValue: r.type }, from: { stringValue: from }, to: { stringValue: to },
+                createdTs: { timestampValue: now }, deleted: { booleanValue: false } },
+                r.inferred ? { inferred: { stringValue: String(r.inferred) } } : {}) } });
   }
 
   // العائلة + المالك أولاً، ثم الأشخاص، ثم الصلات (دفعاتٍ)
@@ -545,7 +553,7 @@ async function opRelationUpdate(uid, payload, env) {
   const relId = payload && payload.relationId;
   if (!relId) throw new Error("relationId required");
   const type = payload && payload.type;
-  if (["parent", "spouse", "ex_spouse"].indexOf(type) < 0) throw new Error("bad relation type");
+  if (["parent", "spouse", "ex_spouse", "sibling"].indexOf(type) < 0) throw new Error("bad relation type");
   const ex = await fsGet(token, "groups/" + groupId + "/relations/" + relId);
   if (!ex) throw new Error("relation not found");
   if (fbool(ex, "deleted")) throw new Error("relation is deleted");
