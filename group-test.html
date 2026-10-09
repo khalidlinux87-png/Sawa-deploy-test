@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>اختبار إنشاء العائلة — سوا</title>
+<style>
+  :root{--bg:#0c4854;--card:#0f5563;--ink:#eaf4f2;--soft:#9dc4c0;
+    --line:#1c6675;--accent:#38a878;--accent-ink:#062b21;--err:#e07d70;--ok:#4fb883;}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);
+    font-family:system-ui,"Segoe UI",Tahoma,sans-serif;line-height:1.6;
+    display:flex;align-items:flex-start;justify-content:center;padding:28px 16px}
+  .wrap{width:100%;max-width:420px}
+  h1{font-size:1.3rem;margin:0 0 4px}
+  .sub{color:var(--soft);font-size:.9rem;margin:0 0 22px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px 16px}
+  label{display:block;font-size:.85rem;color:var(--soft);margin:0 0 6px}
+  input{width:100%;padding:12px 14px;font-size:1rem;border-radius:11px;
+    border:1.5px solid var(--line);background:#0a3d47;color:var(--ink);margin-bottom:14px}
+  input:focus{outline:none;border-color:var(--accent)}
+  button{width:100%;padding:14px;font-size:1.05rem;font-weight:700;border:none;
+    border-radius:12px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
+  button:disabled{opacity:.5}
+  .log{background:#062b33;border:1px solid var(--line);border-radius:12px;padding:13px 14px;
+    font-size:.84rem;min-height:64px;white-space:pre-wrap;word-break:break-word;
+    direction:ltr;text-align:left;font-family:ui-monospace,monospace;margin-top:16px}
+  .ok{color:var(--ok)} .err{color:var(--err)}
+  .step{font-size:.75rem;letter-spacing:.06em;color:var(--accent);font-weight:700;margin:0 0 12px}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>اختبار إنشاء العائلة</h1>
+    <p class="sub">دخول → الـWorker ينشئ groups/{id} و members/{uid}=owner.</p>
+    <div class="card">
+      <p class="step">اسم العائلة</p>
+      <label>اختر اسماً للعائلة التجريبية</label>
+      <input id="name" type="text" value="عائلة خالد" />
+      <button id="go">أنشئ العائلة</button>
+      <div class="log" id="log">جاهز.</div>
+    </div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script>
+    var WORKER = "https://sawa-deploy-test.khalidlinux87.workers.dev";
+    var CFG = {
+      apiKey: "AIzaSyBmnt6-HMdEaR7LinHWuUnnV26Xu5akkvE",
+      authDomain: "sawa-test-9770f.firebaseapp.com",
+      projectId: "sawa-test-9770f",
+      storageBucket: "sawa-test-9770f.firebasestorage.app",
+      messagingSenderId: "98971055474",
+      appId: "1:98971055474:web:806f40756a2f4cdbdb19eb"
+    };
+    var logEl = document.getElementById("log");
+    function log(m,c){ logEl.textContent=m; logEl.className="log "+(c||""); }
+    var auth;
+    try { firebase.initializeApp(CFG); auth = firebase.auth(); log("جاهز. اضغط «أنشئ العائلة»."); }
+    catch(e){ log("تهيئة Firebase فشلت: "+e.message,"err"); }
+
+    document.getElementById("go").addEventListener("click", function(){
+      var name = document.getElementById("name").value.trim() || "عائلتي";
+      log("جارٍ الدخول…");
+      auth.signInAnonymously().then(function(cred){
+        return cred.user.getIdToken();
+      }).then(function(token){
+        log("أدخل، أرسل group.create للـWorker…");
+        return fetch(WORKER, {
+          method:"POST",
+          headers:{ "Authorization":"Bearer "+token, "Content-Type":"application/json" },
+          body: JSON.stringify({ op:"group.create", payload:{ name:name } })
+        });
+      }).then(function(res){
+        return res.json().then(function(b){ return {status:res.status, body:b}; });
+      }).then(function(r){
+        if (r.body && r.body.ok) {
+          log("✓ أُنشئت العائلة في Firestore:\n\n"
+            + "groupId = " + r.body.groupId + "\n"
+            + "name    = " + r.body.name + "\n"
+            + "owner   = " + r.body.uid + "\n\n"
+            + "افتح Firestore → Data → groups → وثيقة بهذا المعرّف،\n"
+            + "وداخلها members/" + r.body.uid + " بدور owner.", "ok");
+        } else {
+          log("ردّ بخطأ:\nstatus " + r.status + "\n" + JSON.stringify(r.body,null,2), "err");
+        }
+      }).catch(function(e){
+        log("فشل الاتّصال: " + (e.message||e), "err");
+      });
+    });
+  </script>
+</body>
+</html>
