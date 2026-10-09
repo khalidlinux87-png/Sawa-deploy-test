@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v6-complete";       // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v7-bridge";         // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -264,7 +264,7 @@ async function opPersonSet(uid, payload, env) {
   const fields = (payload && payload.fields) || {};
   // ⛔ الحالة الصحّية لا تُخزَّن على السيرفر (قرار الخصوصية)
   if ("healthStatus" in fields) throw new Error("healthStatus is not stored on server");
-  const ALLOWED = ["local_name", "gender", "kinship", "birthYear", "deathYear", "phones", "notes"];
+  const ALLOWED = ["local_name", "gender", "kinship", "birthYear", "deathYear", "phones", "notes", "alive", "motherId"];
 
   const now = new Date().toISOString();
   let pid = payload.personId, creating = false;
@@ -360,7 +360,8 @@ async function opRelationAdd(uid, payload, env) {
     return { applied: false, queued: true, reviewId: rid, reason: conflict };
   }
 
-  const relId = crypto.randomUUID();
+  // المعرّف المحلّيّ = معرّف الخادم (قرار §٨-١): استعمل relationId من العميل إن وُجد
+  const relId = (payload.relationId && String(payload.relationId)) || crypto.randomUUID();
   await fsCommit(token, [
     { update: { name: DOC_ROOT + "/groups/" + groupId + "/relations/" + relId,
       fields: { type: { stringValue: type }, from: { stringValue: from }, to: { stringValue: to },
@@ -431,17 +432,18 @@ async function opBulkImport(uid, payload, env) {
   const sa = JSON.parse(env.SA_JSON);
   const token = await getAccessToken(sa);
   const now = new Date().toISOString();
-  const gid = crypto.randomUUID(); // عائلةٌ جديدة فارغة ⇒ «رفعٌ لا استبدال» مضمون
+  // المعرّف المحلّيّ = معرّف الخادم (قرار §٨-١): استعمل groupId من العميل إن وُجد
+  const gid = (payload && payload.groupId && String(payload.groupId)) || crypto.randomUUID();
   const name = (payload && payload.name) ? String(payload.name).slice(0, 100) : "عائلتي";
   const persons = (payload && Array.isArray(payload.persons)) ? payload.persons : [];
   const relations = (payload && Array.isArray(payload.relations)) ? payload.relations : [];
-  const ALLOWED = ["local_name", "gender", "kinship", "birthYear", "deathYear", "phones", "notes"];
+  const ALLOWED = ["local_name", "gender", "kinship", "birthYear", "deathYear", "phones", "notes", "alive", "motherId"];
 
-  // خريطة المعرّفات المحلّية → Firestore
+  // خريطة المعرّفات المحلّية → الخادم. مع حفظ المعرّفات: fid = lid (لا تبديل).
   const map = {}; let selfCount = 0; const personWrites = [];
   for (const p of persons) {
     const lid = p.localId || crypto.randomUUID();
-    const fid = crypto.randomUUID(); map[lid] = fid;
+    const fid = lid; map[lid] = fid;
     if (p.kinship === "نفسي") selfCount++;
     const f = { deleted: { booleanValue: false }, createdTs: { timestampValue: now }, updatedTs: { timestampValue: now } };
     const ftsSub = {};
@@ -456,7 +458,7 @@ async function opBulkImport(uid, payload, env) {
   for (const r of relations) {
     const from = map[r.fromLocalId], to = map[r.toLocalId];
     if (!from || !to) { orphans++; continue; }
-    const rid = crypto.randomUUID();
+    const rid = (r.localId && String(r.localId)) || crypto.randomUUID();
     relWrites.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/relations/" + rid,
       fields: { type: { stringValue: r.type }, from: { stringValue: from }, to: { stringValue: to },
                 createdTs: { timestampValue: now }, deleted: { booleanValue: false } } } });
@@ -532,6 +534,33 @@ async function opRelationRemove(uid, payload, env) {
   return { relationId: relId, deleted: true };
 }
 
+/* ---------- 13) العمليّة: relation.update (تغيير نوع صلةٍ في مكانها — إنهاء الزواج §٨-٥) ---------- */
+async function opRelationUpdate(uid, payload, env) {
+  if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
+  const sa = JSON.parse(env.SA_JSON);
+  const token = await getAccessToken(sa);
+  const groupId = payload && payload.groupId;
+  if (!groupId) throw new Error("groupId required");
+  await requireEditor(token, groupId, uid);
+  const relId = payload && payload.relationId;
+  if (!relId) throw new Error("relationId required");
+  const type = payload && payload.type;
+  if (["parent", "spouse", "ex_spouse"].indexOf(type) < 0) throw new Error("bad relation type");
+  const ex = await fsGet(token, "groups/" + groupId + "/relations/" + relId);
+  if (!ex) throw new Error("relation not found");
+  if (fbool(ex, "deleted")) throw new Error("relation is deleted");
+  const now = new Date().toISOString();
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/groups/" + groupId + "/relations/" + relId,
+      fields: { type: { stringValue: type }, updatedTs: { timestampValue: now } } },
+      updateMask: { fieldPaths: ["type", "updatedTs"] } },
+    { update: { name: DOC_ROOT + "/groups/" + groupId + "/changelog/" + crypto.randomUUID(),
+      fields: { ts: { timestampValue: now }, by: { stringValue: uid }, relationId: { stringValue: relId },
+                op: { stringValue: "relation.update" }, newType: { stringValue: type } } } },
+  ]);
+  return { relationId: relId, type: type, updated: true };
+}
+
 /* ---------- المدخل ---------- */
 function json(obj, status) {
   obj.ver = VER; // كلّ ردّ يحمل علامة الإصدار الحيّ
@@ -587,6 +616,10 @@ export default {
       if (op === "person.delete") {
         const r = await opPersonDelete(uid, body.payload, env);
         return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "relation.update") {
+        const r = await opRelationUpdate(uid, body.payload, env);
+        return json({ ok: true, ...r });
       }
       if (op === "relation.remove") {
         const r = await opRelationRemove(uid, body.payload, env);
