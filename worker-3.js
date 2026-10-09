@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v9-identity";       // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v10-status";        // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -291,10 +291,13 @@ async function opPersonSet(uid, payload, env) {
   const fields = (payload && payload.fields) || {};
   // ⛔ الحالة الصحّية لا تُخزَّن على السيرفر (قرار الخصوصية)
   if ("healthStatus" in fields) throw new Error("healthStatus is not stored on server");
+  // ⛔ «مريض» (sick) حالةٌ صحّية: لا تُخزَّن أبداً — تُحوَّل إلى «بلا حالة»
+  if (fields.status_detail === "sick") fields.status_detail = null;
   // الحقول الفعليّة في التطبيق. ⛔ status_detail (الحالة الصحّية) و healthStatus
   // و photo (حجمها) لا تُخزَّن على الخادم أبداً — ليست في القائمة فتُتجاهَل.
   const ALLOWED = ["local_name", "gender", "kinship", "proximity", "birthYear", "birthday", "alive",
-                   "death_date", "deathYear", "contacts", "phones", "notes", "motherId"];
+                   "death_date", "deathYear", "contacts", "phones", "notes", "motherId",
+                   "status_detail", "noChildren"];
 
   const now = new Date().toISOString();
   let pid = payload.personId, creating = false;
@@ -471,7 +474,8 @@ async function opBulkImport(uid, payload, env) {
   // الحقول الفعليّة في التطبيق. ⛔ status_detail (الحالة الصحّية) و healthStatus
   // و photo (حجمها) لا تُخزَّن على الخادم أبداً — ليست في القائمة فتُتجاهَل.
   const ALLOWED = ["local_name", "gender", "kinship", "proximity", "birthYear", "birthday", "alive",
-                   "death_date", "deathYear", "contacts", "phones", "notes", "motherId"];
+                   "death_date", "deathYear", "contacts", "phones", "notes", "motherId",
+                   "status_detail", "noChildren"];
 
   // خريطة المعرّفات المحلّية → الخادم. مع حفظ المعرّفات: fid = lid (لا تبديل).
   const map = {}; let selfCount = 0; const personWrites = [];
@@ -479,6 +483,7 @@ async function opBulkImport(uid, payload, env) {
     const lid = p.localId || crypto.randomUUID();
     const fid = lid; map[lid] = fid;
     if (p.kinship === "نفسي") selfCount++;
+    if (p.status_detail === "sick") p.status_detail = null; // ⛔ الحالة الصحّية لا تُخزَّن
     const f = { deleted: { booleanValue: false }, createdTs: { timestampValue: now }, updatedTs: { timestampValue: now } };
     const ftsSub = {};
     for (const k of ALLOWED) if (k in p) { f[k] = toFsValue(p[k]); ftsSub[k] = { timestampValue: now }; }
@@ -662,6 +667,43 @@ async function opAccountAdopt(uid, payload, env) {
   return { adopted: adopted, fromUid: fromUid };
 }
 
+/* قيمة Firestore REST → JS (أرقام فقط لما نحتاجه هنا) */
+function fsNum(v) {
+  if (!v) return null;
+  if (v.integerValue !== undefined) return Number(v.integerValue);
+  if (v.doubleValue !== undefined) return Number(v.doubleValue);
+  return null;
+}
+
+/* ---------- 17) contacts.sync — «آخر تواصل» الخاصّ بالمستخدم (بين أجهزته فقط) ----------
+   accounts/{uid}/contacts/{gid} = { last: { personId: msTimestamp } }
+   الدمج = الأحدث لكلّ شخص (لا يُمحى تواصلٌ سُجّل على أيّ جهاز). أيّ عضوٍ (حتّى المشاهد). */
+async function opContactsSync(uid, payload, env) {
+  const sa = JSON.parse(env.SA_JSON);
+  const token = await getAccessToken(sa);
+  const groupId = payload && payload.groupId;
+  if (!groupId) throw new Error("groupId required");
+  const m = await fsGet(token, "groups/" + groupId + "/members/" + uid);
+  if (!m) throw new Error("not a member");
+  const incoming = (payload && payload.last && typeof payload.last === "object") ? payload.last : {};
+  const doc = await fsGet(token, "accounts/" + uid + "/contacts/" + groupId);
+  const cur = {};
+  const lf = doc && doc.fields && doc.fields.last && doc.fields.last.mapValue && doc.fields.last.mapValue.fields;
+  if (lf) for (const k in lf) { const n = fsNum(lf[k]); if (n) cur[k] = n; }
+  let changed = 0; const merged = Object.assign({}, cur);
+  for (const k in incoming) {
+    const n = Number(incoming[k]);
+    if (!n || !isFinite(n)) continue;
+    if (!merged[k] || n > merged[k]) { merged[k] = n; changed++; }
+  }
+  if (changed) {
+    const f = {}; for (const k in merged) f[k] = { integerValue: String(Math.round(merged[k])) };
+    await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid + "/contacts/" + groupId,
+      fields: { last: { mapValue: { fields: f } }, updatedTs: { timestampValue: new Date().toISOString() } } } }]);
+  }
+  return { last: merged, changed: changed };
+}
+
 /* ---------- المدخل ---------- */
 function json(obj, status) {
   obj.ver = VER; // كلّ ردّ يحمل علامة الإصدار الحيّ
@@ -717,6 +759,10 @@ export default {
       if (op === "person.delete") {
         const r = await opPersonDelete(uid, body.payload, env);
         return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "contacts.sync") {
+        const r = await opContactsSync(uid, body.payload, env);
+        return json({ ok: true, ...r });
       }
       if (op === "my.groups") {
         const r = await opMyGroups(uid, body.payload, env);
