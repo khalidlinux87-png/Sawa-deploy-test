@@ -11,13 +11,15 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
+const VER = "v4-sync";           // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
   "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
-const FS_BASE =
-  "https://firestore.googleapis.com/v1/projects/" + PROJECT_ID +
-  "/databases/(default)/documents";
+// مسار المستند النسبيّ (يُستعمل في حقل name داخل الكتابة)
+const DOC_ROOT = "projects/" + PROJECT_ID + "/databases/(default)/documents";
+// الرابط الكامل (يُستعمل لاستدعاء الـAPI فقط)
+const FS_BASE = "https://firestore.googleapis.com/v1/" + DOC_ROOT;
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -131,6 +133,54 @@ async function fsCommit(accessToken, writes) {
   return data;
 }
 
+/* قراءة وثيقة واحدة — relPath مثل "groups/{gid}/members/{uid}" */
+async function fsGet(accessToken, relPath) {
+  const res = await fetch(FS_BASE + "/" + relPath, {
+    headers: { Authorization: "Bearer " + accessToken },
+  });
+  if (res.status === 404) return null;
+  const data = await res.json();
+  if (!res.ok) throw new Error("firestore get: " + JSON.stringify(data));
+  return data; // فيه .fields
+}
+function fstr(doc, name) {
+  return doc && doc.fields && doc.fields[name] ? doc.fields[name].stringValue : null;
+}
+function fbool(doc, name) {
+  return doc && doc.fields && doc.fields[name] ? !!doc.fields[name].booleanValue : false;
+}
+
+/* قائمة مجموعةٍ كاملة (صفحاتٍ متتابعة) */
+async function fsList(accessToken, collPath) {
+  let out = [], pageToken = null, guard = 0;
+  do {
+    const url = FS_BASE + "/" + collPath + "?pageSize=300" +
+      (pageToken ? "&pageToken=" + encodeURIComponent(pageToken) : "");
+    const res = await fetch(url, { headers: { Authorization: "Bearer " + accessToken } });
+    if (res.status === 404) return out;
+    const data = await res.json();
+    if (!res.ok) throw new Error("firestore list: " + JSON.stringify(data));
+    if (data.documents) out = out.concat(data.documents);
+    pageToken = data.nextPageToken; guard++;
+  } while (pageToken && guard < 10);
+  return out;
+}
+
+/* تحويل قيمة JS إلى صيغة Firestore REST */
+function toFsValue(v) {
+  if (v === null || v === undefined) return { nullValue: null };
+  if (typeof v === "string") return { stringValue: v };
+  if (typeof v === "boolean") return { booleanValue: v };
+  if (typeof v === "number")
+    return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
+  if (Array.isArray(v)) return { arrayValue: { values: v.map(toFsValue) } };
+  if (typeof v === "object") {
+    const f = {}; for (const k in v) f[k] = toFsValue(v[k]);
+    return { mapValue: { fields: f } };
+  }
+  return { stringValue: String(v) };
+}
+
 /* ---------- 4) العمليّة: group.create ---------- */
 async function opGroupCreate(uid, payload, env) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
@@ -140,17 +190,177 @@ async function opGroupCreate(uid, payload, env) {
   const now = new Date().toISOString();
   const name = (payload && payload.name) ? String(payload.name).slice(0, 100) : "عائلتي";
   await fsCommit(token, [
-    { update: { name: FS_BASE + "/groups/" + gid,
+    { update: { name: DOC_ROOT + "/groups/" + gid,
       fields: { name: { stringValue: name }, ownerUid: { stringValue: uid },
                 createdTs: { timestampValue: now } } } },
-    { update: { name: FS_BASE + "/groups/" + gid + "/members/" + uid,
+    { update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid,
       fields: { role: { stringValue: "owner" }, joinedTs: { timestampValue: now } } } },
   ]);
   return { groupId: gid, name: name };
 }
 
+/* ---------- 5) العمليّة: invite.create (owner/editor) ---------- */
+async function opInviteCreate(uid, payload, env) {
+  if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
+  const sa = JSON.parse(env.SA_JSON);
+  const token = await getAccessToken(sa);
+  const groupId = payload && payload.groupId;
+  if (!groupId) throw new Error("groupId required");
+  // التحقّق من الدور: عضوٌ owner أو editor وحده يدعو
+  const member = await fsGet(token, "groups/" + groupId + "/members/" + uid);
+  const role = fstr(member, "role");
+  if (role !== "owner" && role !== "editor")
+    throw new Error("not a manager of this group");
+  const inviteToken = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/invites/" + inviteToken,
+      fields: { groupId: { stringValue: groupId }, createdBy: { stringValue: uid },
+                role: { stringValue: "viewer" }, createdTs: { timestampValue: now } } } },
+  ]);
+  return { token: inviteToken, groupId: groupId };
+}
+
+/* ---------- 6) العمليّة: invite.accept (أيّ مستخدم مُتحقَّق) ---------- */
+async function opInviteAccept(uid, payload, env) {
+  if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
+  const sa = JSON.parse(env.SA_JSON);
+  const token = await getAccessToken(sa);
+  const inviteToken = payload && payload.token;
+  if (!inviteToken) throw new Error("invite token required");
+  const invite = await fsGet(token, "invites/" + inviteToken);
+  if (!invite) throw new Error("invite not found");
+  const groupId = fstr(invite, "groupId");
+  const invitedBy = fstr(invite, "createdBy") || "";
+  // عضوٌ سلفاً؟ لا نُنزِل دوره
+  const existing = await fsGet(token, "groups/" + groupId + "/members/" + uid);
+  if (existing) return { groupId: groupId, role: fstr(existing, "role"), already: true };
+  const now = new Date().toISOString();
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/groups/" + groupId + "/members/" + uid,
+      fields: { role: { stringValue: "viewer" }, joinedTs: { timestampValue: now },
+                invitedBy: { stringValue: invitedBy } } } },
+  ]);
+  return { groupId: groupId, role: "viewer" };
+}
+
+/* يتحقّق أنّ المستخدم محرِّر/مالك في العائلة */
+async function requireEditor(token, groupId, uid) {
+  const me = await fsGet(token, "groups/" + groupId + "/members/" + uid);
+  const role = fstr(me, "role");
+  if (role !== "owner" && role !== "editor") throw new Error("not allowed to edit");
+  return role;
+}
+
+/* ---------- 7) العمليّة: person.set (حقليّ — الأحدث يفوز) ---------- */
+async function opPersonSet(uid, payload, env) {
+  if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
+  const sa = JSON.parse(env.SA_JSON);
+  const token = await getAccessToken(sa);
+  const groupId = payload && payload.groupId;
+  if (!groupId) throw new Error("groupId required");
+  await requireEditor(token, groupId, uid);
+
+  const fields = (payload && payload.fields) || {};
+  // ⛔ الحالة الصحّية لا تُخزَّن على السيرفر (قرار الخصوصية)
+  if ("healthStatus" in fields) throw new Error("healthStatus is not stored on server");
+  const ALLOWED = ["local_name", "gender", "kinship", "birthYear", "deathYear", "phones", "notes"];
+
+  const now = new Date().toISOString();
+  let pid = payload.personId, creating = false;
+  if (pid) { const ex = await fsGet(token, "groups/" + groupId + "/persons/" + pid); if (!ex) creating = true; }
+  else { pid = crypto.randomUUID(); creating = true; }
+
+  const changed = [], updFields = {}, ftsSub = {};
+  for (const k of ALLOWED) if (k in fields) { updFields[k] = toFsValue(fields[k]); ftsSub[k] = { timestampValue: now }; changed.push(k); }
+  if (changed.length === 0 && !creating) throw new Error("no fields to set");
+
+  // ترقيعٌ لا استبدال: updateMask يكتب الحقول المذكورة وحدها
+  const mask = changed.slice();
+  updFields.fts = { mapValue: { fields: ftsSub } };     // طابع آخر كتابةٍ لكلّ حقل
+  for (const k of changed) mask.push("fts." + k);
+  updFields.updatedTs = { timestampValue: now }; mask.push("updatedTs");
+  if (creating) { updFields.deleted = { booleanValue: false }; updFields.createdTs = { timestampValue: now }; mask.push("deleted", "createdTs"); }
+
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/groups/" + groupId + "/persons/" + pid, fields: updFields },
+      updateMask: { fieldPaths: mask } },
+    // سجلّ خفيف
+    { update: { name: DOC_ROOT + "/groups/" + groupId + "/changelog/" + crypto.randomUUID(),
+      fields: { ts: { timestampValue: now }, by: { stringValue: uid }, personId: { stringValue: pid },
+                op: { stringValue: "person.set" }, changed: toFsValue(changed) } } },
+  ]);
+  return { personId: pid, created: creating, changed: changed };
+}
+
+/* ---------- 8) العمليّة: relation.add (بنيويّ — حارسٌ ثم مراجعة) ---------- */
+async function opRelationAdd(uid, payload, env) {
+  if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
+  const sa = JSON.parse(env.SA_JSON);
+  const token = await getAccessToken(sa);
+  const groupId = payload && payload.groupId;
+  if (!groupId) throw new Error("groupId required");
+  await requireEditor(token, groupId, uid);
+
+  const type = payload.type, from = payload.from, to = payload.to; // parent: from=الوالد, to=الابن
+  if (["parent", "spouse", "ex_spouse"].indexOf(type) < 0) throw new Error("bad relation type");
+  if (!from || !to) throw new Error("from/to required");
+  if (from === to) throw new Error("from equals to");
+
+  const relDocs = await fsList(token, "groups/" + groupId + "/relations");
+  const active = relDocs.filter(d => !fbool(d, "deleted"))
+    .map(d => ({ type: fstr(d, "type"), from: fstr(d, "from"), to: fstr(d, "to") }));
+  if (active.some(r => r.type === type && r.from === from && r.to === to))
+    return { applied: false, reason: "exists" };
+
+  let conflict = null;
+  if (type === "parent") {
+    // حارس مقعد الوالد بالجنس (v173): لا والدَين من نفس الجنس للابن
+    const parent = await fsGet(token, "groups/" + groupId + "/persons/" + from);
+    const pGender = fstr(parent, "gender");
+    const existingParents = active.filter(r => r.type === "parent" && r.to === to).map(r => r.from);
+    for (const pp of existingParents) {
+      const ppDoc = await fsGet(token, "groups/" + groupId + "/persons/" + pp);
+      const g = fstr(ppDoc, "gender");
+      if (g && pGender && g === pGender) { conflict = "parent slot of this gender already taken"; break; }
+    }
+    // حارس الدورات: لو كان الابن أصلاً من أسلاف الوالد → دورة
+    if (!conflict) {
+      const seen = new Set(); let stack = [from], depth = 0;
+      while (stack.length && depth < 60 && !conflict) {
+        const cur = stack.pop();
+        const parents = active.filter(r => r.type === "parent" && r.to === cur).map(r => r.from);
+        for (const p of parents) { if (p === to) { conflict = "cycle: child is an ancestor of parent"; } if (!seen.has(p)) { seen.add(p); stack.push(p); } }
+        depth++;
+      }
+    }
+  }
+
+  const now = new Date().toISOString();
+  if (conflict) {
+    const rid = crypto.randomUUID();
+    await fsCommit(token, [
+      { update: { name: DOC_ROOT + "/reviewQueue/" + rid,
+        fields: { groupId: { stringValue: groupId }, kind: { stringValue: "relation" },
+                  proposedBy: { stringValue: uid }, ts: { timestampValue: now },
+                  status: { stringValue: "pending" },
+                  detail: toFsValue({ type: type, from: from, to: to, conflict: conflict }) } } },
+    ]);
+    return { applied: false, queued: true, reviewId: rid, reason: conflict };
+  }
+
+  const relId = crypto.randomUUID();
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/groups/" + groupId + "/relations/" + relId,
+      fields: { type: { stringValue: type }, from: { stringValue: from }, to: { stringValue: to },
+                createdTs: { timestampValue: now }, deleted: { booleanValue: false } } } },
+  ]);
+  return { applied: true, relationId: relId };
+}
+
 /* ---------- المدخل ---------- */
 function json(obj, status) {
+  obj.ver = VER; // كلّ ردّ يحمل علامة الإصدار الحيّ
   return new Response(JSON.stringify(obj), {
     status: status || 200,
     headers: { ...CORS, "Content-Type": "application/json" },
@@ -174,6 +384,22 @@ export default {
         return json({ ok: true, uid, provider: claims.firebase && claims.firebase.sign_in_provider });
       if (op === "group.create") {
         const r = await opGroupCreate(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "invite.create") {
+        const r = await opInviteCreate(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "invite.accept") {
+        const r = await opInviteAccept(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "person.set") {
+        const r = await opPersonSet(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "relation.add") {
+        const r = await opRelationAdd(uid, body.payload, env);
         return json({ ok: true, uid, op, ...r });
       }
       return json({ ok: false, error: "unknown op: " + op }, 400);
