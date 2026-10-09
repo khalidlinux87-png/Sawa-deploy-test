@@ -11,13 +11,15 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
+const VER = "v3-invites";        // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
   "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
-const FS_BASE =
-  "https://firestore.googleapis.com/v1/projects/" + PROJECT_ID +
-  "/databases/(default)/documents";
+// مسار المستند النسبيّ (يُستعمل في حقل name داخل الكتابة)
+const DOC_ROOT = "projects/" + PROJECT_ID + "/databases/(default)/documents";
+// الرابط الكامل (يُستعمل لاستدعاء الـAPI فقط)
+const FS_BASE = "https://firestore.googleapis.com/v1/" + DOC_ROOT;
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -131,6 +133,20 @@ async function fsCommit(accessToken, writes) {
   return data;
 }
 
+/* قراءة وثيقة واحدة — relPath مثل "groups/{gid}/members/{uid}" */
+async function fsGet(accessToken, relPath) {
+  const res = await fetch(FS_BASE + "/" + relPath, {
+    headers: { Authorization: "Bearer " + accessToken },
+  });
+  if (res.status === 404) return null;
+  const data = await res.json();
+  if (!res.ok) throw new Error("firestore get: " + JSON.stringify(data));
+  return data; // فيه .fields
+}
+function fstr(doc, name) {
+  return doc && doc.fields && doc.fields[name] ? doc.fields[name].stringValue : null;
+}
+
 /* ---------- 4) العمليّة: group.create ---------- */
 async function opGroupCreate(uid, payload, env) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
@@ -140,17 +156,63 @@ async function opGroupCreate(uid, payload, env) {
   const now = new Date().toISOString();
   const name = (payload && payload.name) ? String(payload.name).slice(0, 100) : "عائلتي";
   await fsCommit(token, [
-    { update: { name: FS_BASE + "/groups/" + gid,
+    { update: { name: DOC_ROOT + "/groups/" + gid,
       fields: { name: { stringValue: name }, ownerUid: { stringValue: uid },
                 createdTs: { timestampValue: now } } } },
-    { update: { name: FS_BASE + "/groups/" + gid + "/members/" + uid,
+    { update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid,
       fields: { role: { stringValue: "owner" }, joinedTs: { timestampValue: now } } } },
   ]);
   return { groupId: gid, name: name };
 }
 
+/* ---------- 5) العمليّة: invite.create (owner/editor) ---------- */
+async function opInviteCreate(uid, payload, env) {
+  if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
+  const sa = JSON.parse(env.SA_JSON);
+  const token = await getAccessToken(sa);
+  const groupId = payload && payload.groupId;
+  if (!groupId) throw new Error("groupId required");
+  // التحقّق من الدور: عضوٌ owner أو editor وحده يدعو
+  const member = await fsGet(token, "groups/" + groupId + "/members/" + uid);
+  const role = fstr(member, "role");
+  if (role !== "owner" && role !== "editor")
+    throw new Error("not a manager of this group");
+  const inviteToken = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/invites/" + inviteToken,
+      fields: { groupId: { stringValue: groupId }, createdBy: { stringValue: uid },
+                role: { stringValue: "viewer" }, createdTs: { timestampValue: now } } } },
+  ]);
+  return { token: inviteToken, groupId: groupId };
+}
+
+/* ---------- 6) العمليّة: invite.accept (أيّ مستخدم مُتحقَّق) ---------- */
+async function opInviteAccept(uid, payload, env) {
+  if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
+  const sa = JSON.parse(env.SA_JSON);
+  const token = await getAccessToken(sa);
+  const inviteToken = payload && payload.token;
+  if (!inviteToken) throw new Error("invite token required");
+  const invite = await fsGet(token, "invites/" + inviteToken);
+  if (!invite) throw new Error("invite not found");
+  const groupId = fstr(invite, "groupId");
+  const invitedBy = fstr(invite, "createdBy") || "";
+  // عضوٌ سلفاً؟ لا نُنزِل دوره
+  const existing = await fsGet(token, "groups/" + groupId + "/members/" + uid);
+  if (existing) return { groupId: groupId, role: fstr(existing, "role"), already: true };
+  const now = new Date().toISOString();
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/groups/" + groupId + "/members/" + uid,
+      fields: { role: { stringValue: "viewer" }, joinedTs: { timestampValue: now },
+                invitedBy: { stringValue: invitedBy } } } },
+  ]);
+  return { groupId: groupId, role: "viewer" };
+}
+
 /* ---------- المدخل ---------- */
 function json(obj, status) {
+  obj.ver = VER; // كلّ ردّ يحمل علامة الإصدار الحيّ
   return new Response(JSON.stringify(obj), {
     status: status || 200,
     headers: { ...CORS, "Content-Type": "application/json" },
@@ -174,6 +236,14 @@ export default {
         return json({ ok: true, uid, provider: claims.firebase && claims.firebase.sign_in_provider });
       if (op === "group.create") {
         const r = await opGroupCreate(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "invite.create") {
+        const r = await opInviteCreate(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "invite.accept") {
+        const r = await opInviteAccept(uid, body.payload, env);
         return json({ ok: true, uid, op, ...r });
       }
       return json({ ok: false, error: "unknown op: " + op }, 400);
