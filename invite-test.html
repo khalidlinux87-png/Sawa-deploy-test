@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>اختبار الدعوة — سوا</title>
+<style>
+  :root{--bg:#0c4854;--card:#0f5563;--ink:#eaf4f2;--soft:#9dc4c0;
+    --line:#1c6675;--accent:#38a878;--accent-ink:#062b21;--err:#e07d70;--ok:#4fb883;--amber:#d5a54a;}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);
+    font-family:system-ui,"Segoe UI",Tahoma,sans-serif;line-height:1.6;
+    display:flex;align-items:flex-start;justify-content:center;padding:28px 16px}
+  .wrap{width:100%;max-width:440px}
+  h1{font-size:1.3rem;margin:0 0 4px}
+  .sub{color:var(--soft);font-size:.9rem;margin:0 0 20px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:14px}
+  .step{font-size:.75rem;letter-spacing:.06em;color:var(--accent);font-weight:700;margin:0 0 10px}
+  label{display:block;font-size:.85rem;color:var(--soft);margin:0 0 6px}
+  input{width:100%;padding:11px 13px;font-size:1rem;border-radius:11px;
+    border:1.5px solid var(--line);background:#0a3d47;color:var(--ink);margin-bottom:12px}
+  input:focus{outline:none;border-color:var(--accent)}
+  button{width:100%;padding:13px;font-size:1rem;font-weight:700;border:none;
+    border-radius:12px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
+  button:disabled{opacity:.45}
+  button.b2{background:var(--amber)}
+  .log{background:#062b33;border:1px solid var(--line);border-radius:12px;padding:12px 13px;
+    font-size:.82rem;min-height:56px;white-space:pre-wrap;word-break:break-word;
+    direction:ltr;text-align:left;font-family:ui-monospace,monospace;margin-top:14px}
+  .ok{color:var(--ok)} .err{color:var(--err)}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>اختبار الدعوة</h1>
+    <p class="sub">① أنشئ عائلة + رمز دعوة. ② انضمّ بهويّة أخرى (قريب).</p>
+
+    <div class="card">
+      <p class="step">① المالك — ينشئ ويدعو</p>
+      <label>اسم العائلة</label>
+      <input id="name" type="text" value="عائلة خالد" />
+      <button id="b1">أنشئ عائلة + رمز دعوة</button>
+    </div>
+
+    <div class="card">
+      <p class="step">② قريبٌ جديد — يقبل الدعوة</p>
+      <button id="b2" class="b2" disabled>انضمّ كعضوٍ جديد (هويّة أخرى)</button>
+    </div>
+
+    <div class="log" id="log">جاهز.</div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script>
+    var WORKER = "https://sawa-deploy-test.khalidlinux87.workers.dev";
+    var CFG = {
+      apiKey: "AIzaSyBmnt6-HMdEaR7LinHWuUnnV26Xu5akkvE",
+      authDomain: "sawa-test-9770f.firebaseapp.com",
+      projectId: "sawa-test-9770f",
+      storageBucket: "sawa-test-9770f.firebasestorage.app",
+      messagingSenderId: "98971055474",
+      appId: "1:98971055474:web:806f40756a2f4cdbdb19eb"
+    };
+    var logEl = document.getElementById("log");
+    function log(m,c){ logEl.textContent=m; logEl.className="log "+(c||""); }
+    var auth;
+    try { firebase.initializeApp(CFG); auth = firebase.auth(); log("جاهز. ابدأ بالخطوة ①."); }
+    catch(e){ log("تهيئة Firebase فشلت: "+e.message,"err"); }
+
+    var state = { token:null, groupId:null, ownerUid:null };
+
+    function callWorker(op, payload){
+      return auth.currentUser.getIdToken().then(function(idt){
+        return fetch(WORKER, { method:"POST",
+          headers:{ "Authorization":"Bearer "+idt, "Content-Type":"application/json" },
+          body: JSON.stringify({ op:op, payload:payload||{} }) });
+      }).then(function(res){ return res.json(); });
+    }
+
+    // ① أنشئ عائلة ثم رمز دعوة (كمالك)
+    document.getElementById("b1").addEventListener("click", function(){
+      var name = document.getElementById("name").value.trim() || "عائلتي";
+      log("جارٍ الدخول (المالك)…");
+      auth.signInAnonymously().then(function(c){
+        state.ownerUid = c.user.uid;
+        return callWorker("group.create", { name:name });
+      }).then(function(g){
+        if(!g.ok) throw new Error("group.create: "+JSON.stringify(g));
+        state.groupId = g.groupId;
+        return callWorker("invite.create", { groupId: g.groupId });
+      }).then(function(inv){
+        if(!inv.ok) throw new Error("invite.create: "+JSON.stringify(inv));
+        state.token = inv.token;
+        document.getElementById("b2").disabled = false;
+        log("✓ أُنشئت العائلة ورمز الدعوة:\n\n"
+          + "groupId = " + state.groupId + "\n"
+          + "owner   = " + state.ownerUid + "\n"
+          + "رمز الدعوة = " + inv.token + "\n\n"
+          + "رابط الدعوة (للمشاركة):\n"
+          + location.origin + "/invite-test.html?invite=" + inv.token + "\n\n"
+          + "الآن اضغط ② للانضمام بهويّةٍ أخرى.", "ok");
+      }).catch(function(e){ log("فشل ①: " + (e.message||e), "err"); });
+    });
+
+    // ② بدّل الهويّة (قريب جديد) ثم اقبل الدعوة
+    document.getElementById("b2").addEventListener("click", function(){
+      if(!state.token){ log("أنشئ الدعوة أولاً (①).","err"); return; }
+      log("تبديل الهويّة إلى قريبٍ جديد…");
+      auth.signOut().then(function(){
+        return auth.signInAnonymously();
+      }).then(function(c){
+        var newUid = c.user.uid;
+        if(newUid === state.ownerUid){
+          log("تنبيه: الهويّة لم تتغيّر (نفس uid). جرّب ثانيةً.","err"); return null;
+        }
+        return callWorker("invite.accept", { token: state.token }).then(function(r){
+          if(!r.ok) throw new Error("invite.accept: "+JSON.stringify(r));
+          log("✓ انضمّ القريب إلى العائلة:\n\n"
+            + "العضو الجديد = " + newUid + "\n"
+            + "(المالك كان = " + state.ownerUid + ")\n"
+            + "groupId = " + r.groupId + "\n"
+            + "الدور   = " + r.role + (r.already? " (عضوٌ سلفاً)":"") + "\n\n"
+            + "الدعوة تعمل: هويّتان مختلفتان في عائلةٍ واحدة.", "ok");
+        });
+      }).catch(function(e){ log("فشل ②: " + (e.message||e), "err"); });
+    });
+  </script>
+</body>
+</html>
