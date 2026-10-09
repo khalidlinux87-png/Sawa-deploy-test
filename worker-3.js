@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v8-fields";         // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v9-identity";       // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -195,6 +195,7 @@ async function opGroupCreate(uid, payload, env) {
                 createdTs: { timestampValue: now } } } },
     { update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid,
       fields: { role: { stringValue: "owner" }, joinedTs: { timestampValue: now } } } },
+    indexWrite(uid, gid, name, "owner", now),
   ]);
   return { groupId: gid, name: name };
 }
@@ -211,14 +212,21 @@ async function opInviteCreate(uid, payload, env) {
   const role = fstr(member, "role");
   if (role !== "owner" && role !== "editor")
     throw new Error("not a manager of this group");
+  // الدور الممنوح: مشاهد افتراضياً؛ «محرّر» يمنحه المالك وحده
+  const grant = (payload && payload.role === "editor") ? "editor" : "viewer";
+  if (grant === "editor" && role !== "owner") throw new Error("only the owner can invite editors");
   const inviteToken = crypto.randomUUID();
   const now = new Date().toISOString();
+  const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(); // أسبوع
+  const g = await fsGet(token, "groups/" + groupId);
   await fsCommit(token, [
     { update: { name: DOC_ROOT + "/invites/" + inviteToken,
       fields: { groupId: { stringValue: groupId }, createdBy: { stringValue: uid },
-                role: { stringValue: "viewer" }, createdTs: { timestampValue: now } } } },
+                role: { stringValue: grant }, createdTs: { timestampValue: now },
+                expiresTs: { timestampValue: expires },
+                groupName: { stringValue: fstr(g, "name") || "عائلتي" } } } },
   ]);
-  return { token: inviteToken, groupId: groupId };
+  return { token: inviteToken, groupId: groupId, role: grant, expiresTs: expires };
 }
 
 /* ---------- 6) العمليّة: invite.accept (أيّ مستخدم مُتحقَّق) ---------- */
@@ -232,16 +240,26 @@ async function opInviteAccept(uid, payload, env) {
   if (!invite) throw new Error("invite not found");
   const groupId = fstr(invite, "groupId");
   const invitedBy = fstr(invite, "createdBy") || "";
-  // عضوٌ سلفاً؟ لا نُنزِل دوره
-  const existing = await fsGet(token, "groups/" + groupId + "/members/" + uid);
-  if (existing) return { groupId: groupId, role: fstr(existing, "role"), already: true };
+  const exp = invite.fields && invite.fields.expiresTs && invite.fields.expiresTs.timestampValue;
+  if (exp && Date.parse(exp) < Date.now()) throw new Error("invite expired");
+  const grant = fstr(invite, "role") === "editor" ? "editor" : "viewer";
+  const g = await fsGet(token, "groups/" + groupId);
+  const gname = fstr(g, "name") || fstr(invite, "groupName") || "عائلتي";
   const now = new Date().toISOString();
+  // عضوٌ سلفاً؟ لا نُنزِل دوره — نرفعه فقط إن كانت الدعوة أعلى
+  const existing = await fsGet(token, "groups/" + groupId + "/members/" + uid);
+  const cur = existing ? fstr(existing, "role") : null;
+  if (cur && (ROLE_RANK[cur] || 0) >= ROLE_RANK[grant]) {
+    await fsCommit(token, [indexWrite(uid, groupId, gname, cur, now)]);
+    return { groupId: groupId, role: cur, name: gname, already: true };
+  }
   await fsCommit(token, [
     { update: { name: DOC_ROOT + "/groups/" + groupId + "/members/" + uid,
-      fields: { role: { stringValue: "viewer" }, joinedTs: { timestampValue: now },
+      fields: { role: { stringValue: grant }, joinedTs: { timestampValue: now },
                 invitedBy: { stringValue: invitedBy } } } },
+    indexWrite(uid, groupId, gname, grant, now),
   ]);
-  return { groupId: groupId, role: "viewer" };
+  return { groupId: groupId, role: grant, name: gname };
 }
 
 /* يتحقّق أنّ المستخدم محرِّر/مالك في العائلة */
@@ -250,6 +268,15 @@ async function requireEditor(token, groupId, uid) {
   const role = fstr(me, "role");
   if (role !== "owner" && role !== "editor") throw new Error("not allowed to edit");
   return role;
+}
+
+/* فهرس عائلات الحساب: accounts/{uid}/groups/{gid} — يكتبه الـWorker وحده،
+   ويقرؤه الـWorker في my.groups (لا يحتاج تعديل قواعد الأمان). */
+const ROLE_RANK = { viewer: 1, editor: 2, owner: 3 };
+function indexWrite(uid, gid, name, role, now) {
+  return { update: { name: DOC_ROOT + "/accounts/" + uid + "/groups/" + gid,
+    fields: { name: { stringValue: String(name || "عائلتي") }, role: { stringValue: role },
+              ts: { timestampValue: now } } } };
 }
 
 /* ---------- 7) العمليّة: person.set (حقليّ — الأحدث يفوز) ---------- */
@@ -478,6 +505,7 @@ async function opBulkImport(uid, payload, env) {
       fields: { name: { stringValue: name }, ownerUid: { stringValue: uid }, createdTs: { timestampValue: now } } } },
     { update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid,
       fields: { role: { stringValue: "owner" }, joinedTs: { timestampValue: now } } } },
+    indexWrite(uid, gid, name, "owner", now),
   ]);
   await commitChunks(token, personWrites);
   await commitChunks(token, relWrites);
@@ -569,6 +597,71 @@ async function opRelationUpdate(uid, payload, env) {
   return { relationId: relId, type: type, updated: true };
 }
 
+/* ---------- 14) my.groups — عائلات هذا الحساب (من الفهرس) ---------- */
+async function opMyGroups(uid, payload, env) {
+  const sa = JSON.parse(env.SA_JSON);
+  const token = await getAccessToken(sa);
+  const docs = await fsList(token, "accounts/" + uid + "/groups");
+  const out = [];
+  for (const d of docs) {
+    const gid = d.name.split("/").pop();
+    // تحقّق حيّ من العضوية (قد تكون أُلغيت)
+    const m = await fsGet(token, "groups/" + gid + "/members/" + uid);
+    if (!m) continue;
+    out.push({ groupId: gid, name: fstr(d, "name") || "عائلتي", role: fstr(m, "role") });
+  }
+  return { groups: out };
+}
+
+/* ---------- 15) account.index — يفهرس مجموعاتٍ عضوٌ فيها سلفاً (ترقيةٌ لما رُفع قبل v9) ---------- */
+async function opAccountIndex(uid, payload, env) {
+  const sa = JSON.parse(env.SA_JSON);
+  const token = await getAccessToken(sa);
+  const ids = (payload && Array.isArray(payload.groupIds)) ? payload.groupIds.slice(0, 50) : [];
+  const now = new Date().toISOString(); const writes = []; const done = [];
+  for (const gid of ids) {
+    const m = await fsGet(token, "groups/" + gid + "/members/" + uid);
+    if (!m) continue;                       // ليس عضواً ⇒ لا فهرسة
+    const g = await fsGet(token, "groups/" + gid);
+    writes.push(indexWrite(uid, gid, fstr(g, "name"), fstr(m, "role") || "viewer", now));
+    done.push(gid);
+  }
+  if (writes.length) await fsCommit(token, writes);
+  return { indexed: done };
+}
+
+/* ---------- 16) account.adopt — نقل عضويّات هويّةٍ سابقة (مجهولة) إلى الحالية ----------
+   حين يرتبط حساب Google بهويّةٍ أخرى سلفاً، يدخل الجهاز بها؛ فيُقدِّم رمز هويّته
+   القديمة (برهان امتلاكها) لتُنسَخ عضويّاتها إلى الهويّة الحاليّة بنفس الأدوار. */
+async function opAccountAdopt(uid, payload, env) {
+  const sa = JSON.parse(env.SA_JSON);
+  const token = await getAccessToken(sa);
+  const fromToken = payload && payload.fromToken;
+  if (!fromToken) throw new Error("fromToken required");
+  const fromClaims = await verifyIdToken(fromToken);   // يثبت امتلاك الهويّة القديمة
+  const fromUid = fromClaims.sub;
+  if (fromUid === uid) return { adopted: [] };
+  const ids = (payload && Array.isArray(payload.groupIds)) ? payload.groupIds.slice(0, 50) : [];
+  const idx = await fsList(token, "accounts/" + fromUid + "/groups");
+  for (const d of idx) { const gid = d.name.split("/").pop(); if (ids.indexOf(gid) < 0) ids.push(gid); }
+  const now = new Date().toISOString(); const writes = []; const adopted = [];
+  for (const gid of ids) {
+    const old = await fsGet(token, "groups/" + gid + "/members/" + fromUid);
+    if (!old) continue;
+    const role = fstr(old, "role") || "viewer";
+    const mine = await fsGet(token, "groups/" + gid + "/members/" + uid);
+    const keep = mine && (ROLE_RANK[fstr(mine, "role")] || 0) >= (ROLE_RANK[role] || 0);
+    const g = await fsGet(token, "groups/" + gid);
+    if (!keep) writes.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid,
+      fields: { role: { stringValue: role }, joinedTs: { timestampValue: now },
+                adoptedFrom: { stringValue: fromUid } } } });
+    writes.push(indexWrite(uid, gid, fstr(g, "name"), keep ? fstr(mine, "role") : role, now));
+    adopted.push(gid);
+  }
+  if (writes.length) await commitChunks(token, writes);
+  return { adopted: adopted, fromUid: fromUid };
+}
+
 /* ---------- المدخل ---------- */
 function json(obj, status) {
   obj.ver = VER; // كلّ ردّ يحمل علامة الإصدار الحيّ
@@ -624,6 +717,18 @@ export default {
       if (op === "person.delete") {
         const r = await opPersonDelete(uid, body.payload, env);
         return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "my.groups") {
+        const r = await opMyGroups(uid, body.payload, env);
+        return json({ ok: true, ...r });
+      }
+      if (op === "account.index") {
+        const r = await opAccountIndex(uid, body.payload, env);
+        return json({ ok: true, ...r });
+      }
+      if (op === "account.adopt") {
+        const r = await opAccountAdopt(uid, body.payload, env);
+        return json({ ok: true, ...r });
       }
       if (op === "relation.update") {
         const r = await opRelationUpdate(uid, body.payload, env);
