@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v5-review-import";  // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v6-complete";       // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -268,8 +268,19 @@ async function opPersonSet(uid, payload, env) {
 
   const now = new Date().toISOString();
   let pid = payload.personId, creating = false;
-  if (pid) { const ex = await fsGet(token, "groups/" + groupId + "/persons/" + pid); if (!ex) creating = true; }
-  else { pid = crypto.randomUUID(); creating = true; }
+  if (pid) {
+    const ex = await fsGet(token, "groups/" + groupId + "/persons/" + pid);
+    if (!ex) creating = true;
+    else if (fbool(ex, "deleted")) {
+      // ⛔ تعديلٌ مقابل حذف (قرار ④): لا يُطبَّق صامتاً — يُراجَع
+      const rid = crypto.randomUUID();
+      await fsCommit(token, [{ update: { name: DOC_ROOT + "/reviewQueue/" + rid,
+        fields: { groupId: { stringValue: groupId }, kind: { stringValue: "edit_vs_delete" },
+                  proposedBy: { stringValue: uid }, ts: { timestampValue: now }, status: { stringValue: "pending" },
+                  detail: toFsValue({ personId: pid, fields: Object.keys(fields) }) } } }]);
+      return { applied: false, queued: true, reviewId: rid, reason: "editing a deleted person" };
+    }
+  } else { pid = crypto.randomUUID(); creating = true; }
 
   const changed = [], updFields = {}, ftsSub = {};
   for (const k of ALLOWED) if (k in fields) { updFields[k] = toFsValue(fields[k]); ftsSub[k] = { timestampValue: now }; changed.push(k); }
@@ -476,6 +487,51 @@ async function opBulkImport(uid, payload, env) {
            relationsImported: relWrites.length, orphansSkipped: orphans, selfDuplicate: selfDuplicate };
 }
 
+/* ---------- 11) العمليّة: person.delete (شاهدة) ---------- */
+async function opPersonDelete(uid, payload, env) {
+  if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
+  const sa = JSON.parse(env.SA_JSON);
+  const token = await getAccessToken(sa);
+  const groupId = payload && payload.groupId;
+  if (!groupId) throw new Error("groupId required");
+  await requireEditor(token, groupId, uid);
+  const pid = payload && payload.personId;
+  if (!pid) throw new Error("personId required");
+  const ex = await fsGet(token, "groups/" + groupId + "/persons/" + pid);
+  if (!ex) throw new Error("person not found");
+  const now = new Date().toISOString();
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/groups/" + groupId + "/persons/" + pid,
+      fields: { deleted: { booleanValue: true }, deletedTs: { timestampValue: now }, deletedBy: { stringValue: uid } } },
+      updateMask: { fieldPaths: ["deleted", "deletedTs", "deletedBy"] } },
+    { update: { name: DOC_ROOT + "/groups/" + groupId + "/changelog/" + crypto.randomUUID(),
+      fields: { ts: { timestampValue: now }, by: { stringValue: uid }, personId: { stringValue: pid },
+                op: { stringValue: "person.delete" } } } },
+  ]);
+  return { personId: pid, deleted: true };
+}
+
+/* ---------- 12) العمليّة: relation.remove (شاهدة) ---------- */
+async function opRelationRemove(uid, payload, env) {
+  if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
+  const sa = JSON.parse(env.SA_JSON);
+  const token = await getAccessToken(sa);
+  const groupId = payload && payload.groupId;
+  if (!groupId) throw new Error("groupId required");
+  await requireEditor(token, groupId, uid);
+  const relId = payload && payload.relationId;
+  if (!relId) throw new Error("relationId required");
+  const ex = await fsGet(token, "groups/" + groupId + "/relations/" + relId);
+  if (!ex) throw new Error("relation not found");
+  const now = new Date().toISOString();
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/groups/" + groupId + "/relations/" + relId,
+      fields: { deleted: { booleanValue: true }, deletedTs: { timestampValue: now } } },
+      updateMask: { fieldPaths: ["deleted", "deletedTs"] } },
+  ]);
+  return { relationId: relId, deleted: true };
+}
+
 /* ---------- المدخل ---------- */
 function json(obj, status) {
   obj.ver = VER; // كلّ ردّ يحمل علامة الإصدار الحيّ
@@ -526,6 +582,14 @@ export default {
       }
       if (op === "bulk.import") {
         const r = await opBulkImport(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "person.delete") {
+        const r = await opPersonDelete(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "relation.remove") {
+        const r = await opRelationRemove(uid, body.payload, env);
         return json({ ok: true, uid, op, ...r });
       }
       return json({ ok: false, error: "unknown op: " + op }, 400);
