@@ -15,9 +15,10 @@ const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
   "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
-const FS_BASE =
-  "https://firestore.googleapis.com/v1/projects/" + PROJECT_ID +
-  "/databases/(default)/documents";
+// مسار المستند النسبيّ (يُستعمل في حقل name داخل الكتابة)
+const DOC_ROOT = "projects/" + PROJECT_ID + "/databases/(default)/documents";
+// الرابط الكامل (يُستعمل لاستدعاء الـAPI فقط)
+const FS_BASE = "https://firestore.googleapis.com/v1/" + DOC_ROOT;
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -140,10 +141,10 @@ async function opGroupCreate(uid, payload, env) {
   const now = new Date().toISOString();
   const name = (payload && payload.name) ? String(payload.name).slice(0, 100) : "عائلتي";
   await fsCommit(token, [
-    { update: { name: FS_BASE + "/groups/" + gid,
+    { update: { name: DOC_ROOT + "/groups/" + gid,
       fields: { name: { stringValue: name }, ownerUid: { stringValue: uid },
                 createdTs: { timestampValue: now } } } },
-    { update: { name: FS_BASE + "/groups/" + gid + "/members/" + uid,
+    { update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid,
       fields: { role: { stringValue: "owner" }, joinedTs: { timestampValue: now } } } },
   ]);
   return { groupId: gid, name: name };
