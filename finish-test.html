@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>اختبار المراجعة والرفع — سوا</title>
+<style>
+  :root{--bg:#0c4854;--card:#0f5563;--ink:#eaf4f2;--soft:#9dc4c0;
+    --line:#1c6675;--accent:#38a878;--accent-ink:#062b21;--err:#e07d70;--ok:#4fb883;--amber:#d5a54a;}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);
+    font-family:system-ui,"Segoe UI",Tahoma,sans-serif;line-height:1.6;
+    display:flex;align-items:flex-start;justify-content:center;padding:28px 16px}
+  .wrap{width:100%;max-width:460px}
+  h1{font-size:1.3rem;margin:0 0 4px}
+  .sub{color:var(--soft);font-size:.9rem;margin:0 0 20px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:14px}
+  .step{font-size:.75rem;letter-spacing:.06em;color:var(--accent);font-weight:700;margin:0 0 10px}
+  button{width:100%;padding:13px;font-size:1rem;font-weight:700;border:none;
+    border-radius:12px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
+  button.b2{background:var(--amber)}
+  button:disabled{opacity:.45}
+  .log{background:#062b33;border:1px solid var(--line);border-radius:12px;padding:12px 13px;
+    font-size:.8rem;min-height:120px;white-space:pre-wrap;word-break:break-word;
+    direction:ltr;text-align:left;font-family:ui-monospace,monospace;margin-top:4px;line-height:1.5}
+  .ok{color:var(--ok)} .err{color:var(--err)} .amber{color:var(--amber)}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>اختبار المراجعة والرفع</h1>
+    <p class="sub">① تصادمٌ ثم حلّه (review.resolve). ② رفعٌ أوّل (bulk.import).</p>
+    <div class="card">
+      <p class="step">① تصادم ← حلّه بالتطبيق</p>
+      <button id="b1">أنشئ تصادماً ثم احسمه</button>
+    </div>
+    <div class="card">
+      <p class="step">② الرفع الأوّل</p>
+      <button id="b2" class="b2">رفع شجرةٍ تجريبية</button>
+    </div>
+    <div class="log" id="log">جاهز.</div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script>
+    var WORKER = "https://sawa-deploy-test.khalidlinux87.workers.dev";
+    var CFG = {
+      apiKey: "AIzaSyBmnt6-HMdEaR7LinHWuUnnV26Xu5akkvE",
+      authDomain: "sawa-test-9770f.firebaseapp.com",
+      projectId: "sawa-test-9770f",
+      storageBucket: "sawa-test-9770f.firebasestorage.app",
+      messagingSenderId: "98971055474",
+      appId: "1:98971055474:web:806f40756a2f4cdbdb19eb"
+    };
+    var logEl = document.getElementById("log"), lines = [];
+    function put(s,c){ lines.push((c==="err"?"✗ ":c==="ok"?"✓ ":c==="amber"?"⚠ ":"• ")+s); logEl.textContent=lines.join("\n"); }
+    var auth; try { firebase.initializeApp(CFG); auth = firebase.auth(); } catch(e){}
+    function call(op, payload){
+      return auth.currentUser.getIdToken().then(function(idt){
+        return fetch(WORKER,{method:"POST",headers:{"Authorization":"Bearer "+idt,"Content-Type":"application/json"},
+          body:JSON.stringify({op:op,payload:payload})});
+      }).then(function(r){return r.json();}).then(function(b){ if(!b.ok) throw new Error(op+": "+JSON.stringify(b)); return b; });
+    }
+
+    // ① تصادم ثم حلّه
+    document.getElementById("b1").addEventListener("click", function(){
+      lines=[]; logEl.className="log"; var S={};
+      put("الدخول…");
+      auth.signInAnonymously()
+      .then(function(){ return call("group.create",{name:"عائلة المراجعة"}); })
+      .then(function(g){ S.gid=g.groupId; put("عائلة "+g.groupId.slice(0,8)+"…","ok");
+        return call("person.set",{groupId:S.gid,fields:{local_name:"خالد",gender:"male"}}); })
+      .then(function(p){ S.A=p.personId; return call("person.set",{groupId:S.gid,fields:{local_name:"أحمد",gender:"male"}}); })
+      .then(function(p){ S.B=p.personId; return call("person.set",{groupId:S.gid,fields:{local_name:"محمد",gender:"male"}}); })
+      .then(function(p){ S.C=p.personId; return call("relation.add",{groupId:S.gid,type:"parent",from:S.A,to:S.B}); })
+      .then(function(){ put("خالد والد أحمد — طُبّق","ok");
+        return call("relation.add",{groupId:S.gid,type:"parent",from:S.C,to:S.B}); })
+      .then(function(r){
+        if(!r.queued) throw new Error("توقّعنا مراجعةً");
+        S.rev=r.reviewId; put("تصادم: أبٌ ثانٍ ذكر ⇒ مراجعة ("+r.reviewId.slice(0,8)+"…)","amber");
+        put("الآن يحسمها الإنسان بالتطبيق…");
+        return call("review.resolve",{reviewId:S.rev,decision:"apply"}); })
+      .then(function(r){
+        put("حُسمت المراجعة: resolution="+r.resolution+(r.relationId?(" · أُضيفت الصلة "+r.relationId.slice(0,8)+"…"):""),"ok");
+        put("","");
+        put("مسار المراجعة كامل: الحارس يوقف، والإنسان يقرّر.","ok");
+      }).catch(function(e){ put(String(e.message||e),"err"); });
+    });
+
+    // ② الرفع الأوّل
+    document.getElementById("b2").addEventListener("click", function(){
+      lines=[]; logEl.className="log";
+      var tree = {
+        name:"عائلة مستوردة",
+        persons:[
+          {localId:"u1", local_name:"أسامة", gender:"male",   kinship:"نفسي"},
+          {localId:"u2", local_name:"ياسر",  gender:"male",   kinship:"الابن"},
+          {localId:"u3", local_name:"عائشة", gender:"female", kinship:"الزوجة", healthStatus:"حالة صحّية"},
+          {localId:"u4", local_name:"نفسي-مكرّر", gender:"male", kinship:"نفسي"}
+        ],
+        relations:[
+          {type:"parent", fromLocalId:"u1", toLocalId:"u2"},
+          {type:"spouse", fromLocalId:"u1", toLocalId:"u3"},
+          {type:"parent", fromLocalId:"u1", toLocalId:"مجهول"}
+        ]
+      };
+      put("الدخول…");
+      auth.signInAnonymously()
+      .then(function(){ return call("bulk.import", tree); })
+      .then(function(r){
+        put("أُنشئت عائلةٌ من الرفع: "+r.groupId.slice(0,8)+"…","ok");
+        put("أشخاص مرفوعون = "+r.personsImported+" (منهم healthStatus أُسقِط)","ok");
+        put("صلات مرفوعة = "+r.relationsImported+" · يتيمة أُسقطت = "+r.orphansSkipped,"ok");
+        put("نفسي مكرّر = "+r.selfDuplicate+" ⇒ "+(r.selfDuplicate?"فُتح بند مراجعة (لم يُحذف أحد)":"لا"), r.selfDuplicate?"amber":"ok");
+        put("","");
+        put("الرفع الأوّل يعمل: خريطة معرّفات · إسقاط اليتيم · حارس نفسي · إسقاط الصحّة.","ok");
+      }).catch(function(e){ put(String(e.message||e),"err"); });
+    });
+  </script>
+</body>
+</html>
