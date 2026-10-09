@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v4-sync";           // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v5-review-import";  // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -358,6 +358,124 @@ async function opRelationAdd(uid, payload, env) {
   return { applied: true, relationId: relId };
 }
 
+/* كتابةٌ على دفعاتٍ (حدّ Firestore 500 كتابة/طلب) */
+async function commitChunks(token, writes) {
+  for (let i = 0; i < writes.length; i += 400) await fsCommit(token, writes.slice(i, i + 400));
+}
+
+/* ---------- 9) العمليّة: review.resolve (editor يحسم مراجعة) ---------- */
+async function opReviewResolve(uid, payload, env) {
+  if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
+  const sa = JSON.parse(env.SA_JSON);
+  const token = await getAccessToken(sa);
+  const reviewId = payload && payload.reviewId;
+  const decision = payload && payload.decision; // "apply" | "reject"
+  if (!reviewId) throw new Error("reviewId required");
+  const review = await fsGet(token, "reviewQueue/" + reviewId);
+  if (!review) throw new Error("review not found");
+  const groupId = fstr(review, "groupId");
+  await requireEditor(token, groupId, uid);
+  if (fstr(review, "status") !== "pending")
+    return { resolved: false, already: true, status: fstr(review, "status") };
+
+  const now = new Date().toISOString();
+  const closeReview = function (resolution) {
+    return { update: { name: DOC_ROOT + "/reviewQueue/" + reviewId,
+      fields: { status: { stringValue: "resolved" }, resolution: { stringValue: resolution },
+                resolvedBy: { stringValue: uid }, resolvedTs: { timestampValue: now } } },
+      updateMask: { fieldPaths: ["status", "resolution", "resolvedBy", "resolvedTs"] } };
+  };
+
+  if (decision === "reject") {
+    await fsCommit(token, [closeReview("rejected")]);
+    return { resolved: true, resolution: "rejected" };
+  }
+  if (decision === "apply") {
+    const kind = fstr(review, "kind");
+    if (kind === "relation") {
+      const d = review.fields.detail && review.fields.detail.mapValue && review.fields.detail.mapValue.fields;
+      if (!d) throw new Error("review detail missing");
+      const type = d.type.stringValue, from = d.from.stringValue, to = d.to.stringValue;
+      const relId = crypto.randomUUID();
+      // تطبيقٌ بقرار الإنسان، رغم التحذير — في نفس الـcommit مع إغلاق المراجعة
+      await fsCommit(token, [
+        { update: { name: DOC_ROOT + "/groups/" + groupId + "/relations/" + relId,
+          fields: { type: { stringValue: type }, from: { stringValue: from }, to: { stringValue: to },
+                    createdTs: { timestampValue: now }, deleted: { booleanValue: false },
+                    fromReview: { stringValue: reviewId } } } },
+        closeReview("applied"),
+      ]);
+      return { resolved: true, resolution: "applied", relationId: relId };
+    }
+    // أنواع أخرى (self_duplicate …) تُغلَق فقط، دون تطبيقٍ آليّ
+    await fsCommit(token, [closeReview("acknowledged")]);
+    return { resolved: true, resolution: "acknowledged", kind: kind };
+  }
+  throw new Error("decision must be apply or reject");
+}
+
+/* ---------- 10) العمليّة: bulk.import (المالك · الرفع الأوّل) ---------- */
+async function opBulkImport(uid, payload, env) {
+  if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
+  const sa = JSON.parse(env.SA_JSON);
+  const token = await getAccessToken(sa);
+  const now = new Date().toISOString();
+  const gid = crypto.randomUUID(); // عائلةٌ جديدة فارغة ⇒ «رفعٌ لا استبدال» مضمون
+  const name = (payload && payload.name) ? String(payload.name).slice(0, 100) : "عائلتي";
+  const persons = (payload && Array.isArray(payload.persons)) ? payload.persons : [];
+  const relations = (payload && Array.isArray(payload.relations)) ? payload.relations : [];
+  const ALLOWED = ["local_name", "gender", "kinship", "birthYear", "deathYear", "phones", "notes"];
+
+  // خريطة المعرّفات المحلّية → Firestore
+  const map = {}; let selfCount = 0; const personWrites = [];
+  for (const p of persons) {
+    const lid = p.localId || crypto.randomUUID();
+    const fid = crypto.randomUUID(); map[lid] = fid;
+    if (p.kinship === "نفسي") selfCount++;
+    const f = { deleted: { booleanValue: false }, createdTs: { timestampValue: now }, updatedTs: { timestampValue: now } };
+    const ftsSub = {};
+    for (const k of ALLOWED) if (k in p) { f[k] = toFsValue(p[k]); ftsSub[k] = { timestampValue: now }; }
+    // ⛔ healthStatus لا يُنسَخ (خارج ALLOWED) — لا يعبر القاعدة
+    f.fts = { mapValue: { fields: ftsSub } };
+    personWrites.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/persons/" + fid, fields: f } });
+  }
+
+  // إعادة تأصيل الصلات؛ ما سقط طرفه يُتخطّى
+  let orphans = 0; const relWrites = [];
+  for (const r of relations) {
+    const from = map[r.fromLocalId], to = map[r.toLocalId];
+    if (!from || !to) { orphans++; continue; }
+    const rid = crypto.randomUUID();
+    relWrites.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/relations/" + rid,
+      fields: { type: { stringValue: r.type }, from: { stringValue: from }, to: { stringValue: to },
+                createdTs: { timestampValue: now }, deleted: { booleanValue: false } } } });
+  }
+
+  // العائلة + المالك أولاً، ثم الأشخاص، ثم الصلات (دفعاتٍ)
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/groups/" + gid,
+      fields: { name: { stringValue: name }, ownerUid: { stringValue: uid }, createdTs: { timestampValue: now } } } },
+    { update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid,
+      fields: { role: { stringValue: "owner" }, joinedTs: { timestampValue: now } } } },
+  ]);
+  await commitChunks(token, personWrites);
+  await commitChunks(token, relWrites);
+
+  // ⛔ حارس «نفسي» المكرّر: لا يُحذف أحد، بل يُفتح بند مراجعة
+  let selfDuplicate = false;
+  if (selfCount > 1) {
+    selfDuplicate = true;
+    const rid = crypto.randomUUID();
+    await fsCommit(token, [{ update: { name: DOC_ROOT + "/reviewQueue/" + rid,
+      fields: { groupId: { stringValue: gid }, kind: { stringValue: "self_duplicate" },
+                proposedBy: { stringValue: uid }, ts: { timestampValue: now }, status: { stringValue: "pending" },
+                detail: toFsValue({ count: selfCount, note: "multiple self on import" }) } } }]);
+  }
+
+  return { groupId: gid, personsImported: personWrites.length,
+           relationsImported: relWrites.length, orphansSkipped: orphans, selfDuplicate: selfDuplicate };
+}
+
 /* ---------- المدخل ---------- */
 function json(obj, status) {
   obj.ver = VER; // كلّ ردّ يحمل علامة الإصدار الحيّ
@@ -400,6 +518,14 @@ export default {
       }
       if (op === "relation.add") {
         const r = await opRelationAdd(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "review.resolve") {
+        const r = await opReviewResolve(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "bulk.import") {
+        const r = await opBulkImport(uid, body.payload, env);
         return json({ ok: true, uid, op, ...r });
       }
       return json({ ok: false, error: "unknown op: " + op }, 400);
