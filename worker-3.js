@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v16-members";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v17-limits";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -193,6 +193,50 @@ async function fsQueryEq(accessToken, collectionId, eqs, limit) {
   return (data || []).filter(r => r.document).map(r => r.document);
 }
 
+/* استعلامٌ داخل مجموعةٍ فرعيّة (groups/{g}/relations…) — يقرأ ما يطابق فقط بدل القائمة كلّها.
+   filters: [[field, "EQUAL"|"IN", value|array]] */
+async function fsQuerySub(accessToken, parentRel, collectionId, filters, limit) {
+  const fl = filters.map(([k, op, v]) => ({ fieldFilter: { field: { fieldPath: k }, op: op,
+    value: op === "IN" ? { arrayValue: { values: v.map(x => ({ stringValue: x })) } } : { stringValue: v } } }));
+  const res = await fetch(FS_BASE + "/" + parentRel + ":runQuery", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + accessToken, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: collectionId }],
+      where: fl.length === 1 ? fl[0] : { compositeFilter: { op: "AND", filters: fl } }, limit: limit || 300 } }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error("firestore query: " + JSON.stringify(data));
+  return (data || []).filter(r => r.document).map(r => r.document);
+}
+/* عدّ وثائق مجموعةٍ فرعيّة: قراءةٌ واحدة لكلّ ١٠٠٠ بدل قراءة كلّ وثيقة */
+async function fsCount(accessToken, parentRel, collectionId, eq) {
+  const q = { from: [{ collectionId: collectionId }] };
+  if (eq) q.where = { fieldFilter: { field: { fieldPath: eq[0] }, op: "EQUAL", value: toFsValue(eq[1]) } };
+  const res = await fetch(FS_BASE + "/" + parentRel + ":runAggregationQuery", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + accessToken, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredAggregationQuery: { structuredQuery: q, aggregations: [{ alias: "n", count: {} }] } }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error("firestore count: " + JSON.stringify(data));
+  const r = (data || []).find(x => x.result);
+  const v = r && r.result.aggregateFields && r.result.aggregateFields.n;
+  return v ? Number(v.integerValue || 0) : 0;
+}
+/* قصّ القيم قبل الحفظ: نصوصٌ ≤ ٢٠٠٠ حرف، قوائم ≤ ٥٠، عمقٌ ≤ ٤ — لا يملأ أحدٌ القاعدة بنصٍّ ضخم */
+function capVal(v, d) {
+  d = d || 0;
+  if (typeof v === "string") return v.length > 2000 ? v.slice(0, 2000) : v;
+  if (Array.isArray(v)) return d >= 4 ? [] : v.slice(0, 50).map(x => capVal(x, d + 1));
+  if (v && typeof v === "object") {
+    if (d >= 4) return null;
+    const o = {}; let n = 0;
+    for (const k in v) { if (++n > 40) break; o[String(k).slice(0, 60)] = capVal(v[k], d + 1); }
+    return o;
+  }
+  return v;
+}
+
 /* تحويل قيمة JS إلى صيغة Firestore REST */
 function toFsValue(v) {
   if (v === null || v === undefined) return { nullValue: null };
@@ -351,7 +395,7 @@ async function opPersonSet(uid, payload, env) {
   } else { pid = crypto.randomUUID(); creating = true; }
 
   const changed = [], updFields = {}, ftsSub = {};
-  for (const k of ALLOWED) if (k in fields) { updFields[k] = toFsValue(fields[k]); ftsSub[k] = { timestampValue: now }; changed.push(k); }
+  for (const k of ALLOWED) if (k in fields) { updFields[k] = toFsValue(capVal(fields[k])); ftsSub[k] = { timestampValue: now }; changed.push(k); }
   if (changed.length === 0 && !creating) throw new Error("no fields to set");
 
   // ترقيعٌ لا استبدال: updateMask يكتب الحقول المذكورة وحدها
@@ -386,31 +430,42 @@ async function opRelationAdd(uid, payload, env) {
   if (!from || !to) throw new Error("from/to required");
   if (from === to) throw new Error("from equals to");
 
-  const relDocs = await fsList(token, "groups/" + groupId + "/relations");
-  const active = relDocs.filter(d => !fbool(d, "deleted"))
-    .map(d => ({ type: fstr(d, "type"), from: fstr(d, "from"), to: fstr(d, "to") }));
-  if (active.some(r => r.type === type && r.from === from && r.to === to))
-    return { applied: false, reason: "exists" };
+  // ⛔ لا نقرأ كلّ صلات العائلة (كانت تكلّف قراءةً لكلّ صلة في كلّ إضافة): استعلاماتٌ موجّهة فقط
+  const gPath = "groups/" + groupId;
+  const live = docs => docs.filter(d => !fbool(d, "deleted")).map(d => ({ type: fstr(d, "type"), from: fstr(d, "from"), to: fstr(d, "to") }));
+  // احتياط: إن رفض Firestore الاستعلام (فهرسٌ ناقص مثلاً) نعود للطريقة القديمة — قائمةٌ كاملة مرّةً واحدة
+  let all = null;
+  const allRels = async () => all || (all = live(await fsList(token, gPath + "/relations")));
+  const q = async (filters, lim, fallback) => {
+    if (all) return fallback(all);
+    try { return live(await fsQuerySub(token, gPath, "relations", filters, lim)); }
+    catch (e) { return fallback(await allRels()); }
+  };
+  const same = await q([["from", "EQUAL", from], ["to", "EQUAL", to]], 20, A => A.filter(r => r.from === from && r.to === to));
+  if (same.some(r => r.type === type)) return { applied: false, reason: "exists" };
+  const parentsOf = (ids) => { const set = ids.slice(0, 30);
+    return q([["type", "EQUAL", "parent"], ["to", "IN", set]], 200, A => A.filter(r => r.type === "parent" && set.indexOf(r.to) >= 0)); };
 
   let conflict = null;
   if (type === "parent") {
     // حارس مقعد الوالد بالجنس (v173): لا والدَين من نفس الجنس للابن
     const parent = await fsGet(token, "groups/" + groupId + "/persons/" + from);
     const pGender = fstr(parent, "gender");
-    const existingParents = active.filter(r => r.type === "parent" && r.to === to).map(r => r.from);
+    const existingParents = (await parentsOf([to])).map(r => r.from);
     for (const pp of existingParents) {
       const ppDoc = await fsGet(token, "groups/" + groupId + "/persons/" + pp);
       const g = fstr(ppDoc, "gender");
       if (g && pGender && g === pGender) { conflict = "parent slot of this gender already taken"; break; }
     }
     // حارس الدورات: لو كان الابن أصلاً من أسلاف الوالد → دورة
+    // جيلاً بعد جيل (استعلامٌ واحد لكلّ جيل، ≤ ١٢ جيلاً — يبقى تحت حدّ ٥٠ طلباً فرعيّاً)
     if (!conflict) {
-      const seen = new Set(); let stack = [from], depth = 0;
-      while (stack.length && depth < 60 && !conflict) {
-        const cur = stack.pop();
-        const parents = active.filter(r => r.type === "parent" && r.to === cur).map(r => r.from);
-        for (const p of parents) { if (p === to) { conflict = "cycle: child is an ancestor of parent"; } if (!seen.has(p)) { seen.add(p); stack.push(p); } }
-        depth++;
+      const seen = new Set([from]); let gen = [from], depth = 0;
+      while (gen.length && depth < 12 && !conflict) {
+        const ps = (await parentsOf(gen)).map(r => r.from);
+        const next = [];
+        for (const p of ps) { if (p === to) { conflict = "cycle: child is an ancestor of parent"; break; } if (!seen.has(p)) { seen.add(p); next.push(p); } }
+        gen = next.slice(0, 30); depth++;
       }
     }
   }
@@ -497,7 +552,7 @@ async function opReviewResolve(uid, payload, env) {
       const ALLOWED = ["local_name", "gender", "kinship", "proximity", "birthYear", "birthday", "alive",
                        "death_date", "deathYear", "contacts", "phones", "notes", "motherId", "status_detail", "noChildren"];
       const f = { deleted: { booleanValue: false }, updatedTs: { timestampValue: now } }, mask = ["deleted", "updatedTs"];
-      for (const k of ALLOWED) if (k in vals) { f[k] = toFsValue(vals[k]); mask.push(k); }
+      for (const k of ALLOWED) if (k in vals) { f[k] = toFsValue(capVal(vals[k])); mask.push(k); }
       await fsCommit(token, [
         { update: { name: DOC_ROOT + "/groups/" + groupId + "/persons/" + pid, fields: f }, updateMask: { fieldPaths: mask } },
         closeReview("applied"),
@@ -533,6 +588,8 @@ async function opBulkImport(uid, payload, env, claims) {
   const name = (payload && payload.name) ? String(payload.name).slice(0, 100) : "عائلتي";
   const persons = (payload && Array.isArray(payload.persons)) ? payload.persons : [];
   const relations = (payload && Array.isArray(payload.relations)) ? payload.relations : [];
+  // سقفٌ يحمي حصّة الكتابة اليوميّة (٢٠ ألفاً) من رفعٍ واحدٍ ضخم
+  if (persons.length > 3000 || relations.length > 6000) throw new Error("tree too large for one upload");
   // الحقول الفعليّة في التطبيق. ⛔ status_detail (الحالة الصحّية) و healthStatus
   // و photo (حجمها) لا تُخزَّن على الخادم أبداً — ليست في القائمة فتُتجاهَل.
   const ALLOWED = ["local_name", "gender", "kinship", "proximity", "birthYear", "birthday", "alive",
@@ -542,12 +599,12 @@ async function opBulkImport(uid, payload, env, claims) {
   // خريطة المعرّفات المحلّية → الخادم. مع حفظ المعرّفات: fid = lid (لا تبديل).
   const map = {}; let selfCount = 0; const personWrites = [];
   for (const p of persons) {
-    const lid = p.localId || crypto.randomUUID();
-    const fid = lid; map[lid] = fid;
+    const lid = (p.localId && segOk(String(p.localId))) ? String(p.localId) : crypto.randomUUID();
+    const fid = lid; map[p.localId || lid] = fid;
     if (p.kinship === "نفسي") selfCount++;
     const f = { deleted: { booleanValue: false }, createdTs: { timestampValue: now }, updatedTs: { timestampValue: now } };
     const ftsSub = {};
-    for (const k of ALLOWED) if (k in p) { f[k] = toFsValue(p[k]); ftsSub[k] = { timestampValue: now }; }
+    for (const k of ALLOWED) if (k in p) { f[k] = toFsValue(capVal(p[k])); ftsSub[k] = { timestampValue: now }; }
     // ⛔ healthStatus لا يُنسَخ (خارج ALLOWED) — لا يعبر القاعدة
     f.fts = { mapValue: { fields: ftsSub } };
     personWrites.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/persons/" + fid, fields: f } });
@@ -558,7 +615,7 @@ async function opBulkImport(uid, payload, env, claims) {
   for (const r of relations) {
     const from = map[r.fromLocalId], to = map[r.toLocalId];
     if (!from || !to) { orphans++; continue; }
-    const rid = (r.localId && String(r.localId)) || crypto.randomUUID();
+    const rid = (r.localId && segOk(String(r.localId))) ? String(r.localId) : crypto.randomUUID();
     relWrites.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/relations/" + rid,
       fields: Object.assign({ type: { stringValue: r.type }, from: { stringValue: from }, to: { stringValue: to },
                 createdTs: { timestampValue: now }, deleted: { booleanValue: false } },
@@ -703,8 +760,8 @@ async function opMyGroups(uid, payload, env) {
     if (!m) continue;
     const g = await fsGet(token, "groups/" + gid);
     if (!g || fbool(g, "deleted")) continue;            // محذوفة
-    const ps = await fsList(token, "groups/" + gid + "/persons");
-    const personCount = ps.filter(x => !fbool(x, "deleted")).length;
+    // عدٌّ لا قراءة: (الكلّ − المحذوف) بقراءتين بدل قراءة كلّ شخص
+    const personCount = Math.max(0, (await fsCount(token, "groups/" + gid, "persons")) - (await fsCount(token, "groups/" + gid, "persons", ["deleted", true])));
     const created = g.fields && g.fields.createdTs && g.fields.createdTs.timestampValue;
     out.push({ groupId: gid, name: fstr(g, "name") || fstr(d, "name") || "عائلتي", role: fstr(m, "role"),
                personCount: personCount, createdTs: created || null });
@@ -884,7 +941,7 @@ async function opEventSet(uid, payload, env) {
   const fields = (payload && payload.fields) || {};
   const ALLOWED = ["personId", "type", "title", "desc", "dateTimestamp"];
   const f = { updatedTs: { timestampValue: new Date().toISOString() }, by: { stringValue: uid } };
-  for (const k of ALLOWED) if (k in fields) f[k] = toFsValue(fields[k]);
+  for (const k of ALLOWED) if (k in fields) f[k] = toFsValue(capVal(fields[k]));
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/groups/" + groupId + "/events/" + eid, fields: f } }]);
   return { eventId: eid, saved: true };
 }
@@ -1010,6 +1067,24 @@ function json(obj, status) {
     headers: { ...CORS, "Content-Type": "application/json" },
   });
 }
+/* ---------- حدود الطلبات والمعرّفات ---------- */
+const RL = new Map(), RL_WINDOW = 5 * 60 * 1000, RL_MAX = 400;   // ٤٠٠ طلب / ٥ دقائق لكلّ مستخدم
+function rateOk(uid) {
+  const now = Date.now(); let e = RL.get(uid);
+  if (!e || now - e.t > RL_WINDOW) { e = { t: now, n: 0 }; RL.set(uid, e); }
+  e.n++;
+  if (RL.size > 5000) { for (const [k, v] of RL) if (now - v.t > RL_WINDOW) RL.delete(k); }
+  return e.n <= RL_MAX;
+}
+// كلّ معرّفٍ يدخل مسار Firestore: بلا «/» ولا «..» ولا طولٍ مفرط
+const ID_KEYS = ["groupId", "personId", "eventId", "relationId", "reviewId", "token", "uid", "from", "to"];
+function badIds(p) {
+  if (!p || typeof p !== "object") return null;
+  for (const k of ID_KEYS) if (k in p && p[k] != null && !segOk(String(p[k]))) return k;
+  if (Array.isArray(p.groupIds) && p.groupIds.some(x => !segOk(String(x)))) return "groupIds";
+  return null;
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
@@ -1020,9 +1095,13 @@ export default {
       const claims = await verifyIdToken(m[1]);
       const uid = claims.sub;
 
+      // حدٌّ لكلّ مستخدم (تقريبيّ، لكلّ نسخةٍ من الـWorker): يحمي الحصّة المجانيّة من عميلٍ معطوب أو مسيء
+      if (!rateOk(uid)) return json({ ok: false, error: "rate_limited" }, 429);
       let body = {};
       try { body = await request.json(); } catch (e) {}
       const op = body.op || "whoami";
+      const bad = badIds(body.payload);
+      if (bad) return json({ ok: false, error: "bad id: " + bad }, 400);
 
       if (op === "whoami")
         return json({ ok: true, uid, provider: claims.firebase && claims.firebase.sign_in_provider });
