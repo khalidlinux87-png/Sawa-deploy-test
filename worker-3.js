@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v17-limits";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v18-people";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -20,6 +20,8 @@ const JWK_URL =
 const DOC_ROOT = "projects/" + PROJECT_ID + "/databases/(default)/documents";
 // الرابط الكامل (يُستعمل لاستدعاء الـAPI فقط)
 const FS_BASE = "https://firestore.googleapis.com/v1/" + DOC_ROOT;
+// Realtime Database (الحضور · «يكتب…» · إشارات المكالمات والغرف) — يكتب الـWorker فيها قوائم الصلاحيّة فقط
+const RTDB_URL = "https://sawa-test-9770f-default-rtdb.europe-west1.firebasedatabase.app";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -98,7 +100,8 @@ async function getAccessToken(sa) {
   const header = { alg: "RS256", typ: "JWT" };
   const claim = {
     iss: sa.client_email,
-    scope: "https://www.googleapis.com/auth/datastore",
+    // رمزٌ واحد لكلّ الخدمات: Firestore + Realtime Database (+ الإشعارات لاحقاً)
+    scope: "https://www.googleapis.com/auth/datastore https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/firebase.messaging",
     aud: "https://oauth2.googleapis.com/token",
     iat: now, exp: now + 3600,
   };
@@ -1034,6 +1037,87 @@ async function opGroupSettings(uid, payload, env) {
   return { groupId: gid, allowMemberEvents: v };
 }
 
+/* ---------- 25) جهات الاتّصال: people.list · people.invite · people.accept · people.remove ----------
+   جهة الاتّصال = من يشاركك عائلةً على السحابة + من أضفته برابطٍ شخصيّ (accounts/{uid}/people/{other}).
+   people.list يكتب أيضاً قائمة الصلاحيّة في Realtime Database: acl/{أنا}/{هو} = true ⇒ يرى حضوري. */
+async function rtdbPatch(token, updates) {
+  const res = await fetch(RTDB_URL + "/.json?access_token=" + encodeURIComponent(token), {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updates) });
+  if (!res.ok) throw new Error("rtdb: " + res.status + " " + (await res.text()).slice(0, 200));
+}
+async function peopleOf(token, uid) {
+  const people = {};   // uid -> { uid, name, anon, families:[{groupId,name}], via:{family,link} }
+  const add = (u, name, anon, via, fam) => {
+    if (!u || u === uid) return;
+    const p = people[u] || (people[u] = { uid: u, name: null, anon: false, families: [], via: {} });
+    if (name && !p.name) p.name = name;
+    if (anon) p.anon = true; else if (name) p.anon = false;
+    p.via[via] = true;
+    if (fam && !p.families.some(f => f.groupId === fam.groupId)) p.families.push(fam);
+  };
+  const idx = (await fsList(token, "accounts/" + uid + "/groups")).slice(0, 20);
+  for (const d of idx) {
+    const gid = d.name.split("/").pop();
+    const ms = await fsList(token, "groups/" + gid + "/members");
+    if (!ms.some(m => m.name.split("/").pop() === uid)) continue;          // لم أعد عضواً
+    const hidden = new Set(ms.map(m => fstr(m, "adoptedFrom")).filter(Boolean));   // هويّةٌ قديمة لنفس الشخص
+    const fam = { groupId: gid, name: fstr(d, "name") || "عائلتي" };
+    for (const m of ms) { const u = m.name.split("/").pop(); if (!hidden.has(u)) add(u, fstr(m, "name"), fbool(m, "anon"), "family", fam); }
+  }
+  for (const d of await fsList(token, "accounts/" + uid + "/people")) add(d.name.split("/").pop(), fstr(d, "name"), fbool(d, "anon"), "link", null);
+  return Object.values(people);
+}
+async function opPeopleList(uid, payload, env, claims) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const list = await peopleOf(token, uid);
+  // الصلاحيّة: قائمتي كاملةً (من حُذف يفقد رؤية حضوري) + سطري عند كلٍّ منهم
+  const updates = { ["acl/" + uid]: Object.fromEntries(list.map(p => [p.uid, true])) };
+  for (const p of list) updates["acl/" + p.uid + "/" + uid] = true;
+  let aclOk = true;
+  try { await rtdbPatch(token, updates); } catch (e) { aclOk = false; }
+  const me = memberIdFields(claims);
+  return { me: { uid, name: me.name.stringValue || null, anon: me.anon.booleanValue },
+           people: list.map(p => ({ uid: p.uid, name: p.name, anon: p.anon, families: p.families, via: Object.keys(p.via) })), acl: aclOk };
+}
+async function opPeopleInvite(uid, payload, env, claims) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const t = crypto.randomUUID(), now = new Date(), exp = new Date(now.getTime() + 7 * 24 * 3600 * 1000);
+  const id = memberIdFields(claims);
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/pinvites/" + t, fields: Object.assign({ uid: { stringValue: uid },
+    createdTs: { timestampValue: now.toISOString() }, expiresTs: { timestampValue: exp.toISOString() } }, id) } }]);
+  return { token: t, expiresTs: exp.toISOString() };
+}
+async function opPeopleAccept(uid, payload, env, claims) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const t = payload && payload.token;
+  if (!segOk(t)) throw new Error("token required");
+  const inv = await fsGet(token, "pinvites/" + t);
+  if (!inv) throw new Error("invite not found");
+  const exp = inv.fields && inv.fields.expiresTs && inv.fields.expiresTs.timestampValue;
+  if (exp && Date.parse(exp) < Date.now()) throw new Error("invite expired");
+  const other = fstr(inv, "uid");
+  if (!other) throw new Error("invite not found");
+  if (other === uid) return { self: true };
+  const now = new Date().toISOString(), mine = memberIdFields(claims);
+  const theirs = { name: fstr(inv, "name") ? { stringValue: fstr(inv, "name") } : { nullValue: null }, anon: { booleanValue: fbool(inv, "anon") } };
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/accounts/" + uid + "/people/" + other, fields: Object.assign({ ts: { timestampValue: now } }, theirs) } },
+    { update: { name: DOC_ROOT + "/accounts/" + other + "/people/" + uid, fields: Object.assign({ ts: { timestampValue: now } }, mine) } },
+  ]);
+  try { await rtdbPatch(token, { ["acl/" + uid + "/" + other]: true, ["acl/" + other + "/" + uid]: true }); } catch (e) {}
+  return { uid: other, name: fstr(inv, "name") || null };
+}
+async function opPeopleRemove(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const other = payload && payload.uid;
+  if (!segOk(other)) throw new Error("uid required");
+  await fsCommit(token, [
+    { delete: DOC_ROOT + "/accounts/" + uid + "/people/" + other },
+    { delete: DOC_ROOT + "/accounts/" + other + "/people/" + uid },
+  ]);
+  return { uid: other, removed: true };   // إن بقيتما في عائلةٍ واحدة يبقى جهةَ اتّصال
+}
+
 /* ---------- 23) schedules.sync — مواعيد المستخدم الشخصيّة بين أجهزته ----------
    accounts/{uid}/schedules/{gid} = { data: JSON { id: item } }. دمجٌ موعداً موعداً: لكلّ موعد _u (وقت تعديله)،
    والأحدث يغلب؛ الحذف علامة { id, _deleted, _u } حتّى لا يعود المحذوف من جهازٍ آخر. */
@@ -1174,6 +1258,10 @@ export default {
         const r = await opRelationRemove(uid, body.payload, env);
         return json({ ok: true, uid, op, ...r });
       }
+      if (op === "people.list") { const r = await opPeopleList(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "people.invite") { const r = await opPeopleInvite(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "people.accept") { const r = await opPeopleAccept(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "people.remove") { const r = await opPeopleRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "member.hello") { const r = await opMemberHello(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "member.setRole") { const r = await opMemberSetRole(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "member.remove") { const r = await opMemberRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
