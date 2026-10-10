@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v14-features";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v15-photo-url";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -857,7 +857,8 @@ async function opPhotoSet(uid, payload, env) {
   const name = DOC_ROOT + "/groups/" + groupId + "/photos/" + pid;
   const data = payload.data;
   if (data == null) { await fsCommit(token, [{ delete: name }]); return { personId: pid, removed: true }; }
-  if (typeof data !== "string" || !/^data:image\/(jpeg|png|webp);base64,/.test(data)) throw new Error("bad image");
+  const isUrl = typeof data === "string" && /^https:\/\/[^\s"'<>]+$/i.test(data) && data.length <= 2048;   // صورةٌ من الإنترنت: الرابط كما هو
+  if (typeof data !== "string" || !(isUrl || /^data:image\/(jpeg|png|webp);base64,/.test(data))) throw new Error("bad image");
   if (data.length > 400000) throw new Error("image too large");
   await fsCommit(token, [{ update: { name: name, fields: { data: { stringValue: data },
     updatedTs: { timestampValue: new Date().toISOString() }, by: { stringValue: uid } } } }]);
