@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v15-photo-url";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v16-members";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -209,7 +209,7 @@ function toFsValue(v) {
 }
 
 /* ---------- 4) العمليّة: group.create ---------- */
-async function opGroupCreate(uid, payload, env) {
+async function opGroupCreate(uid, payload, env, claims) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
   const token = await getAccessToken(sa);
@@ -221,7 +221,7 @@ async function opGroupCreate(uid, payload, env) {
       fields: { name: { stringValue: name }, ownerUid: { stringValue: uid },
                 createdTs: { timestampValue: now } } } },
     { update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid,
-      fields: { role: { stringValue: "owner" }, joinedTs: { timestampValue: now } } } },
+      fields: Object.assign({ role: { stringValue: "owner" }, joinedTs: { timestampValue: now } }, memberIdFields(claims)) } },
     indexWrite(uid, gid, name, "owner", now),
   ]);
   return { groupId: gid, name: name };
@@ -257,7 +257,7 @@ async function opInviteCreate(uid, payload, env) {
 }
 
 /* ---------- 6) العمليّة: invite.accept (أيّ مستخدم مُتحقَّق) ---------- */
-async function opInviteAccept(uid, payload, env) {
+async function opInviteAccept(uid, payload, env, claims) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
   const token = await getAccessToken(sa);
@@ -283,8 +283,8 @@ async function opInviteAccept(uid, payload, env) {
   }
   await fsCommit(token, [
     { update: { name: DOC_ROOT + "/groups/" + groupId + "/members/" + uid,
-      fields: { role: { stringValue: grant }, joinedTs: { timestampValue: now },
-                invitedBy: { stringValue: invitedBy } } } },
+      fields: Object.assign({ role: { stringValue: grant }, joinedTs: { timestampValue: now },
+                invitedBy: { stringValue: invitedBy } }, memberIdFields(claims)) } },
     indexWrite(uid, groupId, gname, grant, now),
   ]);
   return { groupId: groupId, role: grant, name: gname };
@@ -296,6 +296,13 @@ async function requireEditor(token, groupId, uid) {
   const role = fstr(me, "role");
   if (role !== "owner" && role !== "editor") throw new Error("not allowed to edit");
   return role;
+}
+
+/* اسم العضو كما يظهر لأهله: من حساب Google (الاسم فقط، لا البريد). الضيف بلا اسم. */
+function memberIdFields(claims) {
+  const anon = !!(claims && claims.firebase && claims.firebase.sign_in_provider === "anonymous");
+  const nm = !anon && claims && typeof claims.name === "string" ? claims.name.trim().slice(0, 60) : "";
+  return { name: nm ? { stringValue: nm } : { nullValue: null }, anon: { booleanValue: anon } };
 }
 
 /* فهرس عائلات الحساب: accounts/{uid}/groups/{gid} — يكتبه الـWorker وحده،
@@ -505,7 +512,7 @@ async function opReviewResolve(uid, payload, env) {
 }
 
 /* ---------- 10) العمليّة: bulk.import (المالك · الرفع الأوّل) ---------- */
-async function opBulkImport(uid, payload, env) {
+async function opBulkImport(uid, payload, env, claims) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
   const token = await getAccessToken(sa);
@@ -564,7 +571,7 @@ async function opBulkImport(uid, payload, env) {
       { update: { name: DOC_ROOT + "/groups/" + gid,
         fields: { name: { stringValue: name }, ownerUid: { stringValue: uid }, createdTs: { timestampValue: now } } } },
       { update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid,
-        fields: { role: { stringValue: "owner" }, joinedTs: { timestampValue: now } } } },
+        fields: Object.assign({ role: { stringValue: "owner" }, joinedTs: { timestampValue: now } }, memberIdFields(claims)) } },
       indexWrite(uid, gid, name, "owner", now),
     ]);
   } else {
@@ -725,7 +732,7 @@ async function opAccountIndex(uid, payload, env) {
 /* ---------- 16) account.adopt — نقل عضويّات هويّةٍ سابقة (مجهولة) إلى الحالية ----------
    حين يرتبط حساب Google بهويّةٍ أخرى سلفاً، يدخل الجهاز بها؛ فيُقدِّم رمز هويّته
    القديمة (برهان امتلاكها) لتُنسَخ عضويّاتها إلى الهويّة الحاليّة بنفس الأدوار. */
-async function opAccountAdopt(uid, payload, env) {
+async function opAccountAdopt(uid, payload, env, claims) {
   const sa = JSON.parse(env.SA_JSON);
   const token = await getAccessToken(sa);
   const fromToken = payload && payload.fromToken;
@@ -745,9 +752,12 @@ async function opAccountAdopt(uid, payload, env) {
     const keep = mine && (ROLE_RANK[fstr(mine, "role")] || 0) >= (ROLE_RANK[role] || 0);
     const g = await fsGet(token, "groups/" + gid);
     if (!keep) writes.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid,
-      fields: { role: { stringValue: role }, joinedTs: { timestampValue: now },
-                adoptedFrom: { stringValue: fromUid } } } });
+      fields: Object.assign({ role: { stringValue: role }, joinedTs: { timestampValue: now },
+                adoptedFrom: { stringValue: fromUid } }, memberIdFields(claims)) } });
     writes.push(indexWrite(uid, gid, fstr(g, "name"), keep ? fstr(mine, "role") : role, now));
+    // الهويّة القديمة لنفس الشخص: تُزال حتّى لا تظهر في «الأعضاء» عضواً ثانياً (أو مالكاً ثانياً)
+    writes.push({ delete: DOC_ROOT + "/groups/" + gid + "/members/" + fromUid });
+    writes.push({ delete: DOC_ROOT + "/accounts/" + fromUid + "/groups/" + gid });
     adopted.push(gid);
   }
   if (writes.length) await commitChunks(token, writes);
@@ -870,7 +880,7 @@ async function opEventSet(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const groupId = payload && payload.groupId, eid = payload && payload.eventId;
   if (!segOk(groupId) || !segOk(eid)) throw new Error("groupId/eventId required");
-  await requireEditor(token, groupId, uid);
+  await requireEventWriter(token, groupId, eid, uid);
   const fields = (payload && payload.fields) || {};
   const ALLOWED = ["personId", "type", "title", "desc", "dateTimestamp"];
   const f = { updatedTs: { timestampValue: new Date().toISOString() }, by: { stringValue: uid } };
@@ -882,9 +892,89 @@ async function opEventDelete(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const groupId = payload && payload.groupId, eid = payload && payload.eventId;
   if (!segOk(groupId) || !segOk(eid)) throw new Error("groupId/eventId required");
-  await requireEditor(token, groupId, uid);
+  await requireEventWriter(token, groupId, eid, uid);
   await fsCommit(token, [{ delete: DOC_ROOT + "/groups/" + groupId + "/events/" + eid }]);
   return { eventId: eid, deleted: true };
+}
+
+/* محرّرٌ/مالك دائماً؛ والمشاهد إن سمح المالك (allowMemberEvents) — ويعدّل/يحذف ما أضافه هو فقط */
+async function requireEventWriter(token, groupId, eid, uid) {
+  const me = await fsGet(token, "groups/" + groupId + "/members/" + uid);
+  const role = fstr(me, "role");
+  if (role === "owner" || role === "editor") return role;
+  if (!role) throw new Error("not a member of this family");
+  const g = await fsGet(token, "groups/" + groupId);
+  if (!fbool(g, "allowMemberEvents")) throw new Error("not allowed to edit");
+  const ev = await fsGet(token, "groups/" + groupId + "/events/" + eid);
+  if (ev && fstr(ev, "by") !== uid) throw new Error("you can only change events you added");
+  return role;
+}
+
+/* ---------- 24) الأعضاء: member.hello · member.setRole · member.remove · group.settings ---------- */
+// يحدّث اسم المستخدم في عائلاته (يتغيّر حين يربط حساب Google). لا يُنشئ عضويّة.
+async function opMemberHello(uid, payload, env, claims) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const ids = (payload && Array.isArray(payload.groupIds)) ? payload.groupIds.filter(segOk).slice(0, 30) : [];
+  const want = memberIdFields(claims), writes = [], updated = [];
+  for (const gid of ids) {
+    const m = await fsGet(token, "groups/" + gid + "/members/" + uid);
+    if (!m) continue;
+    const curName = fstr(m, "name") || null, curAnon = fbool(m, "anon");
+    const newName = want.name.stringValue || null, newAnon = want.anon.booleanValue;
+    if (curName === newName && curAnon === newAnon && m.fields && "anon" in m.fields) continue;
+    writes.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid, fields: want },
+                  updateMask: { fieldPaths: ["name", "anon"] } });
+    updated.push(gid);
+  }
+  if (writes.length) await fsCommit(token, writes);
+  return { updated };
+}
+async function requireOwner(token, groupId, uid) {
+  const me = await fsGet(token, "groups/" + groupId + "/members/" + uid);
+  if (fstr(me, "role") !== "owner") throw new Error("only the owner can manage members");
+}
+async function opMemberSetRole(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const gid = payload && payload.groupId, target = payload && payload.uid, role = payload && payload.role;
+  if (!segOk(gid) || !segOk(target)) throw new Error("groupId/uid required");
+  if (role !== "editor" && role !== "viewer") throw new Error("role must be editor or viewer");
+  await requireOwner(token, gid, uid);
+  const m = await fsGet(token, "groups/" + gid + "/members/" + target);
+  if (!m) throw new Error("not a member");
+  if (fstr(m, "role") === "owner") throw new Error("the owner's role can't be changed");
+  const g = await fsGet(token, "groups/" + gid);
+  const now = new Date().toISOString();
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + target, fields: { role: { stringValue: role } } },
+      updateMask: { fieldPaths: ["role"] } },
+    indexWrite(target, gid, fstr(g, "name"), role, now),
+  ]);
+  return { groupId: gid, uid: target, role };
+}
+async function opMemberRemove(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const gid = payload && payload.groupId, target = payload && payload.uid;
+  if (!segOk(gid) || !segOk(target)) throw new Error("groupId/uid required");
+  await requireOwner(token, gid, uid);
+  if (target === uid) throw new Error("the owner can't remove themselves");
+  const m = await fsGet(token, "groups/" + gid + "/members/" + target);
+  if (!m) return { groupId: gid, uid: target, removed: true };
+  if (fstr(m, "role") === "owner") throw new Error("the owner can't be removed");
+  await fsCommit(token, [
+    { delete: DOC_ROOT + "/groups/" + gid + "/members/" + target },
+    { delete: DOC_ROOT + "/accounts/" + target + "/groups/" + gid },
+  ]);
+  return { groupId: gid, uid: target, removed: true };
+}
+async function opGroupSettings(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const gid = payload && payload.groupId;
+  if (!segOk(gid)) throw new Error("groupId required");
+  await requireOwner(token, gid, uid);
+  const v = !!(payload && payload.allowMemberEvents);
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/groups/" + gid, fields: { allowMemberEvents: { booleanValue: v } } },
+                           updateMask: { fieldPaths: ["allowMemberEvents"] } }]);
+  return { groupId: gid, allowMemberEvents: v };
 }
 
 /* ---------- 23) schedules.sync — مواعيد المستخدم الشخصيّة بين أجهزته ----------
@@ -937,7 +1027,7 @@ export default {
       if (op === "whoami")
         return json({ ok: true, uid, provider: claims.firebase && claims.firebase.sign_in_provider });
       if (op === "group.create") {
-        const r = await opGroupCreate(uid, body.payload, env);
+        const r = await opGroupCreate(uid, body.payload, env, claims);
         return json({ ok: true, uid, op, ...r });
       }
       if (op === "invite.create") {
@@ -945,7 +1035,7 @@ export default {
         return json({ ok: true, uid, op, ...r });
       }
       if (op === "invite.accept") {
-        const r = await opInviteAccept(uid, body.payload, env);
+        const r = await opInviteAccept(uid, body.payload, env, claims);
         return json({ ok: true, uid, op, ...r });
       }
       if (op === "person.set") {
@@ -961,7 +1051,7 @@ export default {
         return json({ ok: true, uid, op, ...r });
       }
       if (op === "bulk.import") {
-        const r = await opBulkImport(uid, body.payload, env);
+        const r = await opBulkImport(uid, body.payload, env, claims);
         return json({ ok: true, uid, op, ...r });
       }
       if (op === "person.delete") {
@@ -994,7 +1084,7 @@ export default {
         return json({ ok: true, ...r });
       }
       if (op === "account.adopt") {
-        const r = await opAccountAdopt(uid, body.payload, env);
+        const r = await opAccountAdopt(uid, body.payload, env, claims);
         return json({ ok: true, ...r });
       }
       if (op === "relation.update") {
@@ -1005,6 +1095,10 @@ export default {
         const r = await opRelationRemove(uid, body.payload, env);
         return json({ ok: true, uid, op, ...r });
       }
+      if (op === "member.hello") { const r = await opMemberHello(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "member.setRole") { const r = await opMemberSetRole(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "member.remove") { const r = await opMemberRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "group.settings") { const r = await opGroupSettings(uid, body.payload, env); return json({ ok: true, ...r }); }
       return json({ ok: false, error: "unknown op: " + op }, 400);
     } catch (e) {
       return json({ ok: false, error: String((e && e.message) || e) }, 401);
