@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v18-people";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v19-chat";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -334,6 +334,7 @@ async function opInviteAccept(uid, payload, env, claims) {
                 invitedBy: { stringValue: invitedBy } }, memberIdFields(claims)) } },
     indexWrite(uid, groupId, gname, grant, now),
   ]);
+  try { await famChatSync(token, groupId); } catch (e) {}
   return { groupId: groupId, role: grant, name: gname };
 }
 
@@ -882,6 +883,7 @@ async function opGroupDelete(uid, payload, env) {
     writes.push({ delete: DOC_ROOT + "/accounts/" + mu + "/groups/" + gid });
   }
   await commitChunks(token, writes);
+  try { await famChatSync(token, gid, []); } catch (e) {}
   return { groupId: gid, deleted: true, membersRemoved: members.length };
 }
 
@@ -898,6 +900,7 @@ async function opGroupLeave(uid, payload, env) {
     { delete: DOC_ROOT + "/groups/" + gid + "/members/" + uid },
     { delete: DOC_ROOT + "/accounts/" + uid + "/groups/" + gid },
   ]);
+  try { await famChatSync(token, gid); } catch (e) {}
   return { groupId: gid, left: true };
 }
 
@@ -1024,6 +1027,7 @@ async function opMemberRemove(uid, payload, env) {
     { delete: DOC_ROOT + "/groups/" + gid + "/members/" + target },
     { delete: DOC_ROOT + "/accounts/" + target + "/groups/" + gid },
   ]);
+  try { await famChatSync(token, gid); } catch (e) {}
   return { groupId: gid, uid: target, removed: true };
 }
 async function opGroupSettings(uid, payload, env) {
@@ -1045,7 +1049,7 @@ async function rtdbPatch(token, updates) {
     method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updates) });
   if (!res.ok) throw new Error("rtdb: " + res.status + " " + (await res.text()).slice(0, 200));
 }
-async function peopleOf(token, uid) {
+async function peopleOf(token, uid, opts) {
   const people = {};   // uid -> { uid, name, anon, families:[{groupId,name}], via:{family,link} }
   const add = (u, name, anon, via, fam) => {
     if (!u || u === uid) return;
@@ -1062,6 +1066,8 @@ async function peopleOf(token, uid) {
     if (!ms.some(m => m.name.split("/").pop() === uid)) continue;          // لم أعد عضواً
     const hidden = new Set(ms.map(m => fstr(m, "adoptedFrom")).filter(Boolean));   // هويّةٌ قديمة لنفس الشخص
     const fam = { groupId: gid, name: fstr(d, "name") || "عائلتي" };
+    // حدّ ٥٠ طلباً فرعيّاً لكلّ طلب: نزامن محادثات أوّل ٦ عائلات فقط في كلّ استدعاء (والعضويّة تتحدّث أيضاً عند كلّ انضمام/إزالة)
+    if (opts && opts.famChats && (opts.synced = (opts.synced || 0) + 1) <= 6) { try { await famChatSync(token, gid, ms); } catch (e) {} }
     for (const m of ms) { const u = m.name.split("/").pop(); if (!hidden.has(u)) add(u, fstr(m, "name"), fbool(m, "anon"), "family", fam); }
   }
   for (const d of await fsList(token, "accounts/" + uid + "/people")) add(d.name.split("/").pop(), fstr(d, "name"), fbool(d, "anon"), "link", null);
@@ -1069,7 +1075,7 @@ async function peopleOf(token, uid) {
 }
 async function opPeopleList(uid, payload, env, claims) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
-  const list = await peopleOf(token, uid);
+  const list = await peopleOf(token, uid, { famChats: true });
   // الصلاحيّة: قائمتي كاملةً (من حُذف يفقد رؤية حضوري) + سطري عند كلٍّ منهم
   const updates = { ["acl/" + uid]: Object.fromEntries(list.map(p => [p.uid, true])) };
   for (const p of list) updates["acl/" + p.uid + "/" + uid] = true;
@@ -1118,6 +1124,266 @@ async function opPeopleRemove(uid, payload, env) {
   return { uid: other, removed: true };   // إن بقيتما في عائلةٍ واحدة يبقى جهةَ اتّصال
 }
 
+/* ---------- 26) المحادثات (C2) ----------
+   chats/{cid}: { type: family|dm|group|saved, members[], names{}, name, familyGroupId, createdTs, createdBy,
+                  last{id,by,type,text,ts}, updatedTs, cnt, readCnt{uid:n}, reads{uid:ts}, delivered{uid:ts}, pinned, disappear }
+   chats/{cid}/days/{YYYYMMDD}: { msgs: { [msgId]: رسالة } } — كلّ رسائل اليوم في وثيقةٍ واحدة (قراءةٌ واحدة لفتح المحادثة)،
+   والتعديل حقلٌ بحقل (msgs.`id`.…) فلا يتعارض إرسالان متزامنان.
+   المعرّفات: fam_<groupId> · dm_<uidأصغر>_<uidأكبر> · sv_<uid> · grp_<…> (C3). */
+const fp = (...segs) => segs.map(s => "`" + String(s).replace(/`/g, "") + "`").join(".");
+const MSG_ID = /^[A-Za-z0-9_]{6,40}$/;
+const MSG_TYPES = ["text", "sticker", "contact", "voice", "image", "video", "file", "poll", "bill", "fund", "tasks", "system"];
+function dayKey(ms) { const d = new Date(ms); return d.getUTCFullYear() + String(d.getUTCMonth() + 1).padStart(2, "0") + String(d.getUTCDate()).padStart(2, "0"); }
+function dmId(a, b) { return "dm_" + [a, b].sort().join("_"); }
+function fsInt(d, k) { const v = d && d.fields && d.fields[k]; return v ? Number(v.integerValue || v.doubleValue || 0) : 0; }
+function fsArr(d, k) { const v = d && d.fields && d.fields[k]; return v && v.arrayValue && v.arrayValue.values ? v.arrayValue.values.map(x => x.stringValue) : []; }
+async function chatDoc(token, cid) { return segOk(cid) ? fsGet(token, "chats/" + cid) : null; }
+async function requireChatMember(token, cid, uid) {
+  const c = await chatDoc(token, cid);
+  if (!c || fbool(c, "deleted")) throw new Error("chat not found");
+  if (fsArr(c, "members").indexOf(uid) < 0) throw new Error("not a member of this chat");
+  return c;
+}
+async function rtdbSetChatMembers(token, cid, members) {
+  try { await rtdbPatch(token, { ["chatm/" + cid]: members.length ? Object.fromEntries(members.map(u => [u, true])) : null }); } catch (e) {}
+}
+/* محادثة العائلة: أعضاؤها = أعضاء العائلة (بلا الهويّات القديمة). تُستدعى عند كلّ تغيّرٍ في العضويّة وفي people.list */
+async function famChatSync(token, gid, knownMembers) {
+  const g = await fsGet(token, "groups/" + gid);
+  const ms = knownMembers || await fsList(token, "groups/" + gid + "/members");
+  const hidden = new Set(ms.map(m => fstr(m, "adoptedFrom")).filter(Boolean));
+  const live = (!g || fbool(g, "deleted")) ? [] : ms.filter(m => !hidden.has(m.name.split("/").pop()));
+  const members = live.map(m => m.name.split("/").pop()).sort();
+  const names = {}; live.forEach(m => { names[m.name.split("/").pop()] = fstr(m, "name") || null; });
+  const cid = "fam_" + gid;
+  const cur = await fsGet(token, "chats/" + cid);
+  const sortObj = o => JSON.stringify(Object.keys(o || {}).sort().map(k => [k, o[k]]));
+  const same = cur && JSON.stringify(fsArr(cur, "members").slice().sort()) === JSON.stringify(members)
+    && sortObj(fsToJs((cur.fields || {}).names || { nullValue: null })) === sortObj(names)
+    && fstr(cur, "name") === (fstr(g, "name") || "عائلتي");
+  if (same) return { cid, changed: false };
+  const fields = { type: { stringValue: "family" }, familyGroupId: { stringValue: gid }, name: { stringValue: fstr(g, "name") || "عائلتي" },
+                   members: toFsValue(members), names: toFsValue(names) };
+  const mask = ["type", "familyGroupId", "name", "members", "names"];
+  if (!cur) { fields.createdTs = { integerValue: String(Date.now()) }; fields.updatedTs = { integerValue: String(Date.now()) }; fields.cnt = { integerValue: "0" }; mask.push("createdTs", "updatedTs", "cnt"); }
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields }, updateMask: { fieldPaths: mask } }]);
+  await rtdbSetChatMembers(token, cid, members);
+  return { cid, changed: true };
+}
+async function sharesContact(token, a, b) {
+  if (await fsGet(token, "accounts/" + a + "/people/" + b)) return true;
+  const mine = (await fsList(token, "accounts/" + a + "/groups")).slice(0, 20);
+  for (const d of mine) {
+    const gid = d.name.split("/").pop();
+    if (await fsGet(token, "groups/" + gid + "/members/" + b) && await fsGet(token, "groups/" + gid + "/members/" + a)) return true;
+  }
+  return false;
+}
+async function opChatOpen(uid, payload, env, claims) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const now = Date.now(), me = memberIdFields(claims);
+  if (payload && payload.saved) {
+    const cid = "sv_" + uid;
+    if (!(await fsGet(token, "chats/" + cid))) {
+      await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { type: { stringValue: "saved" }, members: toFsValue([uid]),
+        names: toFsValue({ [uid]: me.name.stringValue || null }), createdTs: { integerValue: String(now) }, updatedTs: { integerValue: String(now) }, cnt: { integerValue: "0" } } },
+        currentDocument: { exists: false } }]).catch(() => {});
+      await rtdbSetChatMembers(token, cid, [uid]);
+    }
+    return { cid };
+  }
+  const to = payload && payload.to;
+  if (!segOk(to) || to === uid) throw new Error("to required");
+  const cid = dmId(uid, to);
+  const cur = await fsGet(token, "chats/" + cid);
+  if (cur) return { cid };
+  if (!(await sharesContact(token, uid, to))) throw new Error("not a contact");
+  const other = await fsGet(token, "accounts/" + uid + "/people/" + to);
+  let otherName = other ? fstr(other, "name") : null;
+  if (!otherName) {   // من عائلةٍ مشتركة: الاسم من وثيقة العضو
+    for (const d of (await fsList(token, "accounts/" + uid + "/groups")).slice(0, 20)) {
+      const m = await fsGet(token, "groups/" + d.name.split("/").pop() + "/members/" + to); if (m && fstr(m, "name")) { otherName = fstr(m, "name"); break; }
+    }
+  }
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { type: { stringValue: "dm" }, members: toFsValue([uid, to].sort()),
+    names: toFsValue({ [uid]: me.name.stringValue || null, [to]: otherName || null }), createdTs: { integerValue: String(now) }, createdBy: { stringValue: uid },
+    updatedTs: { integerValue: String(now) }, cnt: { integerValue: "0" } } }, currentDocument: { exists: false } }]).catch(() => {});
+  await rtdbSetChatMembers(token, cid, [uid, to]);
+  return { cid };
+}
+function cleanMsg(m, uid, ts) {
+  if (!m || !MSG_ID.test(String(m.id || ""))) throw new Error("bad message id");
+  const type = MSG_TYPES.indexOf(m.type) >= 0 ? m.type : "text";
+  if (type === "system") throw new Error("bad type");
+  const out = { id: m.id, by: uid, ts: ts, type: type };
+  if (m.text != null) out.text = String(m.text).slice(0, type === "sticker" ? 16 : 4000);
+  if (m.reply && MSG_ID.test(String(m.reply.id || ""))) out.reply = { id: m.reply.id, by: segOk(String(m.reply.by || "")) ? m.reply.by : null, text: String(m.reply.text || "").slice(0, 200) };
+  if (m.fwd) out.fwd = true;
+  if (type === "contact" && m.contact && segOk(String(m.contact.uid || ""))) out.contact = { uid: m.contact.uid, name: String(m.contact.name || "").slice(0, 80) };
+  if (Array.isArray(m.mentions)) out.mentions = m.mentions.filter(x => segOk(String(x))).slice(0, 50);
+  if (m.extra && typeof m.extra === "object") out.extra = capVal(m.extra);   // الوسائط والاستطلاعات… (C3/C4)
+  if (out.text === undefined && type === "text") throw new Error("empty message");
+  return out;
+}
+function previewOf(msg) {
+  if (msg.type === "text" || msg.type === "sticker") return (msg.text || "").slice(0, 120);
+  return "";   // العميل يترجم النوع (🎤 رسالة صوتيّة…)
+}
+async function opChatSend(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const cid = payload && payload.cid;
+  const c = await requireChatMember(token, cid, uid);
+  const type = fstr(c, "type");
+  if (type === "dm") {   // الحظر: الطرف الآخر حظرني ⇒ لا تصل (ولا نخبر المرسل — كما في واتساب تبقى ✓ واحدة)
+    const other = fsArr(c, "members").find(x => x !== uid);
+    const pr = await fsGet(token, "accounts/" + other + "/chatprefs/main");
+    const blocked = pr && fstr(pr, "data") ? (JSON.parse(fstr(pr, "data")).blocked || []) : [];
+    if (blocked.indexOf(uid) >= 0) return { ts: Date.now(), day: null, blocked: true };
+  }
+  if (type === "group" && fbool(c, "adminsOnly")) {
+    if (fsArr(c, "admins").indexOf(uid) < 0) throw new Error("only admins can send here");
+  }
+  const ts = Date.now(), day = dayKey(ts);
+  const msg = cleanMsg(payload.msg, uid, ts);
+  const dis = fsInt(c, "disappear");
+  if (dis > 0) msg.exp = ts + dis * 1000;
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day, fields: { msgs: { mapValue: { fields: { [msg.id]: toFsValue(msg) } } } } },
+      updateMask: { fieldPaths: [fp("msgs", msg.id)] } },
+    { update: { name: DOC_ROOT + "/chats/" + cid, fields: {
+        last: toFsValue({ id: msg.id, by: uid, type: msg.type, text: previewOf(msg), ts: ts, day: day }),
+        updatedTs: { integerValue: String(ts) },
+        reads: { mapValue: { fields: { [uid]: { integerValue: String(ts) } } } },
+        delivered: { mapValue: { fields: { [uid]: { integerValue: String(ts) } } } } } },
+      updateMask: { fieldPaths: ["last", "updatedTs", fp("reads", uid), fp("delivered", uid)] },
+      updateTransforms: [{ fieldPath: "cnt", increment: { integerValue: "1" } }, { fieldPath: fp("readCnt", uid), increment: { integerValue: "1" } }],
+      currentDocument: { exists: true } },
+  ]);
+  return { ts, day, id: msg.id };
+}
+async function dayMsg(token, cid, day, id) {
+  if (!/^\d{8}$/.test(String(day || "")) || !MSG_ID.test(String(id || ""))) throw new Error("bad message ref");
+  const d = await fsGet(token, "chats/" + cid + "/days/" + day);
+  const v = d && d.fields && d.fields.msgs && d.fields.msgs.mapValue.fields && d.fields.msgs.mapValue.fields[id];
+  if (!v) throw new Error("message not found");
+  return fsToJs(v);
+}
+async function opChatEdit(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const { cid, day, id } = payload || {};
+  await requireChatMember(token, cid, uid);
+  const m = await dayMsg(token, cid, day, id);
+  if (m.by !== uid) throw new Error("only the sender can edit");
+  if (m.del) throw new Error("message deleted");
+  const text = String((payload && payload.text) || "").slice(0, 4000);
+  if (!text.trim()) throw new Error("empty message");
+  const now = Date.now();
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day,
+    fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { text: { stringValue: text }, edited: { integerValue: String(now) } } } } } } } } },
+    updateMask: { fieldPaths: [fp("msgs", id, "text"), fp("msgs", id, "edited")] } }]);
+  return { edited: now };
+}
+async function opChatDelete(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const { cid, day, id } = payload || {};
+  const c = await requireChatMember(token, cid, uid);
+  const m = await dayMsg(token, cid, day, id);
+  const admin = fstr(c, "type") === "group" && fsArr(c, "admins").indexOf(uid) >= 0;
+  if (m.by !== uid && !admin) throw new Error("only the sender can delete for everyone");
+  // الحذف للجميع: يبقى أثرٌ «حُذفت هذه الرسالة» بلا محتوى (والوسائط تُحذف في C4)
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day,
+    fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { del: { booleanValue: true }, delBy: { stringValue: uid } } } } } } } } },
+    updateMask: { fieldPaths: [fp("msgs", id, "del"), fp("msgs", id, "delBy"), fp("msgs", id, "text"), fp("msgs", id, "extra"), fp("msgs", id, "reply"), fp("msgs", id, "contact"), fp("msgs", id, "re")] } }]);
+  const lastId = c.fields.last && c.fields.last.mapValue && c.fields.last.mapValue.fields && c.fields.last.mapValue.fields.id && c.fields.last.mapValue.fields.id.stringValue;
+  if (lastId === id) await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { last: { mapValue: { fields: { del: { booleanValue: true }, text: { stringValue: "" } } } } } },
+    updateMask: { fieldPaths: ["last.del", "last.text"] } }]);
+  return { deleted: true };
+}
+async function opChatReact(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const { cid, day, id } = payload || {};
+  await requireChatMember(token, cid, uid);
+  if (!/^\d{8}$/.test(String(day || "")) || !MSG_ID.test(String(id || ""))) throw new Error("bad message ref");
+  const emoji = payload.emoji ? String(payload.emoji).slice(0, 16) : null;
+  const f = emoji ? { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { re: { mapValue: { fields: { [uid]: { stringValue: emoji } } } } } } } } } } } : {};
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day, fields: f },
+    updateMask: { fieldPaths: [fp("msgs", id, "re", uid)] }, currentDocument: { exists: true } }]);
+  return { ok: true };
+}
+async function opChatPin(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const cid = payload && payload.cid;
+  await requireChatMember(token, cid, uid);
+  const id = payload.id && MSG_ID.test(String(payload.id)) ? String(payload.id) : null;
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { pinned: id ? { stringValue: id } : { nullValue: null } } }, updateMask: { fieldPaths: ["pinned"] } }]);
+  return { pinned: id };
+}
+// «وصلت/قُرئت»: كلّ مستخدمٍ يكتب حقوله فقط (delivered.me · reads.me · readCnt.me). حتّى ٣٠ محادثة في طلبٍ واحد.
+async function opChatMark(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const marks = (payload && Array.isArray(payload.marks)) ? payload.marks.slice(0, 30) : [];
+  const writes = [];
+  for (const mk of marks) {
+    if (!mk || !segOk(String(mk.cid || ""))) continue;
+    const fields = {}, mask = [];
+    if (Number.isFinite(mk.d)) { fields.delivered = { mapValue: { fields: { [uid]: { integerValue: String(Math.floor(mk.d)) } } } }; mask.push(fp("delivered", uid)); }
+    if (Number.isFinite(mk.r)) { fields.reads = { mapValue: { fields: { [uid]: { integerValue: String(Math.floor(mk.r)) } } } }; mask.push(fp("reads", uid)); }
+    if (Number.isFinite(mk.rc)) { fields.readCnt = { mapValue: { fields: { [uid]: { integerValue: String(Math.floor(mk.rc)) } } } }; mask.push(fp("readCnt", uid)); }
+    if (mask.length) writes.push({ update: { name: DOC_ROOT + "/chats/" + mk.cid, fields }, updateMask: { fieldPaths: mask }, currentDocument: { exists: true } });
+  }
+  // ⛔ لا نتحقّق من العضويّة هنا (تكلّف قراءةً لكلّ محادثة): الكاتب لا يكتب إلّا حقول نفسه، والمحادثة يجب أن توجد
+  for (const w of writes) { try { await fsCommit(token, [w]); } catch (e) {} }
+  return { marked: writes.length };
+}
+async function opChatSettings(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const cid = payload && payload.cid;
+  const c = await requireChatMember(token, cid, uid);
+  if (fstr(c, "type") === "group" && fsArr(c, "admins").indexOf(uid) < 0) throw new Error("only admins can change this");
+  const allowed = [0, 3600, 86400, 604800, 7776000];
+  const dis = Number(payload.disappear || 0);
+  if (allowed.indexOf(dis) < 0) throw new Error("bad value");
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { disappear: { integerValue: String(dis) }, disappearBy: { stringValue: uid } } }, updateMask: { fieldPaths: ["disappear", "disappearBy"] } }]);
+  return { disappear: dis };
+}
+// إعداداتي في المحادثات تتزامن بين أجهزتي: أرشفة، تثبيت، كتم، قفل، مجلّدات، سمات، نغمات، مميّزة، محذوفة عندي، محظورون
+const PREF_KEYS = ["archived", "pinned", "muted", "locked", "folders", "folderOf", "themes", "tones", "starred", "hidden", "blocked", "drafts", "cleared"];
+async function opChatPrefs(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const path = "accounts/" + uid + "/chatprefs/main";
+  const cur = await fsGet(token, path);
+  let data = {}; try { data = cur && fstr(cur, "data") ? JSON.parse(fstr(cur, "data")) : {}; } catch (e) { data = {}; }
+  const set = payload && payload.set;
+  if (set && typeof set === "object") {
+    for (const k of PREF_KEYS) if (k in set) data[k] = capVal(set[k]);
+    const json = JSON.stringify(data);
+    if (json.length > 200000) throw new Error("prefs too large");
+    await fsCommit(token, [{ update: { name: DOC_ROOT + "/" + path, fields: { data: { stringValue: json }, ts: { integerValue: String(Date.now()) } } } }]);
+  }
+  return { prefs: data };
+}
+/* تنظيف الرسائل المؤقّتة (Cron كلّ ١٥ دقيقة): محادثاتٌ فيها disappear > 0 ⇒ يُحذف ما انتهى أجله */
+async function cleanupDisappearing(env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "chats" }], where: { fieldFilter: { field: { fieldPath: "disappear" }, op: "GREATER_THAN", value: { integerValue: "0" } } }, limit: 10 } }) });
+  const rows = (await res.json() || []).filter(r => r.document).map(r => r.document);
+  const now = Date.now(); let removed = 0;
+  for (const c of rows) {
+    const cid = c.name.split("/").pop(), dis = fsInt(c, "disappear");
+    const days = await fsList(token, "chats/" + cid + "/days");
+    for (const d of days) {
+      const key = d.name.split("/").pop();
+      const dayEnd = Date.UTC(+key.slice(0, 4), +key.slice(4, 6) - 1, +key.slice(6, 8)) + 86400000;
+      if (dayEnd + dis * 1000 < now) { await fsCommit(token, [{ delete: d.name }]); continue; }
+      const msgs = (d.fields && d.fields.msgs && d.fields.msgs.mapValue.fields) || {};
+      const gone = Object.keys(msgs).filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && m.exp < now; });
+      if (gone.length) { await fsCommit(token, [{ update: { name: d.name, fields: {} }, updateMask: { fieldPaths: gone.map(id => fp("msgs", id)) } }]); removed += gone.length; }
+    }
+  }
+  return { chats: rows.length, removed };
+}
+
 /* ---------- 23) schedules.sync — مواعيد المستخدم الشخصيّة بين أجهزته ----------
    accounts/{uid}/schedules/{gid} = { data: JSON { id: item } }. دمجٌ موعداً موعداً: لكلّ موعد _u (وقت تعديله)،
    والأحدث يغلب؛ الحذف علامة { id, _deleted, _u } حتّى لا يعود المحذوف من جهازٍ آخر. */
@@ -1161,7 +1427,7 @@ function rateOk(uid) {
   return e.n <= RL_MAX;
 }
 // كلّ معرّفٍ يدخل مسار Firestore: بلا «/» ولا «..» ولا طولٍ مفرط
-const ID_KEYS = ["groupId", "personId", "eventId", "relationId", "reviewId", "token", "uid", "from", "to"];
+const ID_KEYS = ["groupId", "personId", "eventId", "relationId", "reviewId", "token", "uid", "from", "to", "cid"];
 function badIds(p) {
   if (!p || typeof p !== "object") return null;
   for (const k of ID_KEYS) if (k in p && p[k] != null && !segOk(String(p[k]))) return k;
@@ -1170,6 +1436,10 @@ function badIds(p) {
 }
 
 export default {
+  // Cron (wrangler.toml: [triggers] crons = ["*/15 * * * *"]): حذف الرسائل المؤقّتة المنتهية
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(cleanupDisappearing(env).catch(e => console.log("cleanup:", e && e.message)));
+  },
   async fetch(request, env) {
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
     try {
@@ -1258,6 +1528,15 @@ export default {
         const r = await opRelationRemove(uid, body.payload, env);
         return json({ ok: true, uid, op, ...r });
       }
+      if (op === "chat.open") { const r = await opChatOpen(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "chat.send") { const r = await opChatSend(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.edit") { const r = await opChatEdit(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.delete") { const r = await opChatDelete(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.react") { const r = await opChatReact(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.pin") { const r = await opChatPin(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.mark") { const r = await opChatMark(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.settings") { const r = await opChatSettings(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.prefs") { const r = await opChatPrefs(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "people.list") { const r = await opPeopleList(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "people.invite") { const r = await opPeopleInvite(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "people.accept") { const r = await opPeopleAccept(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
