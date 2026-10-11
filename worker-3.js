@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v22-push";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v23-calls";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1738,6 +1738,53 @@ async function syncMutedBy(token, uid, before, after) {
   }
 }
 
+/* ---------- 29) المكالمات (C6) ----------
+   الإشارات (العرض/الردّ/المرشّحون) في Realtime Database مباشرةً بين الجهازين (calls/{id} + inbox/{uid}) — القواعد تقصرها على
+   جهات الاتّصال (acl). الـWorker: بيانات TURN · رنينٌ عبر الإشعارات حين يكون التطبيق مغلقاً · إشعار «مكالمة فائتة». */
+let iceCache = null, iceAt = 0;
+async function opRtcIce(uid, payload, env) {
+  const stun = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+  if (!env.METERED_KEY || !env.METERED_APP) return { iceServers: stun, turn: false };
+  if (iceCache && Date.now() - iceAt < 30 * 60 * 1000) return { iceServers: iceCache, turn: true };
+  try {
+    const res = await fetch("https://" + env.METERED_APP + ".metered.live/api/v1/turn/credentials?apiKey=" + encodeURIComponent(env.METERED_KEY));
+    const list = await res.json();
+    if (!res.ok || !Array.isArray(list)) throw new Error("metered " + res.status);
+    iceCache = stun.concat(list); iceAt = Date.now();
+    return { iceServers: iceCache, turn: true };
+  } catch (e) { return { iceServers: stun, turn: false, err: String(e.message || e) }; }
+}
+async function opCallRing(uid, payload, env, claims, ctx) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const to = payload && payload.to, callId = String((payload && payload.callId) || "");
+  if (!segOk(String(to || "")) || !/^[A-Za-z0-9_-]{6,40}$/.test(callId)) throw new Error("bad call");
+  if (!(await sharesContact(token, uid, to))) throw new Error("not a contact");
+  // المحظور لا يرنّ عند من حظره
+  const pr = await fsGet(token, "accounts/" + to + "/chatprefs/main");
+  const blocked = pr && fstr(pr, "data") ? (JSON.parse(fstr(pr, "data")).blocked || []) : [];
+  if (blocked.indexOf(uid) >= 0) return { sent: 0 };
+  const name = memberIdFields(claims).name.stringValue || "سوا";
+  const video = payload.type === "video";
+  const job = pushTo(token, [to], strData({ t: "call", call: callId, from: uid, cid: dmId(uid, to), type: video ? "video" : "audio",
+    title: name, body: video ? "📹 مكالمة فيديو واردة" : "📞 مكالمة صوتيّة واردة", ts: Date.now() }));
+  if (ctx && ctx.waitUntil) { ctx.waitUntil(job); return { queued: true }; }
+  return { sent: await job };
+}
+async function opCallMissed(uid, payload, env, claims, ctx) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const to = payload && payload.to;
+  if (!segOk(String(to || ""))) throw new Error("bad call");
+  if (!(await sharesContact(token, uid, to))) throw new Error("not a contact");
+  const pr = await fsGet(token, "accounts/" + to + "/chatprefs/main");
+  const blocked = pr && fstr(pr, "data") ? (JSON.parse(fstr(pr, "data")).blocked || []) : [];
+  if (blocked.indexOf(uid) >= 0) return { sent: 0 };
+  const name = memberIdFields(claims).name.stringValue || "سوا";
+  const job = pushTo(token, [to], strData({ t: "missed", from: uid, cid: dmId(uid, to), title: name,
+    body: payload.type === "video" ? "📹 مكالمة فيديو فائتة" : "📞 مكالمة فائتة", ts: Date.now() }));
+  if (ctx && ctx.waitUntil) { ctx.waitUntil(job); return { queued: true }; }
+  return { sent: await job };
+}
+
 /* ---------- 23) schedules.sync — مواعيد المستخدم الشخصيّة بين أجهزته ----------
    accounts/{uid}/schedules/{gid} = { data: JSON { id: item } }. دمجٌ موعداً موعداً: لكلّ موعد _u (وقت تعديله)،
    والأحدث يغلب؛ الحذف علامة { id, _deleted, _u } حتّى لا يعود المحذوف من جهازٍ آخر. */
@@ -1897,6 +1944,9 @@ export default {
       if (op === "chat.task") { const r = await opChatTask(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.open") { const r = await opChatOpen(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "chat.send") { const r = await opChatSend(uid, body.payload, env, ctx); return json({ ok: true, ...r }); }
+      if (op === "rtc.ice") { const r = await opRtcIce(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "call.ring") { const r = await opCallRing(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "call.missed") { const r = await opCallMissed(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "push.register") { const r = await opPushRegister(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "push.unregister") { const r = await opPushUnregister(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.edit") { const r = await opChatEdit(uid, body.payload, env); return json({ ok: true, ...r }); }
