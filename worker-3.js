@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v26-profile";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v26b-nick";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1396,7 +1396,16 @@ async function opChatSettings(uid, payload, env) {
   return { disappear: dis };
 }
 // إعداداتي في المحادثات تتزامن بين أجهزتي: أرشفة، تثبيت، كتم، قفل، مجلّدات، سمات، نغمات، مميّزة، محذوفة عندي، محظورون
-const PREF_KEYS = ["archived", "pinned", "muted", "locked", "folders", "folderOf", "themes", "tones", "starred", "hidden", "blocked", "drafts", "cleared", "broadcasts"];
+const PREF_KEYS = ["archived", "pinned", "muted", "locked", "folders", "folderOf", "themes", "tones", "starred", "hidden", "blocked", "drafts", "cleared", "broadcasts", "nick"];
+// التسميات: حتّى ٣٠٠ جهة اتّصال، كلّ اسم ≤ ٤٠ حرفاً
+function capNick(v) {
+  const o = {}; let n = 0;
+  if (v && typeof v === "object" && !Array.isArray(v)) for (const k in v) {
+    if (++n > 300) break;
+    if (segOk(k) && typeof v[k] === "string" && v[k].trim()) o[k.slice(0, 128)] = v[k].trim().slice(0, 40);
+  }
+  return o;
+}
 async function opChatPrefs(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const path = "accounts/" + uid + "/chatprefs/main";
@@ -1405,7 +1414,7 @@ async function opChatPrefs(uid, payload, env) {
   const set = payload && payload.set;
   if (set && typeof set === "object") {
     if ("muted" in set) await syncMutedBy(token, uid, data.muted, set.muted);
-    for (const k of PREF_KEYS) if (k in set) data[k] = capVal(set[k]);
+    for (const k of PREF_KEYS) if (k in set) data[k] = k === "nick" ? capNick(set[k]) : capVal(set[k]);
     const json = JSON.stringify(data);
     if (json.length > 200000) throw new Error("prefs too large");
     await fsCommit(token, [{ update: { name: DOC_ROOT + "/" + path, fields: { data: { stringValue: json }, ts: { integerValue: String(Date.now()) } } } }]);
