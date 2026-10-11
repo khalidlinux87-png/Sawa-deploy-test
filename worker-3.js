@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v23-calls";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v24-gcalls";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1738,6 +1738,244 @@ async function syncMutedBy(token, uid, before, after) {
   }
 }
 
+/* ---------- 30) المكالمات الجماعيّة (C7) ----------
+   الخادم وحده ينشئ gcalls/{gid} ويحدّد من يُسمح له (allow)؛ الأجهزة تنضمّ وتتبادل الإشارات مباشرةً (قواعد RTDB).
+   gcur/{cid} يشير للمكالمة الجارية في محادثةٍ جماعيّة (شريط «انضمام»). */
+async function rtdbGet(token, path, q) {
+  const res = await fetch(RTDB_URL + "/" + path + ".json?access_token=" + encodeURIComponent(token) + (q || ""));
+  if (!res.ok) throw new Error("rtdb get: " + res.status);
+  return res.json();
+}
+function gcNewId() { return "g" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+async function blockedBy(token, target, uid) {
+  const pr = await fsGet(token, "accounts/" + target + "/chatprefs/main");
+  const blocked = pr && fstr(pr, "data") ? (JSON.parse(fstr(pr, "data")).blocked || []) : [];
+  return blocked.indexOf(uid) >= 0;
+}
+async function opGcallStart(uid, payload, env, claims, ctx) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  payload = payload || {};
+  let type = payload.type === "video" ? "video" : "audio";
+  const me = memberIdFields(claims).name.stringValue || "سوا";
+  let allow = [uid], ring = [], cid = null, title = "", gid = null, approval = false, by = uid, muted = [], isSched = false;
+  if (payload.cid) {
+    cid = String(payload.cid);
+    const c = await requireChatMember(token, cid, uid);
+    const t = fstr(c, "type");
+    if (t !== "group" && t !== "family") throw new Error("not a group chat");
+    title = fstr(c, "name") || "مجموعة";
+    allow = fsArr(c, "members"); muted = fsArr(c, "mutedBy");
+    // مكالمةٌ جارية في هذه المحادثة؟ ⇒ انضمّ إليها (ويُضاف المتأخّر إلى المسموح لهم)
+    const curp = await rtdbGet(token, "gcur/" + cid);
+    if (curp && curp.gid && segOk(String(curp.gid))) {
+      const live = await rtdbGet(token, "gcalls/" + curp.gid);
+      if (live && live.members && Object.keys(live.members).length) {
+        if (!(live.allow && live.allow[uid])) await rtdbPatch(token, { ["gcalls/" + curp.gid + "/allow/" + uid]: true });
+        return { gid: curp.gid, joined: true, type: live.type, title: live.title || title, by: live.by, approval: !!live.approval, cid };
+      }
+      await rtdbPatch(token, { ["gcalls/" + curp.gid]: null });   // مؤشّرٌ لمكالمةٍ انتهت
+    }
+    ring = allow.filter(u => u !== uid);
+  } else if (payload.sched) {
+    const sid = String(payload.sched);
+    if (!/^[a-z0-9]{6,32}$/.test(sid)) throw new Error("bad id: sched");
+    const s = await fsGet(token, "scheds/" + sid);
+    if (!s) throw new Error("schedule not found");
+    const users = fsArr(s, "users");
+    if (users.indexOf(uid) < 0) throw new Error("not invited");
+    gid = "s" + sid; isSched = true;
+    const live = await rtdbGet(token, "gcalls/" + gid);
+    if (live && live.members && Object.keys(live.members).length)
+      return { gid, joined: true, type: live.type, title: live.title, by: live.by, approval: !!live.approval, cid: live.cid || null };
+    allow = users; by = fstr(s, "by") || uid; approval = fbool(s, "approval");
+    title = fstr(s, "title") || fstr(s, "toName") || "مكالمة مجدولة";
+    type = fstr(s, "type") === "video" ? "video" : "audio";
+    cid = fstr(s, "cid") || null;
+    ring = users.filter(u => u !== uid);
+  } else if (Array.isArray(payload.to)) {
+    const to = [...new Set(payload.to.map(String))].filter(u => u !== uid).slice(0, 7);
+    if (!to.length || to.some(u => !segOk(u))) throw new Error("bad call");
+    for (const u of to) if (!(await sharesContact(token, uid, u))) throw new Error("not a contact");
+    const quiet = Array.isArray(payload.quiet) ? payload.quiet.map(String) : [];
+    allow = [uid].concat(to);
+    ring = to.filter(u => quiet.indexOf(u) < 0);
+    // الإشعار لا يصل لمن حظرك (الرنين داخل التطبيق يُسقطه جهازه أيضاً) — يُفحص لمن سيصلهم إشعار فقط
+    const pushable = [];
+    for (const u of ring.slice(0, 4)) if (!(await blockedBy(token, u, uid))) pushable.push(u);
+    payload.__push = pushable;
+    title = typeof payload.title === "string" ? payload.title.slice(0, 80) : "";
+  } else throw new Error("bad call");
+  if (allow.indexOf(uid) < 0) allow.unshift(uid);
+  allow = allow.slice(0, 64);
+  gid = gid || gcNewId();
+  const now = Date.now();
+  const node = { by, type, title: String(title || "").slice(0, 80), ts: now, approval: !!approval, allow: Object.fromEntries(allow.map(u => [u, true])) };
+  if (cid) node.cid = cid;
+  const upd = { ["gcalls/" + gid]: node };
+  if (cid && !isSched) upd["gcur/" + cid] = { gid, type, by: uid, ts: now };
+  for (const u of ring.slice(0, 63)) upd["inbox/" + u + "/" + gid] = { from: uid, fromName: me, type, ts: now, gid, title: node.title };
+  await rtdbPatch(token, upd);
+  // إشعار رنين لمن لم يكتموا (≤ ١٠ — حدّ الطلبات الفرعيّة)
+  // ≤ ١٠ للمجموعة، ≤ ٤ لجهات الاتّصال (حدّ ٥٠ طلباً فرعيّاً لكلّ طلب في خطّة Workers المجّانيّة)
+  const targets = payload.__push || ring.filter(u => muted.indexOf(u) < 0).slice(0, 10);
+  if (targets.length) {
+    const body = (type === "video" ? "📹 " : "📞 ") + (cid || isSched ? me + " بدأ مكالمة جماعيّة" : me + " يدعوك لمكالمة جماعيّة");
+    const job = pushTo(token, targets, strData({ t: "call", call: gid, gid, from: uid, fromName: me, cid: cid || "", type, title: node.title || me, body, ts: now }));
+    if (ctx && ctx.waitUntil) ctx.waitUntil(job.catch(() => {})); else await job;
+  }
+  return { gid, joined: false, type, title: node.title, by, approval: !!approval, cid };
+}
+async function opGcallAdd(uid, payload, env, claims, ctx) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const gid = String((payload && payload.gid) || "");
+  if (!/^[gs][a-z0-9]{6,40}$/.test(gid)) throw new Error("bad id: gid");
+  const g = await rtdbGet(token, "gcalls/" + gid);
+  if (!g || !g.allow || !g.allow[uid]) throw new Error("not in this call");
+  const to = [...new Set(((payload && payload.to) || []).map(String))].filter(u => u !== uid).slice(0, 4);
+  if (!to.length || to.some(u => !segOk(u))) throw new Error("bad call");
+  let chatMembers = [];
+  if (g.cid) { const c = await chatDoc(token, g.cid); chatMembers = c ? fsArr(c, "members") : []; }
+  for (const u of to) if (chatMembers.indexOf(u) < 0 && !(await sharesContact(token, uid, u))) throw new Error("not a contact");
+  const me = memberIdFields(claims).name.stringValue || "سوا", now = Date.now();
+  const upd = {};
+  for (const u of to) { upd["gcalls/" + gid + "/allow/" + u] = true; upd["inbox/" + u + "/" + gid] = { from: uid, fromName: me, type: g.type, ts: now, gid, title: g.title || "" }; }
+  await rtdbPatch(token, upd);
+  const job = pushTo(token, to, strData({ t: "call", call: gid, gid, from: uid, fromName: me, cid: g.cid || "", type: g.type, title: g.title || me,
+    body: (g.type === "video" ? "📹 " : "📞 ") + me + " يدعوك لمكالمة جماعيّة", ts: now }));
+  if (ctx && ctx.waitUntil) ctx.waitUntil(job.catch(() => {})); else await job;
+  return { added: to.length };
+}
+
+/* ---------- 31) المكالمات المجدولة (C7) ----------
+   scheds/{id} = { by, byName, title, toName, type, at, end, remind, rq (وقت التذكير، 0 بعد الإرسال), approval, users[], cid, ts }
+   Cron كلّ ٥ دقائق: تذكيرٌ بإشعار لكلّ المدعوّين حين يحين rq، وحذف المواعيد المنتهية منذ يومين. */
+const REMINDS = [5, 15, 30, 60];
+function schedOut(d) {
+  const f = d.fields || {}, o = {};
+  for (const k in f) o[k] = fsToJs(f[k]);
+  o.id = d.name.split("/").pop();
+  delete o.rq;
+  return o;
+}
+async function opSchedSet(uid, payload, env, claims, ctx) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const p = payload || {}, now = Date.now();
+  let id = p.id ? String(p.id) : (now.toString(36) + Math.random().toString(36).slice(2, 8));
+  if (!/^[a-z0-9]{6,32}$/.test(id)) throw new Error("bad id: sched");
+  const old = p.id ? await fsGet(token, "scheds/" + id) : null;
+  if (old && fstr(old, "by") !== uid) throw new Error("only the organizer can edit");
+  const at = Math.round(Number(p.at)), end = Math.round(Number(p.end) || at + 1800000);
+  if (!isFinite(at) || at < now - 3600000 || at > now + 400 * 86400000) throw new Error("bad time");
+  const remind = REMINDS.indexOf(Number(p.remind)) >= 0 ? Number(p.remind) : 15;
+  let users = [uid], cid = null;
+  if (p.cid) {
+    cid = String(p.cid);
+    const c = await requireChatMember(token, cid, uid);
+    if (["group", "family"].indexOf(fstr(c, "type")) < 0) throw new Error("not a group chat");
+    users = fsArr(c, "members").slice(0, 64);
+  } else {
+    const to = [...new Set((Array.isArray(p.to) ? p.to : []).map(String))].filter(u => u !== uid).slice(0, 7);
+    if (!to.length || to.some(u => !segOk(u))) throw new Error("bad call");
+    for (const u of to) if (!(await sharesContact(token, uid, u))) throw new Error("not a contact");
+    users = [uid].concat(to);
+  }
+  if (users.indexOf(uid) < 0) users.unshift(uid);
+  const me = memberIdFields(claims).name.stringValue || "سوا";
+  const item = { by: uid, byName: me, title: String(p.title || "").slice(0, 120), toName: String(p.toName || "").slice(0, 80),
+    type: p.type === "video" ? "video" : "audio", at, end: Math.max(end, at + 60000), remind, approval: !!p.approval, users, ts: now };
+  if (cid) item.cid = cid;
+  const rq = at - remind * 60000;
+  const fields = {}; for (const k in item) fields[k] = toFsValue(item[k]);
+  fields.rq = { integerValue: String(Math.max(rq, 1)) };
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/scheds/" + id, fields } }]);
+  if (!old) {   // إشعار الدعوة للمدعوّين
+    const others = users.filter(u => u !== uid).slice(0, 8);
+    if (others.length) {
+      const job = pushTo(token, others, strData({ t: "sched", sid: id, cid: cid || "", title: "📅 " + me + " دعاك لمكالمة",
+        body: (item.type === "video" ? "مكالمة فيديو" : "مكالمة صوتيّة") + (item.title ? " · " + item.title : "") + " — افتح «المكالمات المجدولة»", ts: now }));
+      if (ctx && ctx.waitUntil) ctx.waitUntil(job.catch(() => {})); else await job;
+    }
+  }
+  return { item: Object.assign({ id }, item) };
+}
+async function opSchedList(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "scheds" }],
+      where: { fieldFilter: { field: { fieldPath: "users" }, op: "ARRAY_CONTAINS", value: { stringValue: uid } } }, limit: 60 } }) });
+  const data = await res.json();
+  if (!res.ok) throw new Error("firestore query: " + JSON.stringify(data));
+  const now = Date.now();
+  const items = (data || []).filter(r => r.document).map(r => schedOut(r.document)).filter(s => (s.end || s.at) > now - 86400000)
+    .sort((a, b) => a.at - b.at);
+  return { items };
+}
+async function opSchedDelete(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const id = String((payload && payload.id) || "");
+  if (!/^[a-z0-9]{6,32}$/.test(id)) throw new Error("bad id: sched");
+  const d = await fsGet(token, "scheds/" + id);
+  if (!d) return { deleted: false };
+  if (fstr(d, "by") === uid) {
+    await fsCommit(token, [{ delete: d.name }]);
+    return { deleted: true };
+  }
+  // مدعوّ: يزيل نفسه من القائمة فقط
+  if (fsArr(d, "users").indexOf(uid) < 0) return { deleted: false };
+  await fsCommit(token, [{ transform: { document: d.name, fieldTransforms: [{ fieldPath: "users", removeAllFromArray: { values: [{ stringValue: uid }] } }] } }]);
+  return { left: true };
+}
+function minsAr(n) { return n === 1 ? "دقيقة" : n === 2 ? "دقيقتين" : n <= 10 ? n + " دقائق" : n + " دقيقة"; }
+async function schedReminders(env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const now = Date.now();
+  const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "scheds" }], where: { compositeFilter: { op: "AND", filters: [
+      { fieldFilter: { field: { fieldPath: "rq" }, op: "GREATER_THAN", value: { integerValue: "0" } } },
+      { fieldFilter: { field: { fieldPath: "rq" }, op: "LESS_THAN_OR_EQUAL", value: { integerValue: String(now + 150000) } } }] } }, limit: 3 } }) });
+  const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+  let sent = 0;
+  for (const d of rows.slice(0, 1)) {   // واحدٌ لكلّ تشغيل (حدّ الطلبات الفرعيّة) — الباقي في التشغيل التالي
+    // أوّلاً: علّمه مُرسَلاً (لا تكرار لو تعثّر الإرسال)
+    await fsCommit(token, [{ update: { name: d.name, fields: { rq: { integerValue: "0" } } }, updateMask: { fieldPaths: ["rq"] } }]);
+    const at = fsInt(d, "at");
+    if (at < now - 10 * 60000) continue;   // فات موعده
+    const mins = Math.max(1, Math.round((at - now) / 60000));
+    const title = fstr(d, "title") || fstr(d, "toName") || "";
+    sent += await pushTo(token, fsArr(d, "users").slice(0, 8), strData({ t: "sched", sid: d.name.split("/").pop(), cid: fstr(d, "cid") || "",
+      title: "⏰ تذكير: " + (fstr(d, "type") === "video" ? "مكالمة فيديو" : "مكالمة صوتيّة") + (title ? " · " + title : ""),
+      body: at > now + 60000 ? "تبدأ بعد " + minsAr(mins) + " — من «المكالمات المجدولة» اضغط «ابدأ الآن»" : "حان الموعد — افتح «المكالمات المجدولة» وانضمّ", ts: now }));
+  }
+  return { reminders: rows.length, sent };
+}
+async function cleanupCalls(env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const now = Date.now(), upd = {};
+  let n = 0;
+  // ١:١ قديمة (لم يحذفها المتّصل) · جماعيّة بلا أحد أو أقدم من ١٢ ساعة
+  try {
+    const calls = await rtdbGet(token, "calls", '&orderBy="ts"&endAt=' + (now - 3600000) + "&limitToFirst=30");
+    for (const k in (calls || {})) { upd["calls/" + k] = null; n++; }
+  } catch (e) {}
+  try {
+    const gs = await rtdbGet(token, "gcalls", '&orderBy="ts"&endAt=' + (now - 2 * 3600000) + "&limitToFirst=20");
+    for (const k in (gs || {})) {
+      const g = gs[k] || {};
+      if (!g.members || now - (g.ts || 0) > 12 * 3600000) { upd["gcalls/" + k] = null; if (g.cid) upd["gcur/" + g.cid] = null; n++; }
+    }
+  } catch (e) {}
+  // المواعيد المنتهية منذ يومين
+  try {
+    const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "scheds" }], where: { fieldFilter: { field: { fieldPath: "end" }, op: "LESS_THAN", value: { integerValue: String(now - 2 * 86400000) } } }, limit: 10 } }) });
+    const old = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+    if (old.length) await fsCommit(token, old.map(d => ({ delete: d.name })));
+    n += old.length;
+  } catch (e) {}
+  if (Object.keys(upd).length) await rtdbPatch(token, upd);
+  return { cleaned: n };
+}
+
 /* ---------- 29) المكالمات (C6) ----------
    الإشارات (العرض/الردّ/المرشّحون) في Realtime Database مباشرةً بين الجهازين (calls/{id} + inbox/{uid}) — القواعد تقصرها على
    جهات الاتّصال (acl). الـWorker: بيانات TURN · رنينٌ عبر الإشعارات حين يكون التطبيق مغلقاً · إشعار «مكالمة فائتة». */
@@ -1837,9 +2075,17 @@ function badIds(p) {
 }
 
 export default {
-  // Cron (wrangler.toml: [triggers] crons = ["*/15 * * * *"]): حذف الرسائل المؤقّتة المنتهية
+  // Cron (wrangler.toml: [triggers] crons = ["*/5 * * * *"]): تذكيرات المواعيد كلّ تشغيل؛ والتنظيف بالتناوب
+  // (حدّ ٥٠ طلباً فرعيّاً لكلّ تشغيل: لا تنظيف في تشغيلٍ أرسل تذكيراً)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(cleanupDisappearing(env).catch(e => console.log("cleanup:", e && e.message)));
+    ctx.waitUntil((async () => {
+      let r = { reminders: 0 };
+      try { r = await schedReminders(env); } catch (e) { console.log("reminders:", e && e.message); }
+      if (r.reminders) return;
+      const slot = Math.floor(new Date(event.scheduledTime || Date.now()).getUTCMinutes() / 5) % 3;
+      if (slot === 0) await cleanupDisappearing(env).catch(e => console.log("cleanup:", e && e.message));
+      else if (slot === 1) await cleanupCalls(env).catch(e => console.log("calls cleanup:", e && e.message));
+    })());
   },
   async fetch(request, env, ctx) {
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
@@ -1946,6 +2192,11 @@ export default {
       if (op === "chat.send") { const r = await opChatSend(uid, body.payload, env, ctx); return json({ ok: true, ...r }); }
       if (op === "rtc.ice") { const r = await opRtcIce(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "call.ring") { const r = await opCallRing(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "gcall.start") { const r = await opGcallStart(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "gcall.add") { const r = await opGcallAdd(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "sched.set") { const r = await opSchedSet(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "sched.list") { const r = await opSchedList(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "sched.delete") { const r = await opSchedDelete(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "call.missed") { const r = await opCallMissed(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "push.register") { const r = await opPushRegister(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "push.unregister") { const r = await opPushUnregister(uid, body.payload, env); return json({ ok: true, ...r }); }
