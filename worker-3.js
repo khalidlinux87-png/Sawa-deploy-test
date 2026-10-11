@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v20-groups";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v21-media";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1132,6 +1132,8 @@ async function opPeopleRemove(uid, payload, env) {
    المعرّفات: fam_<groupId> · dm_<uidأصغر>_<uidأكبر> · sv_<uid> · grp_<…> (C3). */
 const fp = (...segs) => segs.map(s => "`" + String(s).replace(/`/g, "") + "`").join(".");
 const MSG_ID = /^[A-Za-z0-9_]{6,40}$/;
+const MEDIA_ID = /^[A-Za-z0-9_]{6,40}$/;
+const MEDIA_TYPES = ["voice", "image", "video", "file"];
 const MSG_TYPES = ["text", "sticker", "contact", "voice", "image", "video", "file", "poll", "bill", "fund", "tasks", "system"];
 function dayKey(ms) { const d = new Date(ms); return d.getUTCFullYear() + String(d.getUTCMonth() + 1).padStart(2, "0") + String(d.getUTCDate()).padStart(2, "0"); }
 function dmId(a, b) { return "dm_" + [a, b].sort().join("_"); }
@@ -1221,7 +1223,15 @@ function cleanMsg(m, uid, ts) {
   if (m.fwd) out.fwd = true;
   if (type === "contact" && m.contact && segOk(String(m.contact.uid || ""))) out.contact = { uid: m.contact.uid, name: String(m.contact.name || "").slice(0, 80) };
   if (Array.isArray(m.mentions)) out.mentions = m.mentions.filter(x => segOk(String(x))).slice(0, 50);
-  if (m.extra && typeof m.extra === "object") out.extra = capVal(m.extra);   // الوسائط والاستطلاعات… (C3/C4)
+  if (m.extra && typeof m.extra === "object") {
+    // الصورة المصغّرة (≤ ٦٠٠٠ حرف) تُستثنى من قصّ النصوص — بقيّة الحقول تمرّ بـcapVal
+    const thumb = typeof m.extra.thumb === "string" && /^data:image\/(jpeg|png|webp);base64,/.test(m.extra.thumb) && m.extra.thumb.length <= 6000 ? m.extra.thumb : null;
+    const rest = Object.assign({}, m.extra); delete rest.thumb;
+    out.extra = capVal(rest);
+    if (thumb) out.extra.thumb = thumb;
+    if (MEDIA_TYPES.indexOf(type) >= 0 && !MEDIA_ID.test(String(out.extra.mid || ""))) throw new Error("media id required");
+  }
+  if (MEDIA_TYPES.indexOf(type) >= 0 && !(out.extra && out.extra.mid)) throw new Error("media id required");
   if (out.text === undefined && type === "text") throw new Error("empty message");
   return out;
 }
@@ -1245,6 +1255,11 @@ async function opChatSend(uid, payload, env) {
   }
   const ts = Date.now(), day = dayKey(ts);
   const msg = cleanMsg(payload.msg, uid, ts);
+  if (msg.extra && msg.extra.mid) {   // الوسيط رفعه المرسل نفسه في هذه المحادثة واكتمل
+    const meta = await fsGet(token, "chats/" + cid + "/media/" + msg.extra.mid);
+    if (!meta || fstr(meta, "by") !== uid || !fbool(meta, "done")) throw new Error("media not uploaded");
+    msg.extra.size = fsInt(meta, "size"); msg.extra.mime = fstr(meta, "mime") || msg.extra.mime || null;
+  }
   const dis = fsInt(c, "disappear");
   if (dis > 0) msg.exp = ts + dis * 1000;
   await fsCommit(token, [
@@ -1268,6 +1283,33 @@ async function dayMsg(token, cid, day, id) {
   if (!v) throw new Error("message not found");
   return fsToJs(v);
 }
+/* ---------- الوسائط (C4): chats/{cid}/media/{mid} (وصف) + media/{mid}/c/{i} (قطع base64 ≤ ٧٠٠ ألف حرف)
+   يكتبها الجهاز مباشرةً (قواعد Firestore: عضوٌ ومالكها)، ويحذفها الخادم: حذفٌ للجميع · مشاهدة مرّة · انتهاء الأجل. */
+async function deleteMedia(token, cid, mid) {
+  if (!MEDIA_ID.test(String(mid || ""))) return 0;
+  const base = "chats/" + cid + "/media/" + mid;
+  const chunks = await fsList(token, base + "/c");
+  const writes = chunks.map(d => ({ delete: d.name })).concat([{ delete: DOC_ROOT + "/" + base }]);
+  await commitChunks(token, writes);
+  return chunks.length;
+}
+async function opMediaViewed(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const { cid, day, id } = payload || {};
+  const c = await requireChatMember(token, cid, uid);
+  const m = await dayMsg(token, cid, day, id);
+  if (!m.extra || !m.extra.viewOnce) throw new Error("not a view-once message");
+  if (m.by === uid) return { ok: true };
+  const viewed = Object.assign({}, m.viewed || {}); viewed[uid] = Date.now();
+  const others = fsArr(c, "members").filter(u => u !== m.by);
+  const all = others.every(u => viewed[u]);
+  const f = { viewed: { mapValue: { fields: { [uid]: { integerValue: String(viewed[uid]) } } } } }, mask = [fp("msgs", id, "viewed", uid)];
+  if (all) { f.gone = { booleanValue: true }; mask.push(fp("msgs", id, "gone")); }
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day, fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: f } } } } } } },
+    updateMask: { fieldPaths: mask } }]);
+  if (all) await deleteMedia(token, cid, m.extra.mid);   // شاهده الجميع ⇒ يُحذف الوسيط نهائيّاً
+  return { gone: all };
+}
 async function opChatEdit(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const { cid, day, id } = payload || {};
@@ -1290,6 +1332,7 @@ async function opChatDelete(uid, payload, env) {
   const m = await dayMsg(token, cid, day, id);
   const admin = fstr(c, "type") === "group" && fsArr(c, "admins").indexOf(uid) >= 0;
   if (m.by !== uid && !admin) throw new Error("only the sender can delete for everyone");
+  if (m.extra && m.extra.mid) { try { await deleteMedia(token, cid, m.extra.mid); } catch (e) {} }
   // الحذف للجميع: يبقى أثرٌ «حُذفت هذه الرسالة» بلا محتوى (والوسائط تُحذف في C4)
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day,
     fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { del: { booleanValue: true }, delBy: { stringValue: uid } } } } } } } } },
@@ -1375,9 +1418,14 @@ async function cleanupDisappearing(env) {
     for (const d of days) {
       const key = d.name.split("/").pop();
       const dayEnd = Date.UTC(+key.slice(0, 4), +key.slice(4, 6) - 1, +key.slice(6, 8)) + 86400000;
-      if (dayEnd + dis * 1000 < now) { await fsCommit(token, [{ delete: d.name }]); continue; }
       const msgs = (d.fields && d.fields.msgs && d.fields.msgs.mapValue.fields) || {};
+      const mediaOf = ids => ids.map(id => { const m = fsToJs(msgs[id]); return m && m.extra && m.extra.mid; }).filter(Boolean);
+      if (dayEnd + dis * 1000 < now) {
+        for (const mid of mediaOf(Object.keys(msgs)).slice(0, 5)) { try { await deleteMedia(token, cid, mid); } catch (e) {} }
+        await fsCommit(token, [{ delete: d.name }]); continue;
+      }
       const gone = Object.keys(msgs).filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && m.exp < now; });
+      for (const mid of mediaOf(gone).slice(0, 5)) { try { await deleteMedia(token, cid, mid); } catch (e) {} }
       if (gone.length) { await fsCommit(token, [{ update: { name: d.name, fields: {} }, updateMask: { fieldPaths: gone.map(id => fp("msgs", id)) } }]); removed += gone.length; }
     }
   }
@@ -1756,6 +1804,7 @@ export default {
       if (op === "group.exit") { const r = await opGroupLeave2(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "group.invite") { const r = await opGroupInvite(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "group.join") { const r = await opGroupJoin(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "media.viewed") { const r = await opMediaViewed(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.vote") { const r = await opChatVote(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.pollEdit") { const r = await opChatPollEdit(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.billPaid") { const r = await opChatBillPaid(uid, body.payload, env); return json({ ok: true, ...r }); }
