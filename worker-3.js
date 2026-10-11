@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v19-chat";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v20-groups";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1347,7 +1347,7 @@ async function opChatSettings(uid, payload, env) {
   return { disappear: dis };
 }
 // إعداداتي في المحادثات تتزامن بين أجهزتي: أرشفة، تثبيت، كتم، قفل، مجلّدات، سمات، نغمات، مميّزة، محذوفة عندي، محظورون
-const PREF_KEYS = ["archived", "pinned", "muted", "locked", "folders", "folderOf", "themes", "tones", "starred", "hidden", "blocked", "drafts", "cleared"];
+const PREF_KEYS = ["archived", "pinned", "muted", "locked", "folders", "folderOf", "themes", "tones", "starred", "hidden", "blocked", "drafts", "cleared", "broadcasts"];
 async function opChatPrefs(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const path = "accounts/" + uid + "/chatprefs/main";
@@ -1382,6 +1382,227 @@ async function cleanupDisappearing(env) {
     }
   }
   return { chats: rows.length, removed };
+}
+
+/* ---------- 27) المجموعات (C3) ----------
+   grp_<id>: { type: "group", name, desc, members[], admins[], names{}, adminsOnly, infoAdminsOnly, createdBy, createdTs, … }
+   رسائل النظام (type: "system"): extra.ev = created|added|removed|left|joined|admin|unadmin|renamed|desc|adminsOnly */
+async function contactSet(token, uid) {
+  const list = await peopleOf(token, uid);
+  const m = {}; list.forEach(p => { m[p.uid] = p.name || null; });
+  return m;
+}
+async function sysMsg(token, cid, uid, ev, extra) {
+  const ts = Date.now(), day = dayKey(ts), id = "s" + ts.toString(36) + Math.random().toString(36).slice(2, 7);
+  const msg = { id, by: uid, ts, type: "system", extra: Object.assign({ ev }, extra || {}) };
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day, fields: { msgs: { mapValue: { fields: { [id]: toFsValue(msg) } } } } }, updateMask: { fieldPaths: [fp("msgs", id)] } },
+    { update: { name: DOC_ROOT + "/chats/" + cid, fields: { last: toFsValue({ id, by: uid, type: "system", text: "", ts, day, ev }), updatedTs: { integerValue: String(ts) } } },
+      updateMask: { fieldPaths: ["last", "updatedTs"] }, currentDocument: { exists: true } },
+  ]);
+}
+async function requireGroupAdmin(token, cid, uid) {
+  const c = await requireChatMember(token, cid, uid);
+  if (fstr(c, "type") !== "group") throw new Error("not a group");
+  if (fsArr(c, "admins").indexOf(uid) < 0) throw new Error("only admins can do this");
+  return c;
+}
+async function writeMembers(token, cid, members, admins, names) {
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { members: toFsValue(members), admins: toFsValue(admins), names: toFsValue(names) } },
+    updateMask: { fieldPaths: ["members", "admins", "names"] }, currentDocument: { exists: true } }]);
+  await rtdbSetChatMembers(token, cid, members);
+}
+async function opGroupCreate2(uid, payload, env, claims) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const name = String((payload && payload.name) || "").trim().slice(0, 80);
+  if (!name) throw new Error("name required");
+  const want = Array.isArray(payload.members) ? payload.members.filter(x => segOk(String(x)) && x !== uid).slice(0, 100) : [];
+  const contacts = await contactSet(token, uid);
+  const members = [uid].concat(want.filter(u => u in contacts));
+  const names = { [uid]: memberIdFields(claims).name.stringValue || null };
+  members.forEach(u => { if (u !== uid) names[u] = contacts[u]; });
+  const cid = "grp_" + crypto.randomUUID().replace(/-/g, "").slice(0, 20), now = Date.now();
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: {
+    type: { stringValue: "group" }, name: { stringValue: name }, desc: { stringValue: String(payload.desc || "").slice(0, 500) },
+    members: toFsValue(members), admins: toFsValue([uid]), names: toFsValue(names), createdBy: { stringValue: uid },
+    createdTs: { integerValue: String(now) }, updatedTs: { integerValue: String(now) }, cnt: { integerValue: "0" }, adminsOnly: { booleanValue: false } } },
+    currentDocument: { exists: false } }]);
+  await rtdbSetChatMembers(token, cid, members);
+  await sysMsg(token, cid, uid, "created", { name });
+  return { cid, members, skipped: want.filter(u => !(u in contacts)) };
+}
+async function opGroupUpdate(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const cid = payload && payload.cid;
+  const c = await requireChatMember(token, cid, uid);
+  if (fstr(c, "type") !== "group") throw new Error("not a group");
+  const isAdmin = fsArr(c, "admins").indexOf(uid) >= 0;
+  const fields = {}, mask = [];
+  if (payload.name != null || payload.desc != null) {
+    if (fbool(c, "infoAdminsOnly") && !isAdmin) throw new Error("only admins can do this");
+    if (payload.name != null) { const n = String(payload.name).trim().slice(0, 80); if (!n) throw new Error("name required"); fields.name = { stringValue: n }; mask.push("name"); }
+    if (payload.desc != null) { fields.desc = { stringValue: String(payload.desc).slice(0, 500) }; mask.push("desc"); }
+  }
+  for (const k of ["adminsOnly", "infoAdminsOnly"]) if (k in payload) {
+    if (!isAdmin) throw new Error("only admins can do this");
+    fields[k] = { booleanValue: !!payload[k] }; mask.push(k);
+  }
+  if (!mask.length) return { ok: true };
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields }, updateMask: { fieldPaths: mask } }]);
+  if (fields.name) await sysMsg(token, cid, uid, "renamed", { name: fields.name.stringValue });
+  if (fields.desc) await sysMsg(token, cid, uid, "desc", {});
+  if ("adminsOnly" in fields) await sysMsg(token, cid, uid, "adminsOnly", { on: fields.adminsOnly.booleanValue });
+  return { ok: true };
+}
+async function opGroupMembers(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const cid = payload && payload.cid;
+  const c = await requireGroupAdmin(token, cid, uid);
+  let members = fsArr(c, "members"), admins = fsArr(c, "admins");
+  const names = fsToJs((c.fields || {}).names || { nullValue: null }) || {};
+  const add = Array.isArray(payload.add) ? payload.add.filter(x => segOk(String(x))).slice(0, 50) : [];
+  const remove = Array.isArray(payload.remove) ? payload.remove.filter(x => segOk(String(x)) && x !== uid).slice(0, 50) : [];
+  let added = [];
+  if (add.length) {
+    const contacts = await contactSet(token, uid);
+    added = add.filter(u => (u in contacts) && members.indexOf(u) < 0);
+    added.forEach(u => { members.push(u); names[u] = contacts[u]; });
+  }
+  const removed = remove.filter(u => members.indexOf(u) >= 0);
+  members = members.filter(u => removed.indexOf(u) < 0); admins = admins.filter(u => removed.indexOf(u) < 0);
+  if (!added.length && !removed.length) return { added, removed };
+  await writeMembers(token, cid, members, admins, names);
+  if (added.length) await sysMsg(token, cid, uid, "added", { who: added });
+  if (removed.length) await sysMsg(token, cid, uid, "removed", { who: removed });
+  return { added, removed };
+}
+async function opGroupAdmin(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const cid = payload && payload.cid, target = payload && payload.uid;
+  const c = await requireGroupAdmin(token, cid, uid);
+  const members = fsArr(c, "members"); let admins = fsArr(c, "admins");
+  if (members.indexOf(target) < 0) throw new Error("not a member");
+  const make = !!payload.admin;
+  if (make && admins.indexOf(target) < 0) admins.push(target);
+  if (!make) { admins = admins.filter(u => u !== target); if (!admins.length) throw new Error("a group needs at least one admin"); }
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { admins: toFsValue(admins) } }, updateMask: { fieldPaths: ["admins"] } }]);
+  await sysMsg(token, cid, uid, make ? "admin" : "unadmin", { who: [target] });
+  return { admins };
+}
+async function opGroupLeave2(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const cid = payload && payload.cid;
+  const c = await requireChatMember(token, cid, uid);
+  if (fstr(c, "type") !== "group") throw new Error("not a group");
+  const members = fsArr(c, "members").filter(u => u !== uid);
+  let admins = fsArr(c, "admins").filter(u => u !== uid);
+  if (!admins.length && members.length) admins = [members[0]];   // المشرف الأخير يغادر ⇒ أقدم عضو يصير مشرفاً
+  const names = fsToJs((c.fields || {}).names || { nullValue: null }) || {};
+  await sysMsg(token, cid, uid, "left", {});
+  await writeMembers(token, cid, members, admins, names);
+  if (!members.length) await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { deleted: { booleanValue: true } } }, updateMask: { fieldPaths: ["deleted"] } }]);
+  return { left: true };
+}
+async function opGroupInvite(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const cid = payload && payload.cid;
+  await requireGroupAdmin(token, cid, uid);
+  const t = crypto.randomUUID(), exp = new Date(Date.now() + 7 * 86400000).toISOString();
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/ginvites/" + t, fields: { cid: { stringValue: cid }, by: { stringValue: uid }, expiresTs: { timestampValue: exp } } } }]);
+  return { token: t, expiresTs: exp };
+}
+async function opGroupJoin(uid, payload, env, claims) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const t = payload && payload.token;
+  if (!segOk(String(t || ""))) throw new Error("token required");
+  const inv = await fsGet(token, "ginvites/" + t);
+  if (!inv) throw new Error("invite not found");
+  const exp = inv.fields && inv.fields.expiresTs && inv.fields.expiresTs.timestampValue;
+  if (exp && Date.parse(exp) < Date.now()) throw new Error("invite expired");
+  const cid = fstr(inv, "cid");
+  const c = await chatDoc(token, cid);
+  if (!c || fbool(c, "deleted")) throw new Error("group not found");
+  const members = fsArr(c, "members");
+  if (members.indexOf(uid) >= 0) return { cid, already: true, name: fstr(c, "name") };
+  const names = fsToJs((c.fields || {}).names || { nullValue: null }) || {};
+  names[uid] = memberIdFields(claims).name.stringValue || null;
+  members.push(uid);
+  await writeMembers(token, cid, members, fsArr(c, "admins"), names);
+  await sysMsg(token, cid, uid, "joined", {});
+  return { cid, name: fstr(c, "name") };
+}
+/* أدوات المجموعة: تصويت · تعديل استطلاع · دفع حصّة · تبرّع (تعهّد) · مهامّ */
+async function toolMsg(token, payload, uid, wantType) {
+  const { cid, day, id } = payload || {};
+  const c = await requireChatMember(token, cid, uid);
+  const m = await dayMsg(token, cid, day, id);
+  if (m.type !== wantType) throw new Error("wrong message type");
+  if (m.del) throw new Error("message deleted");
+  return { c, m, cid, day, id };
+}
+const setPath = (cid, day, fieldPath, value) => ({ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day,
+  fields: value === undefined ? {} : nestFields(fieldPath, value) }, updateMask: { fieldPaths: [fieldPath.map(s => "`" + s + "`").join(".")] } });
+function nestFields(path, value) {
+  let v = toFsValue(value);
+  for (let i = path.length - 1; i >= 1; i--) v = { mapValue: { fields: { [path[i]]: v } } };
+  return { [path[0]]: v };
+}
+async function opChatVote(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const { m, cid, day, id } = await toolMsg(token, payload, uid, "poll");
+  const ex = m.extra || {};
+  if (ex.deadline && Date.now() > ex.deadline) throw new Error("poll closed");
+  const opt = payload.option == null ? null : Number(payload.option);
+  if (opt != null && !(opt >= 0 && opt < (ex.options || []).length)) throw new Error("bad option");
+  await fsCommit(token, [setPath(cid, day, ["msgs", id, "votes", uid], opt == null ? undefined : opt)]);
+  return { ok: true };
+}
+async function opChatPollEdit(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const { m, cid, day, id } = await toolMsg(token, payload, uid, "poll");
+  if (m.by !== uid) throw new Error("only the creator can edit");
+  const q = String(payload.question || "").slice(0, 300), opts = (Array.isArray(payload.options) ? payload.options : []).map(x => String(x).slice(0, 120)).filter(Boolean).slice(0, 12);
+  if (!q || opts.length < 2) throw new Error("question and two options required");
+  const old = (m.extra && m.extra.options) || [], votes = m.votes || {}, keep = {};
+  // تبقى أصوات الخيار الذي بقي نصّه كما هو (ولو تغيّر ترتيبه)
+  for (const u in votes) { const t = old[votes[u]]; const ni = opts.indexOf(t); if (ni >= 0) keep[u] = ni; }
+  const extra = Object.assign({}, m.extra, { question: q, options: opts, editedAt: Date.now() });
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day,
+    fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { extra: toFsValue(capVal(extra)), votes: toFsValue(keep) } } } } } } } },
+    updateMask: { fieldPaths: [fp("msgs", id, "extra"), fp("msgs", id, "votes")] } }]);
+  return { ok: true };
+}
+async function opChatBillPaid(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const { m, cid, day, id } = await toolMsg(token, payload, uid, "bill");
+  const who = segOk(String(payload.uid || "")) ? payload.uid : uid;
+  if (who !== uid && m.by !== uid) throw new Error("only the creator can mark others");
+  if (!((m.extra && m.extra.participants) || []).some(p => p.uid === who)) throw new Error("not a participant");
+  await fsCommit(token, [setPath(cid, day, ["msgs", id, "paid", who], payload.paid === false ? undefined : Date.now())]);
+  return { ok: true };
+}
+async function opChatFund(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const { m, cid, day, id } = await toolMsg(token, payload, uid, "fund");
+  const amount = Math.floor(Number(payload.amount || 0));
+  if (!(amount > 0 && amount < 1e9)) throw new Error("bad amount");
+  const ex = m.extra || {};
+  if (ex.deadline && Date.now() > ex.deadline) throw new Error("fundraiser closed");
+  const prev = (m.contrib && m.contrib[uid] && m.contrib[uid].amount) || 0;
+  await fsCommit(token, [setPath(cid, day, ["msgs", id, "contrib", uid], { amount: prev + amount, ts: Date.now() })]);
+  return { total: prev + amount };
+}
+async function opChatTask(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const { m, cid, day, id } = await toolMsg(token, payload, uid, "tasks");
+  const taskId = String(payload.taskId || "");
+  if (!((m.extra && m.extra.tasks) || []).some(t => t.id === taskId)) throw new Error("task not found");
+  const cur = (m.tstate && m.tstate[taskId]) || {};
+  const next = Object.assign({}, cur, { by: uid, ts: Date.now() });
+  if (payload.status === "done" || payload.status === "pending") next.status = payload.status;
+  if (payload.note != null) next.note = String(payload.note).slice(0, 300);
+  await fsCommit(token, [setPath(cid, day, ["msgs", id, "tstate", taskId], next)]);
+  return { ok: true };
 }
 
 /* ---------- 23) schedules.sync — مواعيد المستخدم الشخصيّة بين أجهزته ----------
@@ -1528,6 +1749,18 @@ export default {
         const r = await opRelationRemove(uid, body.payload, env);
         return json({ ok: true, uid, op, ...r });
       }
+      if (op === "group.new") { const r = await opGroupCreate2(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "group.update") { const r = await opGroupUpdate(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "group.members") { const r = await opGroupMembers(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "group.admin") { const r = await opGroupAdmin(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "group.exit") { const r = await opGroupLeave2(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "group.invite") { const r = await opGroupInvite(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "group.join") { const r = await opGroupJoin(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "chat.vote") { const r = await opChatVote(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.pollEdit") { const r = await opChatPollEdit(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.billPaid") { const r = await opChatBillPaid(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.fund") { const r = await opChatFund(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.task") { const r = await opChatTask(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.open") { const r = await opChatOpen(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "chat.send") { const r = await opChatSend(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.edit") { const r = await opChatEdit(uid, body.payload, env); return json({ ok: true, ...r }); }
