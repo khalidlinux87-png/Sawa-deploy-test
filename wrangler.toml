@@ -1,3 +1,5 @@
 name = "sawa-api"
 main = "worker-3.js"
 compatibility_date = "2025-06-01"
+[triggers]
+crons = ["*/15 * * * *"]
