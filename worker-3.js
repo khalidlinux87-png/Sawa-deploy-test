@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v27-code";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v28-cfturn";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2087,24 +2087,48 @@ async function opProfileSet(uid, payload, env, claims) {
    الإشارات (العرض/الردّ/المرشّحون) في Realtime Database مباشرةً بين الجهازين (calls/{id} + inbox/{uid}) — القواعد تقصرها على
    جهات الاتّصال (acl). الـWorker: بيانات TURN · رنينٌ عبر الإشعارات حين يكون التطبيق مغلقاً · إشعار «مكالمة فائتة». */
 let iceCache = null, iceAt = 0;
+// P1: Cloudflare Realtime TURN (١٠٠٠ GB/شهر مجّاناً) — سرّان في Cloudflare: CF_TURN_KEY_ID و CF_TURN_API_TOKEN.
+// بيانات دخولٍ مؤقّتة (٢٤ ساعة) تُجدَّد كلّ ٦ ساعات وتُشارَك بين الطلبات. فشلها ⇒ نرجع إلى Metered تلقائيّاً.
+// TURN_PROVIDER = "metered" (متغيّرٌ اختياريّ) يُجبر الرجوع إلى Metered دون حذف الأسرار.
+let cfIce = null, cfIceAt = 0;
+async function cloudflareIce(env) {
+  if (cfIce && Date.now() - cfIceAt < 6 * 3600 * 1000) return cfIce;
+  const res = await fetch("https://rtc.live.cloudflare.com/v1/turn/keys/" + encodeURIComponent(String(env.CF_TURN_KEY_ID).trim()) + "/credentials/generate-ice-servers", {
+    method: "POST", headers: { Authorization: "Bearer " + String(env.CF_TURN_API_TOKEN).trim(), "Content-Type": "application/json" },
+    body: JSON.stringify({ ttl: 86400 }) });
+  let b = null; try { b = await res.json(); } catch (e) {}
+  if (!res.ok || !b || !Array.isArray(b.iceServers)) throw new Error("cloudflare turn " + res.status);
+  // المنفذ 53 تحجبه المتصفّحات (ينتظر حتّى المهلة) — نحذفه
+  const list = b.iceServers.map(x => Object.assign({}, x, { urls: [].concat(x.urls || []).filter(u => !/:53(\?|$)/.test(String(u))) }))
+    .filter(x => x.urls.length);
+  if (!list.some(x => x.username && x.credential)) throw new Error("cloudflare turn: no credentials");
+  cfIce = list; cfIceAt = Date.now();
+  return list;
+}
 async function opRtcIce(uid, payload, env) {
   const stun = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+  let cfErr = null;
+  if (env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN && env.TURN_PROVIDER !== "metered") {
+    try { return { turn: true, provider: "cloudflare", iceServers: stun.concat(await cloudflareIce(env)) }; }
+    catch (e) { cfErr = String((e && e.message) || e); console.log("cf turn:", cfErr); }
+  }
+  const viaMetered = (r) => Object.assign(r, r.turn ? { provider: "metered" } : {}, cfErr ? { cfErr } : {});
   // الطريقة الأبسط: اسم المستخدم وكلمة المرور من صفحة المفتاح في Metered (سرّان في Cloudflare) — لا تحتاج اسم التطبيق
   if (env.METERED_USER && env.METERED_PASS) {
     const h = env.METERED_HOST || "global.relay.metered.ca";
-    return { turn: true, iceServers: stun.concat([{ urls: "stun:stun.relay.metered.ca:80" },
+    return viaMetered({ turn: true, iceServers: stun.concat([{ urls: "stun:stun.relay.metered.ca:80" },
       { urls: ["turn:" + h + ":80", "turn:" + h + ":80?transport=tcp", "turn:" + h + ":443", "turns:" + h + ":443?transport=tcp"],
-        username: env.METERED_USER, credential: env.METERED_PASS }]) };
+        username: env.METERED_USER, credential: env.METERED_PASS }]) });
   }
-  if (!env.METERED_KEY || !env.METERED_APP) return { iceServers: stun, turn: false };
-  if (iceCache && Date.now() - iceAt < 30 * 60 * 1000) return { iceServers: iceCache, turn: true };
+  if (!env.METERED_KEY || !env.METERED_APP) return viaMetered({ iceServers: stun, turn: false });
+  if (iceCache && Date.now() - iceAt < 30 * 60 * 1000) return viaMetered({ iceServers: iceCache, turn: true });
   try {
     const res = await fetch("https://" + env.METERED_APP + ".metered.live/api/v1/turn/credentials?apiKey=" + encodeURIComponent(env.METERED_KEY));
     const list = await res.json();
     if (!res.ok || !Array.isArray(list)) throw new Error("metered " + res.status);
     iceCache = stun.concat(list); iceAt = Date.now();
-    return { iceServers: iceCache, turn: true };
-  } catch (e) { return { iceServers: stun, turn: false, err: String(e.message || e) }; }
+    return viaMetered({ iceServers: iceCache, turn: true });
+  } catch (e) { return viaMetered({ iceServers: stun, turn: false, err: String(e.message || e) }); }
 }
 async function opCallRing(uid, payload, env, claims, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
