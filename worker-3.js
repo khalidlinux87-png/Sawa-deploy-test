@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v25-rooms";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v26-profile";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -349,7 +349,9 @@ async function requireEditor(token, groupId, uid) {
 /* اسم العضو كما يظهر لأهله: من حساب Google (الاسم فقط، لا البريد). الضيف بلا اسم. */
 function memberIdFields(claims) {
   const anon = !!(claims && claims.firebase && claims.firebase.sign_in_provider === "anonymous");
-  const nm = !anon && claims && typeof claims.name === "string" ? claims.name.trim().slice(0, 60) : "";
+  // اسم «سوا» الذي اختاره المستخدم يسبق اسم Google (ويصلح للضيف أيضاً)
+  const nm = claims && typeof claims.sawaName === "string" && claims.sawaName ? claims.sawaName.slice(0, 60)
+    : !anon && claims && typeof claims.name === "string" ? claims.name.trim().slice(0, 60) : "";
   return { name: nm ? { stringValue: nm } : { nullValue: null }, anon: { booleanValue: anon } };
 }
 
@@ -1051,10 +1053,11 @@ async function rtdbPatch(token, updates) {
 }
 async function peopleOf(token, uid, opts) {
   const people = {};   // uid -> { uid, name, anon, families:[{groupId,name}], via:{family,link} }
-  const add = (u, name, anon, via, fam) => {
+  const add = (u, name, anon, via, fam, phone) => {
     if (!u || u === uid) return;
-    const p = people[u] || (people[u] = { uid: u, name: null, anon: false, families: [], via: {} });
+    const p = people[u] || (people[u] = { uid: u, name: null, anon: false, families: [], via: {}, phone: null });
     if (name && !p.name) p.name = name;
+    if (phone && !p.phone) p.phone = phone;
     if (anon) p.anon = true; else if (name) p.anon = false;
     p.via[via] = true;
     if (fam && !p.families.some(f => f.groupId === fam.groupId)) p.families.push(fam);
@@ -1068,9 +1071,9 @@ async function peopleOf(token, uid, opts) {
     const fam = { groupId: gid, name: fstr(d, "name") || "عائلتي" };
     // حدّ ٥٠ طلباً فرعيّاً لكلّ طلب: نزامن محادثات أوّل ٦ عائلات فقط في كلّ استدعاء (والعضويّة تتحدّث أيضاً عند كلّ انضمام/إزالة)
     if (opts && opts.famChats && (opts.synced = (opts.synced || 0) + 1) <= 6) { try { await famChatSync(token, gid, ms); } catch (e) {} }
-    for (const m of ms) { const u = m.name.split("/").pop(); if (!hidden.has(u)) add(u, fstr(m, "name"), fbool(m, "anon"), "family", fam); }
+    for (const m of ms) { const u = m.name.split("/").pop(); if (!hidden.has(u)) add(u, fstr(m, "name"), fbool(m, "anon"), "family", fam, fstr(m, "phone")); }
   }
-  for (const d of await fsList(token, "accounts/" + uid + "/people")) add(d.name.split("/").pop(), fstr(d, "name"), fbool(d, "anon"), "link", null);
+  for (const d of await fsList(token, "accounts/" + uid + "/people")) add(d.name.split("/").pop(), fstr(d, "name"), fbool(d, "anon"), "link", null, fstr(d, "phone"));
   return Object.values(people);
 }
 async function opPeopleList(uid, payload, env, claims) {
@@ -1082,8 +1085,8 @@ async function opPeopleList(uid, payload, env, claims) {
   let aclOk = true;
   try { await rtdbPatch(token, updates); } catch (e) { aclOk = false; }
   const me = memberIdFields(claims);
-  return { me: { uid, name: me.name.stringValue || null, anon: me.anon.booleanValue },
-           people: list.map(p => ({ uid: p.uid, name: p.name, anon: p.anon, families: p.families, via: Object.keys(p.via) })), acl: aclOk };
+  return { me: { uid, name: me.name.stringValue || null, anon: me.anon.booleanValue, phone: claims.sawaPhone || null, googleName: claims.name || null },
+           people: list.map(p => ({ uid: p.uid, name: p.name, anon: p.anon, families: p.families, via: Object.keys(p.via), phone: p.phone || null })), acl: aclOk };
 }
 async function opPeopleInvite(uid, payload, env, claims) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -1998,6 +2001,76 @@ async function cleanupCalls(env) {
   return { cleaned: n };
 }
 
+/* ---------- 32) الملفّ الشخصيّ: اسم «سوا» + رقم الهاتف (غير موثّق حتّى التحويل للمدفوع) ----------
+   accounts/{uid}: { displayName, phone, phoneVerified:false }. يُنشر الاسم/الرقم إلى عضويّات العائلات ومحادثاتي وجهات اتّصالي
+   (فيراه الآخرون فوراً)، والـWorker يقرأ الاسم المحفوظ بدل اسم Google في كلّ عمليّة (ذاكرة ١٠ دقائق). */
+const PROFILE_CACHE = new Map();
+async function profileOf(token, uid) {
+  const c = PROFILE_CACHE.get(uid);
+  if (c && Date.now() - c.at < 10 * 60 * 1000) return c;
+  const d = await fsGet(token, "accounts/" + uid).catch(() => null);
+  const v = { name: fstr(d, "displayName") || null, phone: fstr(d, "phone") || null, at: Date.now() };
+  PROFILE_CACHE.set(uid, v);
+  if (PROFILE_CACHE.size > 2000) PROFILE_CACHE.clear();
+  return v;
+}
+function cleanPhone(x) {
+  let s = String(x || "").replace(/[\s\-().]/g, "").replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d));
+  if (s.startsWith("00")) s = "+" + s.slice(2);
+  if (/^0\d{9}$/.test(s)) s = "+249" + s.slice(1);   // رقمٌ سودانيّ محلّيّ 09…/01…
+  return /^\+\d{8,15}$/.test(s) ? s : null;
+}
+async function opProfileGet(uid, payload, env, claims) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const p = await profileOf(token, uid);
+  return { profile: { name: p.name, phone: p.phone, phoneVerified: false, googleName: claims.name || null,
+    anon: !!(claims.firebase && claims.firebase.sign_in_provider === "anonymous") } };
+}
+async function opProfileSet(uid, payload, env, claims) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  payload = payload || {};
+  const fields = {}, mask = [];
+  let name, phone;
+  if ("name" in payload) {
+    name = String(payload.name || "").replace(/\s+/g, " ").trim().slice(0, 40);
+    if (name.length < 2) throw new Error("الاسم قصيرٌ جدّاً");
+    fields.displayName = { stringValue: name }; mask.push("displayName");
+  }
+  if ("phone" in payload) {
+    if (payload.phone === null || payload.phone === "") phone = "";
+    else { phone = cleanPhone(payload.phone); if (!phone) throw new Error("رقم الهاتف غير صحيح — مثال: +249912345678"); }
+    fields.phone = phone ? { stringValue: phone } : { nullValue: null }; fields.phoneVerified = { booleanValue: false }; mask.push("phone", "phoneVerified");
+  }
+  if (!mask.length) throw new Error("nothing to change");
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields }, updateMask: { fieldPaths: mask } }]);
+  const prev = PROFILE_CACHE.get(uid) || {};
+  PROFILE_CACHE.set(uid, { name: name !== undefined ? name : prev.name || null, phone: phone !== undefined ? (phone || null) : prev.phone || null, at: Date.now() });
+  // النشر: عضويّاتي في العائلات · أسمائي في المحادثات · بطاقتي عند جهات اتّصالي (حدّ ٥٠ طلباً فرعيّاً)
+  const pf = {}, pm = [];
+  if (name !== undefined) { pf.name = { stringValue: name }; pm.push("name"); }
+  if (phone !== undefined) { pf.phone = phone ? { stringValue: phone } : { nullValue: null }; pm.push("phone"); }
+  let n = 0;
+  for (const d of (await fsList(token, "accounts/" + uid + "/groups")).slice(0, 14)) {
+    const gid = d.name.split("/").pop();
+    try { await fsCommit(token, [{ update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid, fields: pf }, updateMask: { fieldPaths: pm }, currentDocument: { exists: true } }]); n++; } catch (e) {}
+  }
+  if (name !== undefined) {
+    try {
+      const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+        body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "chats" }], where: { fieldFilter: { field: { fieldPath: "members" }, op: "ARRAY_CONTAINS", value: { stringValue: uid } } }, limit: 80 } }) });
+      const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+      const w = rows.map(c => ({ update: { name: c.name, fields: { names: { mapValue: { fields: { [uid]: { stringValue: name } } } } } }, updateMask: { fieldPaths: [fp("names", uid)] } }));
+      for (let i = 0; i < w.length; i += 20) await fsCommit(token, w.slice(i, i + 20));
+      n += rows.length;
+    } catch (e) {}
+  }
+  for (const d of (await fsList(token, "accounts/" + uid + "/people")).slice(0, 12)) {
+    const other = d.name.split("/").pop();
+    try { await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + other + "/people/" + uid, fields: pf }, updateMask: { fieldPaths: pm }, currentDocument: { exists: true } }]); n++; } catch (e) {}
+  }
+  return { profile: { name: name !== undefined ? name : prev.name || null, phone: phone !== undefined ? (phone || null) : prev.phone || null, phoneVerified: false }, propagated: n };
+}
+
 /* ---------- 29) المكالمات (C6) ----------
    الإشارات (العرض/الردّ/المرشّحون) في Realtime Database مباشرةً بين الجهازين (calls/{id} + inbox/{uid}) — القواعد تقصرها على
    جهات الاتّصال (acl). الـWorker: بيانات TURN · رنينٌ عبر الإشعارات حين يكون التطبيق مغلقاً · إشعار «مكالمة فائتة». */
@@ -2122,7 +2195,7 @@ export default {
       const auth = request.headers.get("Authorization") || "";
       const m = auth.match(/^Bearer (.+)$/);
       if (!m) return json({ ok: false, error: "no bearer token" }, 401);
-      const claims = await verifyIdToken(m[1]);
+      let claims = await verifyIdToken(m[1]);
       const uid = claims.sub;
 
       // حدٌّ لكلّ مستخدم (تقريبيّ، لكلّ نسخةٍ من الـWorker): يحمي الحصّة المجانيّة من عميلٍ معطوب أو مسيء
@@ -2133,6 +2206,12 @@ export default {
       const bad = badIds(body.payload);
       if (bad) return json({ ok: false, error: "bad id: " + bad }, 400);
 
+      // اسم «سوا» المحفوظ يسبق اسم Google في كلّ العمليّات (ذاكرة مؤقّتة — لا قراءة في كلّ طلب)
+      if (op !== "whoami" && op !== "rtc.ice" && op !== "chat.mark" && env.SA_JSON) {
+        try { const pr = await profileOf(await getAccessToken(JSON.parse(env.SA_JSON)), uid); claims = Object.assign({}, claims, { sawaName: pr.name || null, sawaPhone: pr.phone || null }); } catch (e) {}
+      }
+      if (op === "profile.get") { const r = await opProfileGet(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "profile.set") { const r = await opProfileSet(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "whoami")
         return json({ ok: true, uid, provider: claims.firebase && claims.firebase.sign_in_provider });
       if (op === "group.create") {
