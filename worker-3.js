@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v26b-nick";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v27-code";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1085,7 +1085,9 @@ async function opPeopleList(uid, payload, env, claims) {
   let aclOk = true;
   try { await rtdbPatch(token, updates); } catch (e) { aclOk = false; }
   const me = memberIdFields(claims);
-  return { me: { uid, name: me.name.stringValue || null, anon: me.anon.booleanValue, phone: claims.sawaPhone || null, googleName: claims.name || null },
+  let cd = { code: null, findable: true };
+  try { const pr = await profileOf(token, uid); cd = pr.code ? { code: pr.code, findable: pr.findable } : await ensureCode(token, uid, claims, false); } catch (e) {}
+  return { me: { uid, name: me.name.stringValue || null, anon: me.anon.booleanValue, phone: claims.sawaPhone || null, googleName: claims.name || null, code: cd.code, findable: cd.findable },
            people: list.map(p => ({ uid: p.uid, name: p.name, anon: p.anon, families: p.families, via: Object.keys(p.via), phone: p.phone || null })), acl: aclOk };
 }
 async function opPeopleInvite(uid, payload, env, claims) {
@@ -2018,7 +2020,7 @@ async function profileOf(token, uid) {
   const c = PROFILE_CACHE.get(uid);
   if (c && Date.now() - c.at < 10 * 60 * 1000) return c;
   const d = await fsGet(token, "accounts/" + uid).catch(() => null);
-  const v = { name: fstr(d, "displayName") || null, phone: fstr(d, "phone") || null, at: Date.now() };
+  const v = { name: fstr(d, "displayName") || null, phone: fstr(d, "phone") || null, code: fstr(d, "code") || null, findable: accFindable(d), gname: fstr(d, "gname") || null, at: Date.now() };
   PROFILE_CACHE.set(uid, v);
   if (PROFILE_CACHE.size > 2000) PROFILE_CACHE.clear();
   return v;
@@ -2032,7 +2034,8 @@ function cleanPhone(x) {
 async function opProfileGet(uid, payload, env, claims) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const p = await profileOf(token, uid);
-  return { profile: { name: p.name, phone: p.phone, phoneVerified: false, googleName: claims.name || null,
+  const cd = p.code ? { code: p.code, findable: p.findable } : await ensureCode(token, uid, claims, false).catch(() => ({ code: null, findable: true }));
+  return { profile: { name: p.name, phone: p.phone, phoneVerified: false, googleName: claims.name || null, code: cd.code, findable: cd.findable,
     anon: !!(claims.firebase && claims.firebase.sign_in_provider === "anonymous") } };
 }
 async function opProfileSet(uid, payload, env, claims) {
@@ -2053,7 +2056,7 @@ async function opProfileSet(uid, payload, env, claims) {
   if (!mask.length) throw new Error("nothing to change");
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields }, updateMask: { fieldPaths: mask } }]);
   const prev = PROFILE_CACHE.get(uid) || {};
-  PROFILE_CACHE.set(uid, { name: name !== undefined ? name : prev.name || null, phone: phone !== undefined ? (phone || null) : prev.phone || null, at: Date.now() });
+  PROFILE_CACHE.set(uid, Object.assign({}, prev, { name: name !== undefined ? name : prev.name || null, phone: phone !== undefined ? (phone || null) : prev.phone || null, at: prev.at || Date.now() }));
   // النشر: عضويّاتي في العائلات · أسمائي في المحادثات · بطاقتي عند جهات اتّصالي (حدّ ٥٠ طلباً فرعيّاً)
   const pf = {}, pm = [];
   if (name !== undefined) { pf.name = { stringValue: name }; pm.push("name"); }
@@ -2167,6 +2170,214 @@ function json(obj, status) {
     headers: { ...CORS, "Content-Type": "application/json" },
   });
 }
+/* ---------- 31) رمز سوا وطلبات التواصل (C10) ----------
+   لكلّ حسابٍ رمزٌ من ١٠ أرقام: ٩ عشوائيّة (أوّلها ١–٩ فلا يشبه رقم هاتفٍ سودانيّ يبدأ بـ0) + رقم تحقّق (Luhn)
+   يكشف أيّ خطأٍ في رقمٍ واحد أو تبديل رقمين متجاورين.
+   codes/{code} = { uid, ts } — فريدٌ بالإنشاء المشروط · accounts/{uid}: code, codeTs, findable, gname
+   من يُدخل الرمز يرى الاسم وحده (لا بريد ولا هاتف) ويرسل «طلب تواصل»؛ لا مراسلة ولا اتّصال قبل القبول.
+   accounts/{to}/creq/{from} = { name, text, ts, code } · accounts/{from}/creqout/{to} = { name, ts } */
+function luhnDigit(s) {
+  let sum = 0;
+  for (let i = 0; i < s.length; i++) { let d = Number(s[s.length - 1 - i]); if (i % 2 === 0) { d *= 2; if (d > 9) d -= 9; } sum += d; }
+  return String((10 - (sum % 10)) % 10);
+}
+function codeDigits(x) {
+  return String(x == null ? "" : x).replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d)).replace(/[۰-۹]/g, d => "۰۱۲۳۴۵۶۷۸۹".indexOf(d)).replace(/\D/g, "");
+}
+function codeValid(c) { return /^[1-9]\d{9}$/.test(c) && luhnDigit(c.slice(0, 9)) === c[9]; }
+function newCode() {
+  const a = new Uint32Array(3); crypto.getRandomValues(a);
+  const s = String(1 + (a[0] % 9)) + String(a[1] % 10000).padStart(4, "0") + String(a[2] % 10000).padStart(4, "0");
+  return s + luhnDigit(s);
+}
+function accFindable(acc) { const f = acc && acc.fields && acc.fields.findable; return !(f && f.booleanValue === false); }
+async function ensureCode(token, uid, claims, force) {
+  const acc = await fsGet(token, "accounts/" + uid).catch(() => null);
+  const old = fstr(acc, "code");
+  if (old && !force) return { code: old, findable: accFindable(acc) };
+  const anon = !!(claims && claims.firebase && claims.firebase.sign_in_provider === "anonymous");
+  const gname = !anon && claims && typeof claims.name === "string" ? claims.name.trim().slice(0, 60) : "";
+  for (let i = 0; i < 6; i++) {
+    const c = newCode(), now = Date.now();
+    const fields = { code: { stringValue: c }, codeTs: { integerValue: String(now) } }, mask = ["code", "codeTs"];
+    if (gname && !fstr(acc, "gname")) { fields.gname = { stringValue: gname }; mask.push("gname"); }
+    const writes = [
+      { update: { name: DOC_ROOT + "/codes/" + c, fields: { uid: { stringValue: uid }, ts: { integerValue: String(now) } } }, currentDocument: { exists: false } },
+      { update: { name: DOC_ROOT + "/accounts/" + uid, fields }, updateMask: { fieldPaths: mask } },
+    ];
+    if (old) writes.push({ delete: DOC_ROOT + "/codes/" + old });
+    try { await fsCommit(token, writes); }
+    catch (e) { if (/ALREADY_EXISTS/.test(String(e && e.message))) continue; throw e; }
+    const pc = PROFILE_CACHE.get(uid); if (pc) { pc.code = c; pc.findable = accFindable(acc); }
+    return { code: c, findable: accFindable(acc) };
+  }
+  throw new Error("code generation failed");
+}
+// حدّ البحث والطلبات: ٣٠ بحثاً و١٠ طلبات في الساعة لكلّ مستخدم (يمنع تخمين الرموز وإغراق الناس بالطلبات)
+const CODE_RL = new Map();
+function codeRate(uid, kind, max) {
+  const k = uid + ":" + kind, now = Date.now(); let e = CODE_RL.get(k);
+  if (!e || now - e.t > 3600000) { e = { t: now, n: 0 }; CODE_RL.set(k, e); }
+  if (CODE_RL.size > 5000) { for (const [kk, v] of CODE_RL) if (now - v.t > 3600000) CODE_RL.delete(kk); }
+  return ++e.n <= max;
+}
+async function codeTarget(token, raw) {
+  const c = codeDigits(raw);
+  if (!codeValid(c)) throw new Error("bad_code");
+  const d = await fsGet(token, "codes/" + c);
+  const t = fstr(d, "uid");
+  if (!t) return null;
+  const acc = await fsGet(token, "accounts/" + t);
+  if (!acc || fstr(acc, "code") !== c || !accFindable(acc)) return null;   // رمزٌ قديم (غُيّر) أو صاحبه أخفى نفسه
+  return { uid: t, code: c, name: fstr(acc, "displayName") || fstr(acc, "gname") || null };
+}
+async function myName(token, uid, claims) {
+  const n = memberIdFields(claims).name.stringValue;
+  if (n) return n;
+  const acc = await fsGet(token, "accounts/" + uid).catch(() => null);
+  return fstr(acc, "gname") || null;
+}
+async function opCodeMine(uid, payload, env, claims) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  return await ensureCode(token, uid, claims, false);
+}
+async function opCodeFind(uid, payload, env) {
+  if (!codeRate(uid, "find", 30)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const t = await codeTarget(token, payload && payload.code);
+  if (!t) return { found: false };
+  if (t.uid === uid) return { found: true, self: true, name: t.name, code: t.code };
+  const [contact, outR, inR] = await Promise.all([sharesContact(token, uid, t.uid),
+    fsGet(token, "accounts/" + uid + "/creqout/" + t.uid), fsGet(token, "accounts/" + uid + "/creq/" + t.uid)]);
+  return { found: true, name: t.name, code: t.code, contact: !!contact, pending: inR ? "in" : outR ? "out" : null, uid: (contact || inR || outR) ? t.uid : undefined };
+}
+async function opCodeRequest(uid, payload, env, claims, ctx) {
+  if (!codeRate(uid, "req", 10)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const t = await codeTarget(token, payload && payload.code);
+  if (!t) throw new Error("not_found");
+  if (t.uid === uid) throw new Error("self");
+  if (await sharesContact(token, uid, t.uid)) return { already: true, uid: t.uid };
+  // طلبه إليّ قائم ⇒ قبولٌ متبادل فوراً
+  if (await fsGet(token, "accounts/" + uid + "/creq/" + t.uid)) {
+    const r = await acceptReq(token, uid, t.uid, claims, ctx);
+    return Object.assign({ accepted: true }, r);
+  }
+  const outs = await fsList(token, "accounts/" + uid + "/creqout");
+  if (outs.length >= 20 && !outs.some(d => d.name.split("/").pop() === t.uid)) throw new Error("too_many_pending");
+  const me = await myName(token, uid, claims), now = Date.now();
+  const text = String((payload && payload.text) || "").replace(/\s+/g, " ").trim().slice(0, 300);
+  const myCode = (await ensureCode(token, uid, claims, false)).code;
+  const writes = [{ update: { name: DOC_ROOT + "/accounts/" + uid + "/creqout/" + t.uid, fields: {
+    name: t.name ? { stringValue: t.name } : { nullValue: null }, code: { stringValue: t.code }, ts: { integerValue: String(now) } } } }];
+  // من حظرني لا يصله شيء — ولا يعرف المرسل (يبقى «بانتظار الموافقة»)
+  const blocked = await blockedBy(token, t.uid, uid).catch(() => false);
+  if (!blocked) writes.push({ update: { name: DOC_ROOT + "/accounts/" + t.uid + "/creq/" + uid, fields: {
+    name: me ? { stringValue: me } : { nullValue: null }, text: { stringValue: text }, code: { stringValue: myCode }, ts: { integerValue: String(now) } } } });
+  await fsCommit(token, writes);
+  if (!blocked) {
+    const job = pushTo(token, [t.uid], strData({ t: "req", from: uid, title: "طلب تواصل في سوا", body: (me || "مستخدم سوا") + (text ? ": " + text : " يريد التواصل معك"), ts: now }))
+      .catch(e => console.log("push:", e && e.message));
+    if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
+  }
+  return { sent: true, name: t.name };
+}
+function reqOut(d, dir) {
+  const f = d.fields || {}, o = { uid: d.name.split("/").pop(), name: fstr(d, "name") || null, ts: fsInt(d, "ts"), code: fstr(d, "code") || null };
+  if (dir === "in") o.text = fstr(d, "text") || "";
+  return o;
+}
+async function opCodeRequests(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const [ins, outs] = await Promise.all([fsList(token, "accounts/" + uid + "/creq"), fsList(token, "accounts/" + uid + "/creqout")]);
+  const by = (a, b) => b.ts - a.ts;
+  return { incoming: ins.slice(0, 100).map(d => reqOut(d, "in")).sort(by), outgoing: outs.slice(0, 100).map(d => reqOut(d, "out")).sort(by) };
+}
+// القبول: جهتا اتّصال (كالرابط الشخصيّ) + محادثةٌ ثنائيّة أوّل رسائلها رسالة التعريف
+async function acceptReq(token, me, from, claims, ctx) {
+  const rq = await fsGet(token, "accounts/" + me + "/creq/" + from);
+  const theirName = fstr(rq, "name") || null, text = fstr(rq, "text") || "";
+  const myNm = await myName(token, me, claims);
+  const now = Date.now(), iso = new Date(now).toISOString();
+  const nameV = (n) => n ? { stringValue: n } : { nullValue: null };
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/accounts/" + me + "/people/" + from, fields: { ts: { timestampValue: iso }, name: nameV(theirName), anon: { booleanValue: false }, via: { stringValue: "code" } } } },
+    { update: { name: DOC_ROOT + "/accounts/" + from + "/people/" + me, fields: { ts: { timestampValue: iso }, name: nameV(myNm), anon: { booleanValue: false }, via: { stringValue: "code" } } } },
+    { delete: DOC_ROOT + "/accounts/" + me + "/creq/" + from },
+    { delete: DOC_ROOT + "/accounts/" + from + "/creqout/" + me },
+    { delete: DOC_ROOT + "/accounts/" + from + "/creq/" + me },
+    { delete: DOC_ROOT + "/accounts/" + me + "/creqout/" + from },
+  ]);
+  try { await rtdbPatch(token, { ["acl/" + me + "/" + from]: true, ["acl/" + from + "/" + me]: true }); } catch (e) {}
+  const cid = dmId(me, from);
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { type: { stringValue: "dm" }, members: toFsValue([me, from].sort()),
+    names: toFsValue({ [me]: myNm || null, [from]: theirName || null }), createdTs: { integerValue: String(now) }, createdBy: { stringValue: from },
+    updatedTs: { integerValue: String(now) }, cnt: { integerValue: "0" } } }, currentDocument: { exists: false } }]).catch(() => {});
+  await rtdbSetChatMembers(token, cid, [me, from]);
+  if (text) {
+    const day = dayKey(now), msg = { id: "rq" + now.toString(36) + Math.random().toString(36).slice(2, 6), by: from, ts: now, type: "text", text: text };
+    await fsCommit(token, [
+      { update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day, fields: { msgs: { mapValue: { fields: { [msg.id]: toFsValue(msg) } } } } },
+        updateMask: { fieldPaths: [fp("msgs", msg.id)] } },
+      { update: { name: DOC_ROOT + "/chats/" + cid, fields: {
+          last: toFsValue({ id: msg.id, by: from, type: "text", text: text.slice(0, 120), ts: now, day: day }),
+          updatedTs: { integerValue: String(now) },
+          reads: { mapValue: { fields: { [from]: { integerValue: String(now) } } } },
+          delivered: { mapValue: { fields: { [from]: { integerValue: String(now) } } } } } },
+        updateMask: { fieldPaths: ["last", "updatedTs", fp("reads", from), fp("delivered", from)] },
+        updateTransforms: [{ fieldPath: "cnt", increment: { integerValue: "1" } }, { fieldPath: fp("readCnt", from), increment: { integerValue: "1" } }],
+        currentDocument: { exists: true } },
+    ]).catch(e => console.log("seed msg:", e && e.message));
+  }
+  const job = pushTo(token, [from], strData({ t: "reqok", from: me, cid: cid, title: myNm || "سوا", body: "قبل طلب التواصل — يمكنكما المراسلة الآن ✓", ts: now }))
+    .catch(e => console.log("push:", e && e.message));
+  if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
+  return { cid, uid: from, name: theirName };
+}
+async function opCodeRespond(uid, payload, env, claims, ctx) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const from = payload && payload.from, action = payload && payload.action;
+  if (!segOk(from)) throw new Error("from required");
+  if (["accept", "reject", "block"].indexOf(action) < 0) throw new Error("bad action");
+  if (action === "accept") {
+    if (!(await fsGet(token, "accounts/" + uid + "/creq/" + from))) throw new Error("request not found");
+    return Object.assign({ accepted: true }, await acceptReq(token, uid, from, claims, ctx));
+  }
+  // الرفض: يُحذف الطلب عندي وحدي — يبقى عنده «بانتظار الموافقة» فلا يعرف أنّه رُفض ولا يكرّر الطلب
+  await fsCommit(token, [{ delete: DOC_ROOT + "/accounts/" + uid + "/creq/" + from }]);
+  if (action === "block") {
+    const path = "accounts/" + uid + "/chatprefs/main";
+    const cur = await fsGet(token, path);
+    let data = {}; try { data = cur && fstr(cur, "data") ? JSON.parse(fstr(cur, "data")) : {}; } catch (e) { data = {}; }
+    const bl = Array.isArray(data.blocked) ? data.blocked : [];
+    if (bl.indexOf(from) < 0) bl.push(from);
+    data.blocked = bl.slice(-500);
+    await fsCommit(token, [{ update: { name: DOC_ROOT + "/" + path, fields: { data: { stringValue: JSON.stringify(data) }, ts: { integerValue: String(Date.now()) } } } }]);
+  }
+  return { done: action };
+}
+async function opCodeCancel(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  let to = payload && payload.to;
+  if (!to && payload && payload.code) { const t = await codeTarget(token, payload.code); to = t && t.uid; }
+  if (!segOk(to)) throw new Error("to required");
+  await fsCommit(token, [{ delete: DOC_ROOT + "/accounts/" + uid + "/creqout/" + to }, { delete: DOC_ROOT + "/accounts/" + to + "/creq/" + uid }]);
+  return { cancelled: true };
+}
+async function opCodeReset(uid, payload, env, claims) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const acc = await fsGet(token, "accounts/" + uid).catch(() => null);
+  if (fsInt(acc, "codeTs") && Date.now() - fsInt(acc, "codeTs") < 10 * 60 * 1000 && fstr(acc, "code")) throw new Error("wait");
+  return await ensureCode(token, uid, claims, true);
+}
+async function opCodePrivacy(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const findable = !(payload && payload.findable === false);
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields: { findable: { booleanValue: findable } } }, updateMask: { fieldPaths: ["findable"] } }]);
+  const pc = PROFILE_CACHE.get(uid); if (pc) pc.findable = findable;
+  return { findable };
+}
+
 /* ---------- حدود الطلبات والمعرّفات ---------- */
 const RL = new Map(), RL_WINDOW = 5 * 60 * 1000, RL_MAX = 400;   // ٤٠٠ طلب / ٥ دقائق لكلّ مستخدم
 function rateOk(uid) {
@@ -2327,6 +2538,14 @@ export default {
       if (op === "people.list") { const r = await opPeopleList(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "people.invite") { const r = await opPeopleInvite(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "people.accept") { const r = await opPeopleAccept(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "code.mine") { const r = await opCodeMine(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "code.find") { const r = await opCodeFind(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "code.request") { const r = await opCodeRequest(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "code.requests") { const r = await opCodeRequests(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "code.respond") { const r = await opCodeRespond(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "code.cancel") { const r = await opCodeCancel(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "code.reset") { const r = await opCodeReset(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "code.privacy") { const r = await opCodePrivacy(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "people.remove") { const r = await opPeopleRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "member.hello") { const r = await opMemberHello(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "member.setRole") { const r = await opMemberSetRole(uid, body.payload, env); return json({ ok: true, ...r }); }
