@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v24b-turn";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v25-rooms";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1867,8 +1867,15 @@ async function opSchedSet(uid, payload, env, claims, ctx) {
   const at = Math.round(Number(p.at)), end = Math.round(Number(p.end) || at + 1800000);
   if (!isFinite(at) || at < now - 3600000 || at > now + 400 * 86400000) throw new Error("bad time");
   const remind = REMINDS.indexOf(Number(p.remind)) >= 0 ? Number(p.remind) : 15;
-  let users = [uid], cid = null;
-  if (p.cid) {
+  let users = [uid], cid = null, room = null;
+  if (p.room) {   // C8: غرفة مجدولة (المدعوّون اختياريّون)
+    room = String(p.room);
+    if (!/^[A-HJ-NP-Z2-9]{8}$/.test(room)) throw new Error("bad id: room");
+    const to = [...new Set((Array.isArray(p.to) ? p.to : []).map(String))].filter(u => u !== uid).slice(0, 7);
+    if (to.some(u => !segOk(u))) throw new Error("bad call");
+    for (const u of to) if (!(await sharesContact(token, uid, u))) throw new Error("not a contact");
+    users = [uid].concat(to);
+  } else if (p.cid) {
     cid = String(p.cid);
     const c = await requireChatMember(token, cid, uid);
     if (["group", "family"].indexOf(fstr(c, "type")) < 0) throw new Error("not a group chat");
@@ -1884,14 +1891,20 @@ async function opSchedSet(uid, payload, env, claims, ctx) {
   const item = { by: uid, byName: me, title: String(p.title || "").slice(0, 120), toName: String(p.toName || "").slice(0, 80),
     type: p.type === "video" ? "video" : "audio", at, end: Math.max(end, at + 60000), remind, approval: !!p.approval, users, ts: now };
   if (cid) item.cid = cid;
+  if (room) item.room = room;
   const rq = at - remind * 60000;
   const fields = {}; for (const k in item) fields[k] = toFsValue(item[k]);
   fields.rq = { integerValue: String(Math.max(rq, 1)) };
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/scheds/" + id, fields } }]);
+  if (room) {   // بطاقة الغرفة جاهزة والمنظّم مضيفها — من يصل قبله يدخل، ولا يأخذ الاستضافة
+    const meta = await rtdbGet(token, "rooms/" + room + "/meta").catch(() => null);
+    if (!meta) await rtdbPatch(token, { ["rooms/" + room + "/meta"]: { host: uid, title: item.title || "غرفة سوا", ts: now, sched: at, locked: false, lobby: false } });
+    else if (meta.host === uid) await rtdbPatch(token, { ["rooms/" + room + "/meta/sched"]: at, ["rooms/" + room + "/meta/title"]: item.title || meta.title || "غرفة سوا" });
+  }
   if (!old) {   // إشعار الدعوة للمدعوّين
     const others = users.filter(u => u !== uid).slice(0, 8);
     if (others.length) {
-      const job = pushTo(token, others, strData({ t: "sched", sid: id, cid: cid || "", title: "📅 " + me + " دعاك لمكالمة",
+      const job = pushTo(token, others, strData({ t: "sched", sid: id, cid: cid || "", room: room || "", title: "📅 " + me + (room ? " دعاك إلى غرفة سوا" : " دعاك لمكالمة"),
         body: (item.type === "video" ? "مكالمة فيديو" : "مكالمة صوتيّة") + (item.title ? " · " + item.title : "") + " — افتح «المكالمات المجدولة»", ts: now }));
       if (ctx && ctx.waitUntil) ctx.waitUntil(job.catch(() => {})); else await job;
     }
@@ -1941,10 +1954,11 @@ async function schedReminders(env) {
     const at = fsInt(d, "at");
     if (at < now - 10 * 60000) continue;   // فات موعده
     const mins = Math.max(1, Math.round((at - now) / 60000));
-    const title = fstr(d, "title") || fstr(d, "toName") || "";
-    sent += await pushTo(token, fsArr(d, "users").slice(0, 8), strData({ t: "sched", sid: d.name.split("/").pop(), cid: fstr(d, "cid") || "",
-      title: "⏰ تذكير: " + (fstr(d, "type") === "video" ? "مكالمة فيديو" : "مكالمة صوتيّة") + (title ? " · " + title : ""),
-      body: at > now + 60000 ? "تبدأ بعد " + minsAr(mins) + " — من «المكالمات المجدولة» اضغط «ابدأ الآن»" : "حان الموعد — افتح «المكالمات المجدولة» وانضمّ", ts: now }));
+    const title = fstr(d, "title") || fstr(d, "toName") || "", room = fstr(d, "room") || "";
+    sent += await pushTo(token, fsArr(d, "users").slice(0, 8), strData({ t: "sched", sid: d.name.split("/").pop(), cid: fstr(d, "cid") || "", room,
+      title: "⏰ تذكير: " + (room ? "غرفة سوا" : fstr(d, "type") === "video" ? "مكالمة فيديو" : "مكالمة صوتيّة") + (title ? " · " + title : ""),
+      body: room ? (at > now + 60000 ? "تبدأ بعد " + minsAr(mins) + " — اضغط للدخول" : "حان الموعد — اضغط للدخول")
+                 : at > now + 60000 ? "تبدأ بعد " + minsAr(mins) + " — من «المكالمات المجدولة» اضغط «ابدأ الآن»" : "حان الموعد — افتح «المكالمات المجدولة» وانضمّ", ts: now }));
   }
   return { reminders: rows.length, sent };
 }
@@ -1962,6 +1976,14 @@ async function cleanupCalls(env) {
     for (const k in (gs || {})) {
       const g = gs[k] || {};
       if (!g.members || now - (g.ts || 0) > 12 * 3600000) { upd["gcalls/" + k] = null; if (g.cid) upd["gcur/" + g.cid] = null; n++; }
+    }
+  } catch (e) {}
+  // الغرف: فارغة وأقدم من ٣ ساعات (والمجدولة بعد مرور موعدها بـ٦ ساعات) أو منتهية
+  try {
+    const rs = await rtdbGet(token, "rooms", '&orderBy="meta/ts"&endAt=' + (now - 3 * 3600000) + "&limitToFirst=20");
+    for (const k in (rs || {})) {
+      const r = rs[k] || {}, m = r.meta || {};
+      if ((!r.members && (!m.sched || m.sched < now - 6 * 3600000)) || m.ended) { upd["rooms/" + k] = null; n++; }
     }
   } catch (e) {}
   // المواعيد المنتهية منذ يومين
