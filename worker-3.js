@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v21-media";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v22-push";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1239,7 +1239,7 @@ function previewOf(msg) {
   if (msg.type === "text" || msg.type === "sticker") return (msg.text || "").slice(0, 120);
   return "";   // العميل يترجم النوع (🎤 رسالة صوتيّة…)
 }
-async function opChatSend(uid, payload, env) {
+async function opChatSend(uid, payload, env, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const cid = payload && payload.cid;
   const c = await requireChatMember(token, cid, uid);
@@ -1274,6 +1274,9 @@ async function opChatSend(uid, payload, env) {
       updateTransforms: [{ fieldPath: "cnt", increment: { integerValue: "1" } }, { fieldPath: fp("readCnt", uid), increment: { integerValue: "1" } }],
       currentDocument: { exists: true } },
   ]);
+  // الإشعارات بعد الردّ (waitUntil) فلا ينتظرها المرسل
+  const job = notifyChat(token, c, cid, uid, msg).catch(e => console.log("push:", e && e.message));
+  if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
   return { ts, day, id: msg.id };
 }
 async function dayMsg(token, cid, day, id) {
@@ -1398,6 +1401,7 @@ async function opChatPrefs(uid, payload, env) {
   let data = {}; try { data = cur && fstr(cur, "data") ? JSON.parse(fstr(cur, "data")) : {}; } catch (e) { data = {}; }
   const set = payload && payload.set;
   if (set && typeof set === "object") {
+    if ("muted" in set) await syncMutedBy(token, uid, data.muted, set.muted);
     for (const k of PREF_KEYS) if (k in set) data[k] = capVal(set[k]);
     const json = JSON.stringify(data);
     if (json.length > 200000) throw new Error("prefs too large");
@@ -1653,6 +1657,87 @@ async function opChatTask(uid, payload, env) {
   return { ok: true };
 }
 
+/* ---------- 28) الإشعارات (C5): Firebase Cloud Messaging (HTTP v1) ----------
+   accounts/{uid}/devices/{id} = { token, ua, ts } — id = بصمة الرمز. الإرسال «بياناتٌ فقط» فيقرّر عامل الخدمة
+   (يُظهر إشعاراً، أو يمرّره للتطبيق المفتوح). المكتومون (chats.mutedBy) لا يصلهم شيء. */
+async function tokenId(t) {
+  const h = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t)));
+  return "d" + bytesToB64url(h).slice(0, 32).replace(/-/g, "A").replace(/_/g, "B");
+}
+async function opPushRegister(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const t = String((payload && payload.token) || "");
+  if (t.length < 20 || t.length > 4096) throw new Error("bad token");
+  const id = await tokenId(t);
+  // رمز الجهاز نفسه قد يكون مسجّلاً لحسابٍ آخر سابقاً (تبديل الحساب): يُنقل لهذا الحساب
+  if (payload.prevUid && segOk(String(payload.prevUid)) && payload.prevUid !== uid) {
+    await fsCommit(token, [{ delete: DOC_ROOT + "/accounts/" + payload.prevUid + "/devices/" + id }]).catch(() => {});
+  }
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid + "/devices/" + id, fields: {
+    token: { stringValue: t }, ua: { stringValue: String(payload.ua || "").slice(0, 160) }, ts: { integerValue: String(Date.now()) } } } }]);
+  return { id };
+}
+async function opPushUnregister(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const t = String((payload && payload.token) || "");
+  if (!t) return { ok: true };
+  await fsCommit(token, [{ delete: DOC_ROOT + "/accounts/" + uid + "/devices/" + (await tokenId(t)) }]).catch(() => {});
+  return { ok: true };
+}
+async function fcmSend(token, devToken, data) {
+  const res = await fetch("https://fcm.googleapis.com/v1/projects/" + PROJECT_ID + "/messages:send", {
+    method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ message: { token: devToken, data: data,
+      webpush: { headers: { Urgency: data.t === "call" ? "high" : "normal", TTL: data.t === "call" ? "45" : "86400" } } } }) });
+  if (res.ok) return "ok";
+  const txt = await res.text();
+  return /UNREGISTERED|registration-token-not-registered|INVALID_ARGUMENT|NOT_FOUND/.test(txt) ? "gone" : "err";
+}
+// يُرسل لأجهزة مستخدمين (حتّى ١٢ مستخدماً لكلّ حدث — حدّ ٥٠ طلباً فرعيّاً)، ويحذف الرموز الميّتة
+async function pushTo(token, uids, data) {
+  let sent = 0;
+  for (const u of uids.slice(0, 12)) {
+    const devs = await fsList(token, "accounts/" + u + "/devices");
+    for (const d of devs.slice(0, 3)) {
+      const r = await fcmSend(token, fstr(d, "token"), data);
+      if (r === "ok") sent++;
+      else if (r === "gone") await fsCommit(token, [{ delete: d.name }]).catch(() => {});
+    }
+  }
+  return sent;
+}
+function strData(o) { const out = {}; for (const k in o) if (o[k] != null) out[k] = String(o[k]).slice(0, 900); return out; }
+async function notifyChat(token, c, cid, uid, msg) {
+  const members = fsArr(c, "members"), muted = fsArr(c, "mutedBy"), type = fstr(c, "type");
+  const names = fsToJs((c.fields || {}).names || { nullValue: null }) || {};
+  const senderName = names[uid] || "سوا";
+  const mentions = msg.mentions || [];
+  // المُشار إليهم أوّلاً (ويصلهم ولو كتموا المجموعة)، ثمّ الباقون غير المكتومين
+  const targets = members.filter(u => u !== uid && (mentions.indexOf(u) >= 0 || muted.indexOf(u) < 0))
+    .sort((a, b) => (mentions.indexOf(b) >= 0) - (mentions.indexOf(a) >= 0));
+  if (!targets.length || type === "saved") return 0;
+  const group = type === "group" || type === "family";
+  const body = msg.type === "text" || msg.type === "sticker" ? (msg.text || "") : ({ image: "📷 صورة", video: "🎥 فيديو", voice: "🎤 رسالة صوتيّة", file: "📎 ملفّ", poll: "📊 استطلاع", bill: "🧾 فاتورة", fund: "💝 تبرّعات", tasks: "✅ مهامّ", contact: "👤 جهة اتّصال" }[msg.type] || "رسالة");
+  const base = { t: "msg", cid, from: uid, mid: msg.id, title: group ? (fstr(c, "name") || "سوا") : senderName, body: group ? senderName + ": " + body : body, ts: msg.ts };
+  let sent = 0;
+  const ment = targets.filter(u => mentions.indexOf(u) >= 0), rest = targets.filter(u => mentions.indexOf(u) < 0);
+  if (ment.length) sent += await pushTo(token, ment, strData(Object.assign({}, base, { mention: "1", title: senderName + " أشار إليك" + (group ? " في " + (fstr(c, "name") || "") : "") })));
+  if (rest.length) sent += await pushTo(token, rest.slice(0, 12 - ment.length), strData(base));
+  return sent;
+}
+// الكتم يُنسخ إلى المحادثة نفسها (mutedBy) فلا يقرأ الإرسال إعدادات كلّ عضو
+async function syncMutedBy(token, uid, before, after) {
+  const b = new Set(before || []), a = new Set(after || []);
+  const changes = [];
+  a.forEach(cid => { if (!b.has(cid)) changes.push([cid, "appendMissingElements"]); });
+  b.forEach(cid => { if (!a.has(cid)) changes.push([cid, "removeAllFromArray"]); });
+  for (const [cid, op] of changes.slice(0, 20)) {
+    if (!/^(dm_|sv_|fam_|grp_)/.test(cid) || !segOk(cid)) continue;
+    await fsCommit(token, [{ transform: { document: DOC_ROOT + "/chats/" + cid, fieldTransforms: [{ fieldPath: "mutedBy", [op]: { values: [{ stringValue: uid }] } }] },
+      currentDocument: { exists: true } }]).catch(() => {});
+  }
+}
+
 /* ---------- 23) schedules.sync — مواعيد المستخدم الشخصيّة بين أجهزته ----------
    accounts/{uid}/schedules/{gid} = { data: JSON { id: item } }. دمجٌ موعداً موعداً: لكلّ موعد _u (وقت تعديله)،
    والأحدث يغلب؛ الحذف علامة { id, _deleted, _u } حتّى لا يعود المحذوف من جهازٍ آخر. */
@@ -1709,7 +1794,7 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(cleanupDisappearing(env).catch(e => console.log("cleanup:", e && e.message)));
   },
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
     try {
       const auth = request.headers.get("Authorization") || "";
@@ -1811,7 +1896,9 @@ export default {
       if (op === "chat.fund") { const r = await opChatFund(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.task") { const r = await opChatTask(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.open") { const r = await opChatOpen(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
-      if (op === "chat.send") { const r = await opChatSend(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.send") { const r = await opChatSend(uid, body.payload, env, ctx); return json({ ok: true, ...r }); }
+      if (op === "push.register") { const r = await opPushRegister(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "push.unregister") { const r = await opPushUnregister(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.edit") { const r = await opChatEdit(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.delete") { const r = await opChatDelete(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.react") { const r = await opChatReact(uid, body.payload, env); return json({ ok: true, ...r }); }
