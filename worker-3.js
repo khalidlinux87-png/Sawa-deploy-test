@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v24-gcalls";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v24b-turn";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1982,6 +1982,13 @@ async function cleanupCalls(env) {
 let iceCache = null, iceAt = 0;
 async function opRtcIce(uid, payload, env) {
   const stun = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+  // الطريقة الأبسط: اسم المستخدم وكلمة المرور من صفحة المفتاح في Metered (سرّان في Cloudflare) — لا تحتاج اسم التطبيق
+  if (env.METERED_USER && env.METERED_PASS) {
+    const h = env.METERED_HOST || "global.relay.metered.ca";
+    return { turn: true, iceServers: stun.concat([{ urls: "stun:stun.relay.metered.ca:80" },
+      { urls: ["turn:" + h + ":80", "turn:" + h + ":80?transport=tcp", "turn:" + h + ":443", "turns:" + h + ":443?transport=tcp"],
+        username: env.METERED_USER, credential: env.METERED_PASS }]) };
+  }
   if (!env.METERED_KEY || !env.METERED_APP) return { iceServers: stun, turn: false };
   if (iceCache && Date.now() - iceAt < 30 * 60 * 1000) return { iceServers: iceCache, turn: true };
   try {
