@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v32-reports";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v34-links";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1118,6 +1118,34 @@ async function opPeopleAccept(uid, payload, env, claims) {
   try { await rtdbPatch(token, { ["acl/" + uid + "/" + other]: true, ["acl/" + other + "/" + uid]: true }); } catch (e) {}
   return { uid: other, name: fstr(inv, "name") || null };
 }
+// v34: معاينة الرابط قبل القبول — التطبيق يسأل «أضِفه؟ / انضمّ؟» ولا يُنفَّذ الرابط وحده
+async function opPeoplePeek(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const t = payload && payload.token;
+  if (!segOk(String(t || ""))) throw new Error("token required");
+  const inv = await fsGet(token, "pinvites/" + t);
+  if (!inv || !fstr(inv, "uid")) throw new Error("invite not found");
+  const exp = inv.fields && inv.fields.expiresTs && inv.fields.expiresTs.timestampValue;
+  if (exp && Date.parse(exp) < Date.now()) throw new Error("invite expired");
+  const other = fstr(inv, "uid");
+  if (other === uid) return { self: true };
+  const mine = await fsGet(token, "accounts/" + uid + "/people/" + other).catch(() => null);
+  return { name: fstr(inv, "name") || null, anon: fbool(inv, "anon"), already: !!mine };
+}
+async function opGroupPeek(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const t = payload && payload.token;
+  if (!segOk(String(t || ""))) throw new Error("token required");
+  const inv = await fsGet(token, "ginvites/" + t);
+  if (!inv) throw new Error("invite not found");
+  const exp = inv.fields && inv.fields.expiresTs && inv.fields.expiresTs.timestampValue;
+  if (exp && Date.parse(exp) < Date.now()) throw new Error("invite expired");
+  const c = await chatDoc(token, fstr(inv, "cid"));
+  if (!c || fbool(c, "deleted")) throw new Error("group not found");
+  const members = fsArr(c, "members");
+  if (fsArr(c, "banned").indexOf(uid) >= 0) throw new Error("removed from this group");
+  return { name: fstr(c, "name") || null, count: members.length, already: members.indexOf(uid) >= 0, cid: members.indexOf(uid) >= 0 ? fstr(inv, "cid") : null };
+}
 async function opPeopleRemove(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const other = payload && payload.uid;
@@ -1126,6 +1154,8 @@ async function opPeopleRemove(uid, payload, env) {
     { delete: DOC_ROOT + "/accounts/" + uid + "/people/" + other },
     { delete: DOC_ROOT + "/accounts/" + other + "/people/" + uid },
   ]);
+  // v33: يتوقّف فوراً عن رؤية حضوري والاتّصال بي (كان ينتظر people.list التالي). إن جمعتنا عائلة يعيدها people.list
+  try { await rtdbPatch(token, { ["acl/" + uid + "/" + other]: null, ["acl/" + other + "/" + uid]: null }); } catch (e) {}
   return { uid: other, removed: true };   // إن بقيتما في عائلةٍ واحدة يبقى جهةَ اتّصال
 }
 
@@ -1237,6 +1267,10 @@ function cleanMsg(m, uid, ts) {
     if (MEDIA_TYPES.indexOf(type) >= 0 && !MEDIA_ID.test(String(out.extra.mid || ""))) throw new Error("media id required");
   }
   if (MEDIA_TYPES.indexOf(type) >= 0 && !(out.extra && out.extra.mid)) throw new Error("media id required");
+  // v33: «مرّة واحدة» لا تترك أثراً — لا صورة مصغّرة ولا نصّ الرسالة الصوتيّة
+  if (out.extra && out.extra.viewOnce) { delete out.extra.thumb; delete out.extra.transcript; }
+  // v33: سقفٌ للرسالة كلّها — رسالةٌ واحدة ضخمة كانت تملأ وثيقة اليوم (١ ميغابايت) فتتعطّل المحادثة حتّى منتصف الليل
+  if (JSON.stringify(out).length > 16000) throw new Error("message too large");
   if (out.text === undefined && type === "text") throw new Error("empty message");
   return out;
 }
@@ -1265,6 +1299,22 @@ async function opChatSend(uid, payload, env, ctx) {
     if (!meta || fstr(meta, "by") !== uid || !fbool(meta, "done")) throw new Error("media not uploaded");
     msg.extra.size = fsInt(meta, "size"); msg.extra.mime = fstr(meta, "mime") || msg.extra.mime || null;
   }
+  // v33: معرّف الرسالة لا يُعاد استعماله — كان أيّ عضوٍ يستبدل رسالة غيره (أو رسالة نظام) بإرسال المعرّف نفسه.
+  //      المعرّف نفسه من المرسل نفسه = إعادة محاولة ⇒ لا نكتب ثانيةً ولا نرسل إشعاراً مكرّراً.
+  //      الاقتباس في الردّ يُؤخذ من الرسالة الأصليّة لا ممّا كتبه المرسل (إن كانت من اليوم أو من يومٍ أرسله العميل)
+  const rday = msg.reply && /^\d{8}$/.test(String((payload.msg.reply || {}).day || "")) ? String(payload.msg.reply.day) : day;
+  const peek = await dayPeek(token, cid, day, [msg.id].concat(msg.reply && rday === day ? [msg.reply.id] : []));
+  if (peek[msg.id]) {
+    if (peek[msg.id].by !== uid) throw new Error("message id taken");
+    return { ts: peek[msg.id].ts || ts, day, id: msg.id, dup: true };
+  }
+  if (msg.reply) {
+    const orig = rday === day ? peek[msg.reply.id] : (await dayPeek(token, cid, rday, [msg.reply.id]))[msg.reply.id];
+    if (orig && !orig.del) msg.reply = { id: msg.reply.id, by: orig.by || null, text: String(orig.text || previewOf(orig) || "").slice(0, 200), day: rday };
+    else if (orig && orig.del) msg.reply = { id: msg.reply.id, by: orig.by || null, text: "", day: rday, del: true };
+    else if (payload.msg.reply.day) msg.reply = { id: msg.reply.id, by: null, text: "", day: rday, missing: true };
+    else msg.reply.unv = true;   // عميلٌ قديم لم يرسل يوم الأصل ⇒ يبقى نصّه موسوماً «غير متحقَّق» (العميل الجديد يرسل اليوم دائماً)
+  }
   const dis = fsInt(c, "disappear");
   if (dis > 0) msg.exp = ts + dis * 1000;
   await fsCommit(token, [
@@ -1291,6 +1341,19 @@ async function dayMsg(token, cid, day, id) {
   if (!v) throw new Error("message not found");
   return fsToJs(v);
 }
+// v33: قراءة رسائل بعينها من وثيقة يوم (قناع حقول — لا تُنزَّل الوثيقة كلّها)
+async function dayPeek(token, cid, day, ids) {
+  ids = [...new Set(ids.filter(id => MSG_ID.test(String(id || ""))))];
+  if (!ids.length) return {};
+  const q = ids.map(id => "mask.fieldPaths=" + encodeURIComponent(fp("msgs", id))).join("&");
+  const res = await fetch(FS_BASE + "/chats/" + cid + "/days/" + day + "?" + q, { headers: { Authorization: "Bearer " + token } });
+  if (res.status === 404) return {};
+  const d = await res.json();
+  if (!res.ok) throw new Error("firestore get: " + JSON.stringify(d).slice(0, 200));
+  const f = (d && d.fields && d.fields.msgs && d.fields.msgs.mapValue && d.fields.msgs.mapValue.fields) || {};
+  const out = {}; for (const id of ids) if (f[id]) out[id] = fsToJs(f[id]);
+  return out;
+}
 /* ---------- الوسائط (C4): chats/{cid}/media/{mid} (وصف) + media/{mid}/c/{i} (قطع base64 ≤ ٧٠٠ ألف حرف)
    يكتبها الجهاز مباشرةً (قواعد Firestore: عضوٌ ومالكها)، ويحذفها الخادم: حذفٌ للجميع · مشاهدة مرّة · انتهاء الأجل. */
 async function deleteMedia(token, cid, mid) {
@@ -1312,7 +1375,7 @@ async function opMediaViewed(uid, payload, env) {
   const others = fsArr(c, "members").filter(u => u !== m.by);
   const all = others.every(u => viewed[u]);
   const f = { viewed: { mapValue: { fields: { [uid]: { integerValue: String(viewed[uid]) } } } } }, mask = [fp("msgs", id, "viewed", uid)];
-  if (all) { f.gone = { booleanValue: true }; mask.push(fp("msgs", id, "gone")); }
+  if (all) { f.gone = { booleanValue: true }; mask.push(fp("msgs", id, "gone"), fp("msgs", id, "extra", "thumb"), fp("msgs", id, "extra", "transcript")); }
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day, fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: f } } } } } } },
     updateMask: { fieldPaths: mask } }]);
   if (all) await deleteMedia(token, cid, m.extra.mid);   // شاهده الجميع ⇒ يُحذف الوسيط نهائيّاً
@@ -1344,7 +1407,8 @@ async function opChatDelete(uid, payload, env) {
   // الحذف للجميع: يبقى أثرٌ «حُذفت هذه الرسالة» بلا محتوى (والوسائط تُحذف في C4)
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day,
     fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { del: { booleanValue: true }, delBy: { stringValue: uid } } } } } } } } },
-    updateMask: { fieldPaths: [fp("msgs", id, "del"), fp("msgs", id, "delBy"), fp("msgs", id, "text"), fp("msgs", id, "extra"), fp("msgs", id, "reply"), fp("msgs", id, "contact"), fp("msgs", id, "re")] } }]);
+    updateMask: { fieldPaths: [fp("msgs", id, "del"), fp("msgs", id, "delBy"), fp("msgs", id, "text"), fp("msgs", id, "extra"), fp("msgs", id, "reply"), fp("msgs", id, "contact"), fp("msgs", id, "re"),
+      fp("msgs", id, "votes"), fp("msgs", id, "paid"), fp("msgs", id, "contrib"), fp("msgs", id, "tstate"), fp("msgs", id, "mentions"), fp("msgs", id, "viewed"), fp("msgs", id, "fwd")] } }]);
   const lastId = c.fields.last && c.fields.last.mapValue && c.fields.last.mapValue.fields && c.fields.last.mapValue.fields.id && c.fields.last.mapValue.fields.id.stringValue;
   if (lastId === id) await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { last: { mapValue: { fields: { del: { booleanValue: true }, text: { stringValue: "" } } } } } },
     updateMask: { fieldPaths: ["last.del", "last.text"] } }]);
@@ -1355,6 +1419,8 @@ async function opChatReact(uid, payload, env) {
   const { cid, day, id } = payload || {};
   await requireChatMember(token, cid, uid);
   if (!/^\d{8}$/.test(String(day || "")) || !MSG_ID.test(String(id || ""))) throw new Error("bad message ref");
+  const target = (await dayPeek(token, cid, day, [id]))[id];   // v33: لا تفاعل مع رسالةٍ غير موجودة أو محذوفة
+  if (!target || !target.by || target.del) throw new Error("message not found");
   const emoji = payload.emoji ? String(payload.emoji).slice(0, 16) : null;
   const f = emoji ? { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { re: { mapValue: { fields: { [uid]: { stringValue: emoji } } } } } } } } } } } : {};
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day, fields: f },
@@ -1364,7 +1430,9 @@ async function opChatReact(uid, payload, env) {
 async function opChatPin(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const cid = payload && payload.cid;
-  await requireChatMember(token, cid, uid);
+  const c = await requireChatMember(token, cid, uid);
+  // v33: «المشرفون فقط يعدّلون معلومات المجموعة» يشمل التثبيت
+  if (fstr(c, "type") === "group" && (fbool(c, "infoAdminsOnly") || fbool(c, "adminsOnly")) && fsArr(c, "admins").indexOf(uid) < 0) throw new Error("only admins can change this");
   const id = payload.id && MSG_ID.test(String(payload.id)) ? String(payload.id) : null;
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { pinned: id ? { stringValue: id } : { nullValue: null } } }, updateMask: { fieldPaths: ["pinned"] } }]);
   return { pinned: id };
@@ -1382,15 +1450,30 @@ async function opChatMark(uid, payload, env) {
     if (Number.isFinite(mk.rc)) { fields.readCnt = { mapValue: { fields: { [uid]: { integerValue: String(Math.floor(mk.rc)) } } } }; mask.push(fp("readCnt", uid)); }
     if (mask.length) writes.push({ update: { name: DOC_ROOT + "/chats/" + mk.cid, fields }, updateMask: { fieldPaths: mask }, currentDocument: { exists: true } });
   }
-  // ⛔ لا نتحقّق من العضويّة هنا (تكلّف قراءةً لكلّ محادثة): الكاتب لا يكتب إلّا حقول نفسه، والمحادثة يجب أن توجد
-  for (const w of writes) { try { await fsCommit(token, [w]); } catch (e) {} }
-  return { marked: writes.length };
+  // v33: العضويّة بقراءةٍ واحدة لكلّ المحادثات (batchGet بقناع members) — كان غير العضو يكتب حقوله في أيّ محادثة
+  if (!writes.length) return { marked: 0 };
+  const names = [...new Set(writes.map(w => w.update.name))];
+  const ok = new Set();
+  try {
+    const res = await fetch(FS_BASE + ":batchGet", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ documents: names, mask: { fieldPaths: ["members", "deleted"] } }) });
+    for (const r of (await res.json()) || []) if (r.found && !fbool(r.found, "deleted") && fsArr(r.found, "members").indexOf(uid) >= 0) ok.add(r.found.name);
+  } catch (e) { return { marked: 0 }; }
+  const mine = writes.filter(w => ok.has(w.update.name));
+  if (!mine.length) return { marked: 0 };
+  try { await fsCommit(token, mine); return { marked: mine.length }; }
+  catch (e) { let n = 0; for (const w of mine) { try { await fsCommit(token, [w]); n++; } catch (e2) {} } return { marked: n }; }
 }
 async function opChatSettings(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const cid = payload && payload.cid;
   const c = await requireChatMember(token, cid, uid);
   if (fstr(c, "type") === "group" && fsArr(c, "admins").indexOf(uid) < 0) throw new Error("only admins can change this");
+  // v33: محادثة العائلة — المالك والمحرّرون فقط (كان أيّ عضوٍ يشغّلها)
+  if (/^fam_/.test(cid)) {
+    const mem = await fsGet(token, "groups/" + cid.slice(4) + "/members/" + uid).catch(() => null);
+    if (["owner", "editor"].indexOf(fstr(mem, "role")) < 0) throw new Error("only family editors can change this");
+  }
   const allowed = [0, 3600, 86400, 604800, 7776000];
   const dis = Number(payload.disappear || 0);
   if (allowed.indexOf(dis) < 0) throw new Error("bad value");
@@ -1435,21 +1518,31 @@ async function cleanupDisappearing(env) {
     body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "chats" }], where: { fieldFilter: { field: { fieldPath: "disappear" }, op: "GREATER_THAN", value: { integerValue: "0" } } }, limit: 10 } }) });
   const rows = (await res.json() || []).filter(r => r.document).map(r => r.document);
   const now = Date.now(); let removed = 0;
+  // v33: لا يُحذف إلّا ما له أجلٌ (exp) انقضى — كان اليوم كلّه يُحذف بحسب عمره، فتشغيل «المؤقّتة» يمسح التاريخ القديم كلّه.
+  //      الوسائط أوّلاً (حتّى ٥ لكلّ يوم في الدورة)، ولا تُحذف رسالةٌ قبل وسيطها؛ ما بقي يكمل في الدورة التالية.
   for (const c of rows) {
-    const cid = c.name.split("/").pop(), dis = fsInt(c, "disappear");
+    const cid = c.name.split("/").pop();
     const days = await fsList(token, "chats/" + cid + "/days");
     for (const d of days) {
-      const key = d.name.split("/").pop();
-      const dayEnd = Date.UTC(+key.slice(0, 4), +key.slice(4, 6) - 1, +key.slice(6, 8)) + 86400000;
       const msgs = (d.fields && d.fields.msgs && d.fields.msgs.mapValue.fields) || {};
-      const mediaOf = ids => ids.map(id => { const m = fsToJs(msgs[id]); return m && m.extra && m.extra.mid; }).filter(Boolean);
-      if (dayEnd + dis * 1000 < now) {
-        for (const mid of mediaOf(Object.keys(msgs)).slice(0, 5)) { try { await deleteMedia(token, cid, mid); } catch (e) {} }
-        await fsCommit(token, [{ delete: d.name }]); continue;
+      const ids = Object.keys(msgs);
+      const gone = ids.filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && m.exp < now; });
+      if (!gone.length) continue;
+      let budget = 5; const ready = [];
+      for (const id of gone) {
+        const m = fsToJs(msgs[id]), mid = m && m.extra && m.extra.mid;
+        if (!mid) { ready.push(id); continue; }
+        if (budget <= 0) continue;
+        budget--;
+        try { await deleteMedia(token, cid, mid); ready.push(id); } catch (e) {}
       }
-      const gone = Object.keys(msgs).filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && m.exp < now; });
-      for (const mid of mediaOf(gone).slice(0, 5)) { try { await deleteMedia(token, cid, mid); } catch (e) {} }
-      if (gone.length) { await fsCommit(token, [{ update: { name: d.name, fields: {} }, updateMask: { fieldPaths: gone.map(id => fp("msgs", id)) } }]); removed += gone.length; }
+      if (!ready.length) continue;
+      if (ready.length === ids.length) await fsCommit(token, [{ delete: d.name }]);
+      else await fsCommit(token, [{ update: { name: d.name, fields: {} }, updateMask: { fieldPaths: ready.map(id => fp("msgs", id)) } }]);
+      removed += ready.length;
+      const last = c.fields && c.fields.last && fsToJs(c.fields.last);
+      if (last && ready.indexOf(last.id) >= 0) await fsCommit(token, [{ update: { name: c.name, fields: { last: { mapValue: { fields: { del: { booleanValue: true }, text: { stringValue: "" } } } } } },
+        updateMask: { fieldPaths: ["last.del", "last.text"] } }]).catch(() => {});
     }
   }
   return { chats: rows.length, removed };
@@ -1478,9 +1571,11 @@ async function requireGroupAdmin(token, cid, uid) {
   if (fsArr(c, "admins").indexOf(uid) < 0) throw new Error("only admins can do this");
   return c;
 }
-async function writeMembers(token, cid, members, admins, names) {
-  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { members: toFsValue(members), admins: toFsValue(admins), names: toFsValue(names) } },
-    updateMask: { fieldPaths: ["members", "admins", "names"] }, currentDocument: { exists: true } }]);
+async function writeMembers(token, cid, members, admins, names, banned) {
+  const fields = { members: toFsValue(members), admins: toFsValue(admins), names: toFsValue(names) }, mask = ["members", "admins", "names"];
+  if (banned) { fields.banned = toFsValue(banned.slice(-500)); mask.push("banned"); }   // v33: المُزالون لا يعودون برابط الدعوة
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields },
+    updateMask: { fieldPaths: mask }, currentDocument: { exists: true } }]);
   await rtdbSetChatMembers(token, cid, members);
 }
 async function opGroupCreate2(uid, payload, env, claims) {
@@ -1542,7 +1637,9 @@ async function opGroupMembers(uid, payload, env) {
   const removed = remove.filter(u => members.indexOf(u) >= 0);
   members = members.filter(u => removed.indexOf(u) < 0); admins = admins.filter(u => removed.indexOf(u) < 0);
   if (!added.length && !removed.length) return { added, removed };
-  await writeMembers(token, cid, members, admins, names);
+  let banned = fsArr(c, "banned").filter(u => added.indexOf(u) < 0);   // إضافة المشرف تلغي المنع
+  removed.forEach(u => { if (banned.indexOf(u) < 0) banned.push(u); });
+  await writeMembers(token, cid, members, admins, names, banned);
   if (added.length) await sysMsg(token, cid, uid, "added", { who: added });
   if (removed.length) await sysMsg(token, cid, uid, "removed", { who: removed });
   return { added, removed };
@@ -1595,6 +1692,7 @@ async function opGroupJoin(uid, payload, env, claims) {
   if (!c || fbool(c, "deleted")) throw new Error("group not found");
   const members = fsArr(c, "members");
   if (members.indexOf(uid) >= 0) return { cid, already: true, name: fstr(c, "name") };
+  if (fsArr(c, "banned").indexOf(uid) >= 0) throw new Error("removed from this group");   // v33: أزاله مشرف ⇒ لا يعود إلّا بإضافة مشرف
   const names = fsToJs((c.fields || {}).names || { nullValue: null }) || {};
   names[uid] = memberIdFields(claims).name.stringValue || null;
   members.push(uid);
@@ -1624,7 +1722,7 @@ async function opChatVote(uid, payload, env) {
   const ex = m.extra || {};
   if (ex.deadline && Date.now() > ex.deadline) throw new Error("poll closed");
   const opt = payload.option == null ? null : Number(payload.option);
-  if (opt != null && !(opt >= 0 && opt < (ex.options || []).length)) throw new Error("bad option");
+  if (opt != null && !(Number.isInteger(opt) && opt >= 0 && opt < (ex.options || []).length)) throw new Error("bad option");
   await fsCommit(token, [setPath(cid, day, ["msgs", id, "votes", uid], opt == null ? undefined : opt)]);
   return { ok: true };
 }
@@ -1771,6 +1869,12 @@ async function blockedBy(token, target, uid) {
   const blocked = pr && fstr(pr, "data") ? (JSON.parse(fstr(pr, "data")).blocked || []) : [];
   return blocked.indexOf(uid) >= 0;
 }
+// v33: أيّهم حظرني؟ (blk/{هو}/{أنا} في RTDB — يكتبها الـWorker عند حفظ قائمة الحظر)
+async function blockedSet(token, targets, uid) {
+  const out = new Set();
+  await Promise.all(targets.map(u => rtdbGet(token, "blk/" + u + "/" + uid).then(v => { if (v === true) out.add(u); }).catch(() => {})));
+  return out;
+}
 async function opGcallStart(uid, payload, env, claims, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   payload = payload || {};
@@ -1856,10 +1960,14 @@ async function opGcallAdd(uid, payload, env, claims, ctx) {
   if (g.cid) { const c = await chatDoc(token, g.cid); chatMembers = c ? fsArr(c, "members") : []; }
   for (const u of to) if (chatMembers.indexOf(u) < 0 && !(await sharesContact(token, uid, u))) throw new Error("not a contact");
   const me = memberIdFields(claims).name.stringValue || "سوا", now = Date.now();
+  // v33: من حظرني لا تصله دعوتي (لا رنين ولا إشعار) — الردّ نفسه فلا يعرف المحظور
+  const blk = await blockedSet(token, to, uid);
+  const reach = to.filter(u => !blk.has(u));
+  if (!reach.length) return { added: to.length };
   const upd = {};
-  for (const u of to) { upd["gcalls/" + gid + "/allow/" + u] = true; upd["inbox/" + u + "/" + gid] = { from: uid, fromName: me, type: g.type, ts: now, gid, title: g.title || "" }; }
+  for (const u of reach) { upd["gcalls/" + gid + "/allow/" + u] = true; upd["inbox/" + u + "/" + gid] = { from: uid, fromName: me, type: g.type, ts: now, gid, title: g.title || "" }; }
   await rtdbPatch(token, upd);
-  const job = pushTo(token, to, strData({ t: "call", call: gid, gid, from: uid, fromName: me, cid: g.cid || "", type: g.type, title: g.title || me,
+  const job = pushTo(token, reach, strData({ t: "call", call: gid, gid, from: uid, fromName: me, cid: g.cid || "", type: g.type, title: g.title || me,
     body: (g.type === "video" ? "📹 " : "📞 ") + me + " يدعوك لمكالمة جماعيّة", ts: now }));
   if (ctx && ctx.waitUntil) ctx.waitUntil(job.catch(() => {})); else await job;
   return { added: to.length };
@@ -1917,11 +2025,12 @@ async function opSchedSet(uid, payload, env, claims, ctx) {
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/scheds/" + id, fields } }]);
   if (room) {   // بطاقة الغرفة جاهزة والمنظّم مضيفها — من يصل قبله يدخل، ولا يأخذ الاستضافة
     const meta = await rtdbGet(token, "rooms/" + room + "/meta").catch(() => null);
-    if (!meta) await rtdbPatch(token, { ["rooms/" + room + "/meta"]: { host: uid, title: item.title || "غرفة سوا", ts: now, sched: at, locked: false, lobby: false } });
+    if (!meta) await rtdbPatch(token, { ["rooms/" + room + "/meta"]: { host: uid, title: item.title || "غرفة سوا", ts: now, sched: at, locked: false, lobby: !!item.approval, owner: uid } });
     else if (meta.host === uid) await rtdbPatch(token, { ["rooms/" + room + "/meta/sched"]: at, ["rooms/" + room + "/meta/title"]: item.title || meta.title || "غرفة سوا" });
   }
   if (!old) {   // إشعار الدعوة للمدعوّين
-    const others = users.filter(u => u !== uid).slice(0, 8);
+    let others = users.filter(u => u !== uid).slice(0, 8);
+    if (others.length) { const blk = await blockedSet(token, others, uid); others = others.filter(u => !blk.has(u)); }   // v33
     if (others.length) {
       const job = pushTo(token, others, strData({ t: "sched", sid: id, cid: cid || "", room: room || "", title: "📅 " + me + (room ? " دعاك إلى غرفة سوا" : " دعاك لمكالمة"),
         body: (item.type === "video" ? "مكالمة فيديو" : "مكالمة صوتيّة") + (item.title ? " · " + item.title : "") + " — افتح «المكالمات المجدولة»", ts: now }));
@@ -2095,26 +2204,41 @@ let iceCache = null, iceAt = 0;
 // P1: Cloudflare Realtime TURN (١٠٠٠ GB/شهر مجّاناً) — سرّان في Cloudflare: CF_TURN_KEY_ID و CF_TURN_API_TOKEN.
 // بيانات دخولٍ مؤقّتة (٢٤ ساعة) تُجدَّد كلّ ٦ ساعات وتُشارَك بين الطلبات. فشلها ⇒ نرجع إلى Metered تلقائيّاً.
 // TURN_PROVIDER = "metered" (متغيّرٌ اختياريّ) يُجبر الرجوع إلى Metered دون حذف الأسرار.
-let cfIce = null, cfIceAt = 0;
-async function cloudflareIce(env) {
-  if (cfIce && Date.now() - cfIceAt < 6 * 3600 * 1000) return cfIce;
+// v33: بيانات دخولٍ لكلّ مستخدم (صلاحيتها ٦ ساعات، تُعاد له خلال ساعتين) بدل بياناتٍ واحدة لكلّ الناس ٢٤ ساعة —
+//      تسرُّبها لا يفتح المرحِّل للجميع، وصلاحيّتها قصيرة. والضيف المجهول بحدٍّ أضيق (لكلّ حساب ولكلّ عنوان IP).
+const iceByUid = new Map(), iceHits = new Map();
+function iceRateOk(key, max) {
+  const now = Date.now(), h = iceHits.get(key);
+  if (!h || now - h.t > 3600000) { iceHits.set(key, { t: now, n: 1 }); if (iceHits.size > 20000) iceHits.clear(); return true; }
+  return ++h.n <= max;
+}
+async function cloudflareIce(env, uid) {
+  const hit = uid && iceByUid.get(uid);
+  if (hit && Date.now() - hit.at < 2 * 3600 * 1000) return hit.list;
   const res = await fetch("https://rtc.live.cloudflare.com/v1/turn/keys/" + encodeURIComponent(String(env.CF_TURN_KEY_ID).trim()) + "/credentials/generate-ice-servers", {
     method: "POST", headers: { Authorization: "Bearer " + String(env.CF_TURN_API_TOKEN).trim(), "Content-Type": "application/json" },
-    body: JSON.stringify({ ttl: 86400 }) });
+    body: JSON.stringify({ ttl: 6 * 3600 }) });
   let b = null; try { b = await res.json(); } catch (e) {}
   if (!res.ok || !b || !Array.isArray(b.iceServers)) throw new Error("cloudflare turn " + res.status);
   // المنفذ 53 تحجبه المتصفّحات (ينتظر حتّى المهلة) — نحذفه
   const list = b.iceServers.map(x => Object.assign({}, x, { urls: [].concat(x.urls || []).filter(u => !/:53(\?|$)/.test(String(u))) }))
     .filter(x => x.urls.length);
   if (!list.some(x => x.username && x.credential)) throw new Error("cloudflare turn: no credentials");
-  cfIce = list; cfIceAt = Date.now();
+  if (uid) { if (iceByUid.size > 5000) iceByUid.clear(); iceByUid.set(uid, { list, at: Date.now() }); }
   return list;
 }
-async function opRtcIce(uid, payload, env) {
+async function opRtcIce(uid, payload, env, claims, request) {
   const stun = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+  const anon = !!(claims && claims.firebase && claims.firebase.sign_in_provider === "anonymous");
+  const ip = (request && request.headers.get("CF-Connecting-IP")) || "?";
+  // حدّ الطلبات الجديدة (ما في الذاكرة لا يُحسب): المسجَّل ٢٠/ساعة · الضيف ٦/ساعة و٢٠ لكلّ عنوان IP
+  const cached = iceByUid.get(uid);
+  if (!(cached && Date.now() - cached.at < 2 * 3600 * 1000)) {
+    if (!iceRateOk("u:" + uid, anon ? 6 : 20) || (anon && !iceRateOk("ip:" + ip, 20))) { stat("turn:limited"); return { iceServers: stun, turn: false, limited: true }; }
+  }
   let cfErr = null;
   if (env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN && env.TURN_PROVIDER !== "metered") {
-    try { const l = await cloudflareIce(env); stat("turn:cloudflare"); return { turn: true, provider: "cloudflare", iceServers: stun.concat(l) }; }
+    try { const l = await cloudflareIce(env, uid); stat("turn:cloudflare"); return { turn: true, provider: "cloudflare", iceServers: stun.concat(l) }; }
     catch (e) { cfErr = String((e && e.message) || e); console.log("cf turn:", cfErr); }
   }
   const viaMetered = (r) => { if (r.turn) stat("turn:metered"); return Object.assign(r, r.turn ? { provider: "metered" } : {}, cfErr ? { cfErr } : {}); };
@@ -2143,7 +2267,10 @@ async function opCallRing(uid, payload, env, claims, ctx) {
   // المحظور لا يرنّ عند من حظره
   const pr = await fsGet(token, "accounts/" + to + "/chatprefs/main");
   const blocked = pr && fstr(pr, "data") ? (JSON.parse(fstr(pr, "data")).blocked || []) : [];
-  if (blocked.indexOf(uid) >= 0) return { sent: 0 };
+  if (blocked.indexOf(uid) >= 0) return { queued: true };   // v33: الردّ نفسه — لا يعرف المحظور أنّه محظور
+  // v33: لا إشعار «مكالمة واردة» بلا مكالمةٍ حقيقيّة ترنّ منّي إليه (كان يمكن إغراق أحدٍ بإشعارات رنينٍ وهميّة)
+  const call = await rtdbGet(token, "calls/" + callId).catch(() => null);
+  if (!call || call.from !== uid || call.to !== to || call.state !== "ringing") return { queued: true };
   const name = memberIdFields(claims).name.stringValue || "سوا";
   const video = payload.type === "video";
   const job = pushTo(token, [to], strData({ t: "call", call: callId, from: uid, cid: dmId(uid, to), type: video ? "video" : "audio",
@@ -2812,7 +2939,7 @@ export default {
       if (op === "chat.task") { const r = await opChatTask(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.open") { const r = await opChatOpen(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "chat.send") { const r = await opChatSend(uid, body.payload, env, ctx); return json({ ok: true, ...r }); }
-      if (op === "rtc.ice") { const r = await opRtcIce(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "rtc.ice") { const r = await opRtcIce(uid, body.payload, env, claims, request); return json({ ok: true, ...r }); }
       if (op === "call.ring") { const r = await opCallRing(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "gcall.start") { const r = await opGcallStart(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "gcall.add") { const r = await opGcallAdd(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
@@ -2831,6 +2958,8 @@ export default {
       if (op === "chat.prefs") { const r = await opChatPrefs(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "people.list") { const r = await opPeopleList(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "people.invite") { const r = await opPeopleInvite(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "people.peek") { const r = await opPeoplePeek(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "group.peek") { const r = await opGroupPeek(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "people.accept") { const r = await opPeopleAccept(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "code.mine") { const r = await opCodeMine(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "code.find") { const r = await opCodeFind(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
