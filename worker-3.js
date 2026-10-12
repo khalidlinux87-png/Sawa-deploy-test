@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v29-delete";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v31-stats";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1421,6 +1421,11 @@ async function opChatPrefs(uid, payload, env) {
     if (json.length > 200000) throw new Error("prefs too large");
     await fsCommit(token, [{ update: { name: DOC_ROOT + "/" + path, fields: { data: { stringValue: json }, ts: { integerValue: String(Date.now()) } } } }]);
   }
+  // الحظر يُنفَّذ أيضاً في قواعد RTDB (blk/{أنا}/{هو}): لا يرى حضوري، ولا يتّصل بي، ولا يرنّ صندوقي
+  const bl = Array.isArray(data.blocked) ? data.blocked.filter(x => segOk(String(x))).slice(0, 500) : [];
+  if ((set && "blocked" in set) || bl.length) {
+    try { await rtdbPatch(token, { ["blk/" + uid]: bl.length ? Object.fromEntries(bl.map(x => [x, true])) : null }); } catch (e) { console.log("blk:", e && e.message); }
+  }
   return { prefs: data };
 }
 /* تنظيف الرسائل المؤقّتة (Cron كلّ ١٥ دقيقة): محادثاتٌ فيها disappear > 0 ⇒ يُحذف ما انتهى أجله */
@@ -1714,7 +1719,7 @@ async function pushTo(token, uids, data) {
     const devs = await fsList(token, "accounts/" + u + "/devices");
     for (const d of devs.slice(0, 3)) {
       const r = await fcmSend(token, fstr(d, "token"), data);
-      if (r === "ok") sent++;
+      if (r === "ok") { sent++; stat("push"); }
       else if (r === "gone") await fsCommit(token, [{ delete: d.name }]).catch(() => {});
     }
   }
@@ -2109,10 +2114,10 @@ async function opRtcIce(uid, payload, env) {
   const stun = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
   let cfErr = null;
   if (env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN && env.TURN_PROVIDER !== "metered") {
-    try { return { turn: true, provider: "cloudflare", iceServers: stun.concat(await cloudflareIce(env)) }; }
+    try { const l = await cloudflareIce(env); stat("turn:cloudflare"); return { turn: true, provider: "cloudflare", iceServers: stun.concat(l) }; }
     catch (e) { cfErr = String((e && e.message) || e); console.log("cf turn:", cfErr); }
   }
-  const viaMetered = (r) => Object.assign(r, r.turn ? { provider: "metered" } : {}, cfErr ? { cfErr } : {});
+  const viaMetered = (r) => { if (r.turn) stat("turn:metered"); return Object.assign(r, r.turn ? { provider: "metered" } : {}, cfErr ? { cfErr } : {}); };
   // الطريقة الأبسط: اسم المستخدم وكلمة المرور من صفحة المفتاح في Metered (سرّان في Cloudflare) — لا تحتاج اسم التطبيق
   if (env.METERED_USER && env.METERED_PASS) {
     const h = env.METERED_HOST || "global.relay.metered.ca";
@@ -2377,6 +2382,7 @@ async function opCodeRespond(uid, payload, env, claims, ctx) {
     if (bl.indexOf(from) < 0) bl.push(from);
     data.blocked = bl.slice(-500);
     await fsCommit(token, [{ update: { name: DOC_ROOT + "/" + path, fields: { data: { stringValue: JSON.stringify(data) }, ts: { integerValue: String(Date.now()) } } } }]);
+    try { await rtdbPatch(token, { ["blk/" + uid + "/" + from]: true }); } catch (e) {}
   }
   return { done: action };
 }
@@ -2469,7 +2475,7 @@ async function opAccountDelete(uid, payload, env, claims) {
   await commitChunks(token, writes);
   // RTDB: حضوري، صلاحيّاتي، صندوق مكالماتي، ومن كان يرى حضوري
   try { const acl = await rtdbGet(token, "acl/" + uid); for (const o in (acl || {})) rt["acl/" + o + "/" + uid] = null; } catch (e) {}
-  Object.assign(rt, { ["status/" + uid]: null, ["acl/" + uid]: null, ["inbox/" + uid]: null });
+  Object.assign(rt, { ["status/" + uid]: null, ["acl/" + uid]: null, ["inbox/" + uid]: null, ["blk/" + uid]: null });
   try { await rtdbPatch(token, rt); } catch (e) { console.log("rtdb del:", e && e.message); }
   PROFILE_CACHE.delete(uid);
   // الهويّة نفسها (Firebase Auth) — آخر خطوة
@@ -2557,6 +2563,49 @@ async function purgeChat(token, cid, spend) {
   return true;
 }
 
+/* ---------- 33) لوحة الاستهلاك (للمدير) ----------
+   عدّاداتٌ يوميّة في stats/{YYYYMMDD}: الطلبات لكلّ عمليّة (ops.*) · الأخطاء (err.*) · الإشعارات المرسلة · بيانات TURN المُعطاة لكلّ مزوّد.
+   تُجمَع في الذاكرة وتُرسَل دفعةً (كلّ ٤٠ حدثاً أو ٥ دقائق) بزياداتٍ ذرّيّة — كتابةٌ واحدة بدل كتابةٍ لكلّ طلب.
+   admin.stats: للمدير وحده (السرّ ADMIN_EMAIL = بريد حسابه في Google، مؤكَّد). */
+const STATS = { day: null, n: 0, at: Date.now(), m: {} };
+const HEAVY_OPS = new Set(["people.list", "profile.set", "account.delete", "gcall.start", "gcall.add", "sched.set", "bulk.import", "account.adopt", "group.members"]);
+function stat(key, k) {
+  const d = dayKey(Date.now());
+  if (STATS.day !== d) { STATS.day = d; STATS.m = {}; STATS.n = 0; STATS.at = Date.now(); }
+  STATS.m[key] = (STATS.m[key] || 0) + (k || 1); STATS.n++;
+}
+async function flushStats(env, force) {
+  if (!STATS.n || !env.SA_JSON || (!force && STATS.n < 40 && Date.now() - STATS.at < 300000)) return;
+  const m = STATS.m, d = STATS.day; STATS.m = {}; STATS.n = 0; STATS.at = Date.now();
+  try {
+    const token = await getAccessToken(JSON.parse(env.SA_JSON));
+    const tr = Object.keys(m).map(k => { const [a, b] = k.split(":"); return { fieldPath: b ? fp(a, b) : fp(a), increment: { integerValue: String(m[k]) } }; });
+    await fsCommit(token, [{ update: { name: DOC_ROOT + "/stats/" + d, fields: {} }, updateMask: { fieldPaths: [] }, updateTransforms: tr }]);
+  } catch (e) { console.log("stats:", e && e.message); }
+}
+function isAdmin(env, claims) {
+  const want = String(env.ADMIN_EMAIL || "").trim().toLowerCase();
+  return !!(want && claims && claims.email && claims.email_verified && String(claims.email).toLowerCase() === want);
+}
+async function opAdminStats(uid, payload, env, claims) {
+  if (!isAdmin(env, claims)) return { admin: false };
+  await flushStats(env, true);
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const days = (await fsList(token, "stats").catch(() => [])).map(d => ({ day: d.name.split("/").pop(), v: fsToJs({ mapValue: { fields: d.fields || {} } }) || {} }))
+    .sort((a, b) => b.day.localeCompare(a.day)).slice(0, 14);
+  const cnt = async (c) => {   // عدّ مجموعةٍ في الجذر (قراءةٌ واحدة لكلّ ١٠٠٠ وثيقة)
+    try {
+      const res = await fetch(FS_BASE + ":runAggregationQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+        body: JSON.stringify({ structuredAggregationQuery: { structuredQuery: { from: [{ collectionId: c }] }, aggregations: [{ alias: "n", count: {} }] } }) });
+      const r = ((await res.json()) || []).find(x => x.result);
+      const v = r && r.result.aggregateFields && r.result.aggregateFields.n;
+      return v ? Number(v.integerValue || 0) : 0;
+    } catch (e) { return null; }
+  };
+  const [accounts, chats, groups, purge] = await Promise.all([cnt("accounts"), cnt("chats"), cnt("groups"), cnt("purge")]);
+  return { admin: true, days, totals: { accounts, chats, groups, purgePending: purge }, ver: VER };
+}
+
 /* ---------- حدود الطلبات والمعرّفات ---------- */
 const RL = new Map(), RL_WINDOW = 5 * 60 * 1000, RL_MAX = 400;   // ٤٠٠ طلب / ٥ دقائق لكلّ مستخدم
 function rateOk(uid) {
@@ -2580,6 +2629,7 @@ export default {
   // (حدّ ٥٠ طلباً فرعيّاً لكلّ تشغيل: لا تنظيف في تشغيلٍ أرسل تذكيراً)
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
+      await flushStats(env, true);
       let r = { reminders: 0 };
       try { r = await schedReminders(env); } catch (e) { console.log("reminders:", e && e.message); }
       if (r.reminders) return;
@@ -2591,6 +2641,7 @@ export default {
   },
   async fetch(request, env, ctx) {
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
+    let statOp = null;
     try {
       const auth = request.headers.get("Authorization") || "";
       const m = auth.match(/^Bearer (.+)$/);
@@ -2603,6 +2654,10 @@ export default {
       let body = {};
       try { body = await request.json(); } catch (e) {}
       const op = body.op || "whoami";
+      statOp = String(op).replace(/[^a-z0-9._-]/gi, "").slice(0, 40) || "?";
+      stat("ops:" + statOp); stat("req");
+      // العمليّات الثقيلة قريبة من حدّ ٥٠ طلباً فرعيّاً — لا نضيف إليها الإرسال
+      if (ctx && ctx.waitUntil && !HEAVY_OPS.has(statOp)) ctx.waitUntil(flushStats(env));
       const bad = badIds(body.payload);
       if (bad) return json({ ok: false, error: "bad id: " + bad }, 400);
 
@@ -2727,6 +2782,7 @@ export default {
       if (op === "code.reset") { const r = await opCodeReset(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "code.privacy") { const r = await opCodePrivacy(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "account.delete") { const r = await opAccountDelete(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "admin.stats") { const r = await opAdminStats(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "people.remove") { const r = await opPeopleRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "member.hello") { const r = await opMemberHello(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "member.setRole") { const r = await opMemberSetRole(uid, body.payload, env); return json({ ok: true, ...r }); }
@@ -2734,6 +2790,7 @@ export default {
       if (op === "group.settings") { const r = await opGroupSettings(uid, body.payload, env); return json({ ok: true, ...r }); }
       return json({ ok: false, error: "unknown op: " + op }, 400);
     } catch (e) {
+      if (statOp) { stat("err:" + statOp); if (ctx && ctx.waitUntil) ctx.waitUntil(flushStats(env)); }
       return json({ ok: false, error: String((e && e.message) || e) }, 401);
     }
   },
