@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v28-cfturn";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v29-delete";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -101,7 +101,7 @@ async function getAccessToken(sa) {
   const claim = {
     iss: sa.client_email,
     // رمزٌ واحد لكلّ الخدمات: Firestore + Realtime Database (+ الإشعارات لاحقاً)
-    scope: "https://www.googleapis.com/auth/datastore https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/firebase.messaging",
+    scope: "https://www.googleapis.com/auth/datastore https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/firebase.messaging https://www.googleapis.com/auth/identitytoolkit",
     aud: "https://oauth2.googleapis.com/token",
     iat: now, exp: now + 3600,
   };
@@ -2402,6 +2402,161 @@ async function opCodePrivacy(uid, payload, env) {
   return { findable };
 }
 
+/* ---------- 32) حذف الحساب (شرط Google Play) ----------
+   account.delete: فوراً — بيانات الحساب كلّها، روابط جهات الاتّصال والطلبات (في الاتّجاهين)، الرمز، الأجهزة، الإعدادات،
+   المواعيد والدعوات التي أنشأها، عضويّته في المحادثات (رسائله عند الآخرين تبقى باسم «حساب محذوف»)، عضويّته في العائلات
+   التي لا يملكها، الحضور والصلاحيّات في RTDB، ثمّ هويّة Firebase Auth نفسها.
+   ما يحتاج طلباتٍ كثيرة يُكمله الـCron (purge/{id}، حدّ ٥٠ طلباً فرعيّاً لكلّ تشغيل):
+     family — عائلةٌ يملكها: تنتقل ملكيّتها لأعلى عضوٍ رتبةً (محرّر ثمّ مشاهد، الأقدم أوّلاً)، أو تُحذف كاملةً إن كان وحده
+     chat   — محادثته المحفوظة: الأيّام والوسائط وقطعها */
+const DELETED_NAME = "حساب محذوف";
+const GROUP_SUBS = ["persons", "relations", "events", "changelog", "photos", "members"];
+async function opAccountDelete(uid, payload, env, claims) {
+  if (!payload || payload.confirm !== "DELETE") throw new Error("confirm required");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const P = (rel) => DOC_ROOT + "/" + rel;
+  const idOf = (d) => d.name.split("/").pop();
+  const [acc, people, groups, devices, creq, creqout, contacts, schedules] = await Promise.all([
+    fsGet(token, "accounts/" + uid).catch(() => null),
+    ...["people", "groups", "devices", "creq", "creqout", "contacts", "schedules"].map(c => fsList(token, "accounts/" + uid + "/" + c).catch(() => [])),
+  ]);
+  const writes = [], rt = {}, purge = [], now = Date.now();
+  // جهات الاتّصال والطلبات — في الاتّجاهين
+  for (const d of people) { writes.push({ delete: d.name }, { delete: P("accounts/" + idOf(d) + "/people/" + uid) }); rt["acl/" + idOf(d) + "/" + uid] = null; }
+  for (const d of creq) writes.push({ delete: d.name }, { delete: P("accounts/" + idOf(d) + "/creqout/" + uid) });
+  for (const d of creqout) writes.push({ delete: d.name }, { delete: P("accounts/" + idOf(d) + "/creq/" + uid) });
+  for (const d of devices.concat(contacts, schedules)) writes.push({ delete: d.name });
+  writes.push({ delete: P("accounts/" + uid + "/chatprefs/main") });
+  const code = fstr(acc, "code");
+  if (code) writes.push({ delete: P("codes/" + code) });
+  // العائلات: لا يملكها ⇒ يخرج الآن · يملكها ⇒ مهمّة للـCron (نقل الملكيّة أو الحذف الكامل)
+  for (const d of groups) {
+    const gid = idOf(d);
+    writes.push({ delete: d.name });
+    if (fstr(d, "role") === "owner") purge.push({ id: "fam_" + gid + "_" + uid, kind: "family", gid });
+    else writes.push({ delete: P("groups/" + gid + "/members/" + uid) });
+  }
+  // المحادثات
+  let chats = [];
+  try {
+    const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "chats" }], where: { fieldFilter: { field: { fieldPath: "members" }, op: "ARRAY_CONTAINS", value: { stringValue: uid } } }, limit: 300 } }) });
+    chats = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+  } catch (e) {}
+  for (const c of chats) {
+    const cid = idOf(c), type = fstr(c, "type");
+    rt["chatm/" + cid + "/" + uid] = null; rt["typing/" + cid + "/" + uid] = null;
+    if (type === "saved") {
+      writes.push({ update: { name: c.name, fields: { deleted: { booleanValue: true }, members: toFsValue([]) } }, updateMask: { fieldPaths: ["deleted", "members"] } });
+      purge.push({ id: "chat_" + cid, kind: "chat", cid });
+      continue;
+    }
+    const members = fsArr(c, "members").filter(u => u !== uid);
+    let admins = fsArr(c, "admins").filter(u => u !== uid);
+    if (type === "group" && !admins.length && members.length) admins = [members[0]];
+    const fields = { members: toFsValue(members), names: { mapValue: { fields: { [uid]: { stringValue: DELETED_NAME } } } } };
+    const mask = ["members", fp("names", uid)];
+    if (type === "group") { fields.admins = toFsValue(admins); mask.push("admins"); }
+    if (!members.length) { fields.deleted = { booleanValue: true }; mask.push("deleted"); }
+    writes.push({ update: { name: c.name, fields }, updateMask: { fieldPaths: mask } });
+  }
+  // المواعيد التي أنشأها ودعوات «رابطي الشخصيّ»
+  for (const s of await fsQueryEq(token, "scheds", { by: uid }, 100).catch(() => [])) writes.push({ delete: s.name });
+  for (const s of await fsQueryEq(token, "pinvites", { uid: uid }, 100).catch(() => [])) writes.push({ delete: s.name });
+  for (const t of purge) writes.push({ update: { name: P("purge/" + t.id), fields: { kind: { stringValue: t.kind }, uid: { stringValue: uid },
+    gid: t.gid ? { stringValue: t.gid } : { nullValue: null }, cid: t.cid ? { stringValue: t.cid } : { nullValue: null }, ts: { integerValue: String(now) } } } });
+  writes.push({ delete: P("accounts/" + uid) });
+  await commitChunks(token, writes);
+  // RTDB: حضوري، صلاحيّاتي، صندوق مكالماتي، ومن كان يرى حضوري
+  try { const acl = await rtdbGet(token, "acl/" + uid); for (const o in (acl || {})) rt["acl/" + o + "/" + uid] = null; } catch (e) {}
+  Object.assign(rt, { ["status/" + uid]: null, ["acl/" + uid]: null, ["inbox/" + uid]: null });
+  try { await rtdbPatch(token, rt); } catch (e) { console.log("rtdb del:", e && e.message); }
+  PROFILE_CACHE.delete(uid);
+  // الهويّة نفسها (Firebase Auth) — آخر خطوة
+  let authDeleted = false;
+  try {
+    const r = await fetch("https://identitytoolkit.googleapis.com/v1/projects/" + PROJECT_ID + "/accounts:delete", {
+      method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ localId: uid }) });
+    authDeleted = r.ok;
+    if (!r.ok) console.log("auth delete:", r.status, (await r.text()).slice(0, 200));
+  } catch (e) { console.log("auth delete:", e && e.message); }
+  return { deleted: true, authDeleted, queued: purge.length, chats: chats.length, contacts: people.length };
+}
+// الـCron: يكمل مهامّ purge ضمن حدٍّ من الطلبات الفرعيّة (budget). المهمّة تبقى حتّى تكتمل.
+async function purgeWork(env, budget) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  let used = 1, done = 0;
+  const spend = (n) => { used += n || 1; return used <= budget; };
+  const jobs = await fsList(token, "purge").catch(() => []); used++;
+  for (const j of jobs.slice(0, 5)) {
+    if (used >= budget) break;
+    const kind = fstr(j, "kind"), uid = fstr(j, "uid");
+    let finished = false;
+    try {
+      if (kind === "family") finished = await purgeFamily(token, fstr(j, "gid"), uid, spend);
+      else if (kind === "chat") finished = await purgeChat(token, fstr(j, "cid"), spend);
+      else finished = true;
+    } catch (e) { console.log("purge:", kind, e && e.message); }
+    if (finished && spend()) { await fsCommit(token, [{ delete: j.name }]).catch(() => {}); done++; }
+  }
+  return { purged: done, used };
+}
+// يحذف مستندات مجموعةٍ فرعيّة على دفعات (قائمة ٣٠٠ + commit) — يعيد true إن فرغت
+async function purgeColl(token, rel, spend) {
+  for (;;) {
+    if (!spend()) return false;
+    const res = await fetch(FS_BASE + "/" + rel + "?pageSize=300&mask.fieldPaths=__none__", { headers: { Authorization: "Bearer " + token } });
+    if (res.status === 404) return true;
+    const b = await res.json(); const docs = (b && b.documents) || [];
+    if (!docs.length) return true;
+    if (!spend()) return false;
+    await fsCommit(token, docs.map(d => ({ delete: d.name })));
+    if (docs.length < 300) return true;
+  }
+}
+async function purgeFamily(token, gid, uid, spend) {
+  if (!spend()) return false;
+  const members = await fsList(token, "groups/" + gid + "/members");
+  const live = members.filter(m => m.name.split("/").pop() !== uid && fstr(m, "adoptedFrom") !== uid);
+  if (live.length) {
+    // نقل الملكيّة: محرّر قبل مشاهد، والأقدم انضماماً أوّلاً
+    const rank = (m) => ROLE_RANK[fstr(m, "role")] || 0;
+    const ts = (m) => { const v = m.fields && m.fields.joinedTs && m.fields.joinedTs.timestampValue; return v ? Date.parse(v) : 0; };
+    live.sort((a, b) => rank(b) - rank(a) || ts(a) - ts(b));
+    const heir = live[0].name.split("/").pop();
+    if (!spend()) return false;
+    const g = await fsGet(token, "groups/" + gid);
+    if (!spend()) return false;
+    await fsCommit(token, [
+      { update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + heir, fields: { role: { stringValue: "owner" } } }, updateMask: { fieldPaths: ["role"] } },
+      indexWrite(heir, gid, fstr(g, "name"), "owner", new Date().toISOString()),
+      { delete: DOC_ROOT + "/groups/" + gid + "/members/" + uid },
+    ]);
+    if (spend(3)) { try { await famChatSync(token, gid); } catch (e) {} }
+    return true;
+  }
+  // وحده فيها: حذفٌ كامل للشجرة
+  for (const sub of GROUP_SUBS) if (!(await purgeColl(token, "groups/" + gid + "/" + sub, spend))) return false;
+  if (!spend(2)) return false;
+  await fsCommit(token, [{ delete: DOC_ROOT + "/groups/" + gid }, { delete: DOC_ROOT + "/chats/fam_" + gid }]).catch(() => {});
+  try { await rtdbPatch(token, { ["chatm/fam_" + gid]: null }); } catch (e) {}
+  return true;
+}
+async function purgeChat(token, cid, spend) {
+  if (!segOk(cid)) return true;
+  if (!(await purgeColl(token, "chats/" + cid + "/days", spend))) return false;
+  if (!spend()) return false;
+  const media = await fsList(token, "chats/" + cid + "/media").catch(() => []);
+  for (const m of media) {
+    if (!(await purgeColl(token, "chats/" + cid + "/media/" + m.name.split("/").pop() + "/c", spend))) return false;
+    if (!spend()) return false;
+    await fsCommit(token, [{ delete: m.name }]).catch(() => {});
+  }
+  if (!spend()) return false;
+  await fsCommit(token, [{ delete: DOC_ROOT + "/chats/" + cid }]).catch(() => {});
+  return true;
+}
+
 /* ---------- حدود الطلبات والمعرّفات ---------- */
 const RL = new Map(), RL_WINDOW = 5 * 60 * 1000, RL_MAX = 400;   // ٤٠٠ طلب / ٥ دقائق لكلّ مستخدم
 function rateOk(uid) {
@@ -2431,6 +2586,7 @@ export default {
       const slot = Math.floor(new Date(event.scheduledTime || Date.now()).getUTCMinutes() / 5) % 3;
       if (slot === 0) await cleanupDisappearing(env).catch(e => console.log("cleanup:", e && e.message));
       else if (slot === 1) await cleanupCalls(env).catch(e => console.log("calls cleanup:", e && e.message));
+      else await purgeWork(env, 40).catch(e => console.log("purge:", e && e.message));   // حذف الحسابات: ما تبقّى من عائلاتٍ ومحادثات
     })());
   },
   async fetch(request, env, ctx) {
@@ -2570,6 +2726,7 @@ export default {
       if (op === "code.cancel") { const r = await opCodeCancel(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "code.reset") { const r = await opCodeReset(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "code.privacy") { const r = await opCodePrivacy(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "account.delete") { const r = await opAccountDelete(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "people.remove") { const r = await opPeopleRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "member.hello") { const r = await opMemberHello(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "member.setRole") { const r = await opMemberSetRole(uid, body.payload, env); return json({ ok: true, ...r }); }
