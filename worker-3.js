@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v34-links";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v35-scale";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1170,6 +1170,15 @@ const MSG_ID = /^[A-Za-z0-9_]{6,40}$/;
 const MEDIA_ID = /^[A-Za-z0-9_]{6,40}$/;
 const MEDIA_TYPES = ["voice", "image", "video", "file"];
 const MSG_TYPES = ["text", "sticker", "contact", "voice", "image", "video", "file", "poll", "bill", "fund", "tasks", "system"];
+// v35: وثيقة اليوم حدّها ١ ميغابايت — المحادثة المزدحمة تكتب بعد ٨٥٠ ألف حرف في جزءٍ تالٍ «YYYYMMDD-2» (العميل يقرأ الأجزاء كأيّام)
+const DAY_REF = /^\d{8}(-\d{1,3})?$/, SHARD_MAX = 850000;
+const tooBig = (e) => /maximum allowed size|exceeds the maximum|too large|INVALID_ARGUMENT.*size/i.test(String((e && e.message) || e));
+function shardOf(c, ts, len, bump) {
+  const day = dayKey(ts), s = (c && c.fields && c.fields.shard && fsToJs(c.fields.shard)) || null;
+  let n = s && s.day === day ? (Number(s.n) || 1) : 1, sz = s && s.day === day ? (Number(s.sz) || 0) : 0;
+  if (bump || sz + len > SHARD_MAX) { n = bump ? Math.max(n, bump) + 1 : n + 1; sz = 0; }
+  return { day, n, sz: sz + len, key: n > 1 ? day + "-" + n : day };
+}
 function dayKey(ms) { const d = new Date(ms); return d.getUTCFullYear() + String(d.getUTCMonth() + 1).padStart(2, "0") + String(d.getUTCDate()).padStart(2, "0"); }
 function dmId(a, b) { return "dm_" + [a, b].sort().join("_"); }
 function fsInt(d, k) { const v = d && d.fields && d.fields[k]; return v ? Number(v.integerValue || v.doubleValue || 0) : 0; }
@@ -1292,8 +1301,9 @@ async function opChatSend(uid, payload, env, ctx) {
   if (type === "group" && fbool(c, "adminsOnly")) {
     if (fsArr(c, "admins").indexOf(uid) < 0) throw new Error("only admins can send here");
   }
-  const ts = Date.now(), day = dayKey(ts);
+  const ts = Date.now();
   const msg = cleanMsg(payload.msg, uid, ts);
+  let sh = shardOf(c, ts, JSON.stringify(msg).length + 200), day = sh.key;
   if (msg.extra && msg.extra.mid) {   // الوسيط رفعه المرسل نفسه في هذه المحادثة واكتمل
     const meta = await fsGet(token, "chats/" + cid + "/media/" + msg.extra.mid);
     if (!meta || fstr(meta, "by") !== uid || !fbool(meta, "done")) throw new Error("media not uploaded");
@@ -1302,7 +1312,7 @@ async function opChatSend(uid, payload, env, ctx) {
   // v33: معرّف الرسالة لا يُعاد استعماله — كان أيّ عضوٍ يستبدل رسالة غيره (أو رسالة نظام) بإرسال المعرّف نفسه.
   //      المعرّف نفسه من المرسل نفسه = إعادة محاولة ⇒ لا نكتب ثانيةً ولا نرسل إشعاراً مكرّراً.
   //      الاقتباس في الردّ يُؤخذ من الرسالة الأصليّة لا ممّا كتبه المرسل (إن كانت من اليوم أو من يومٍ أرسله العميل)
-  const rday = msg.reply && /^\d{8}$/.test(String((payload.msg.reply || {}).day || "")) ? String(payload.msg.reply.day) : day;
+  const rday = msg.reply && DAY_REF.test(String((payload.msg.reply || {}).day || "")) ? String(payload.msg.reply.day) : day;
   const peek = await dayPeek(token, cid, day, [msg.id].concat(msg.reply && rday === day ? [msg.reply.id] : []));
   if (peek[msg.id]) {
     if (peek[msg.id].by !== uid) throw new Error("message id taken");
@@ -1317,25 +1327,32 @@ async function opChatSend(uid, payload, env, ctx) {
   }
   const dis = fsInt(c, "disappear");
   if (dis > 0) msg.exp = ts + dis * 1000;
-  await fsCommit(token, [
-    { update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day, fields: { msgs: { mapValue: { fields: { [msg.id]: toFsValue(msg) } } } } },
+  const sendWrites = (sh) => (msg.extra && msg.extra.mid ? [{ delete: DOC_ROOT + "/mediaq/" + cid + "~" + msg.extra.mid }] : []).concat([
+    { update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + sh.key, fields: { msgs: { mapValue: { fields: { [msg.id]: toFsValue(msg) } } } } },
       updateMask: { fieldPaths: [fp("msgs", msg.id)] } },
     { update: { name: DOC_ROOT + "/chats/" + cid, fields: {
-        last: toFsValue({ id: msg.id, by: uid, type: msg.type, text: previewOf(msg), ts: ts, day: day }),
+        last: toFsValue({ id: msg.id, by: uid, type: msg.type, text: previewOf(msg), ts: ts, day: sh.key }),
         updatedTs: { integerValue: String(ts) },
+        shard: toFsValue({ day: sh.day, n: sh.n, sz: sh.sz }),
         reads: { mapValue: { fields: { [uid]: { integerValue: String(ts) } } } },
         delivered: { mapValue: { fields: { [uid]: { integerValue: String(ts) } } } } } },
-      updateMask: { fieldPaths: ["last", "updatedTs", fp("reads", uid), fp("delivered", uid)] },
+      updateMask: { fieldPaths: ["last", "updatedTs", "shard", fp("reads", uid), fp("delivered", uid)] },
       updateTransforms: [{ fieldPath: "cnt", increment: { integerValue: "1" } }, { fieldPath: fp("readCnt", uid), increment: { integerValue: "1" } }],
       currentDocument: { exists: true } },
   ]);
+  try { await fsCommit(token, sendWrites(sh)); }
+  catch (e) {   // امتلأ الجزء (تعديلات وتفاعلات كبّرته) ⇒ الجزء التالي
+    if (!tooBig(e)) throw e;
+    sh = shardOf(c, ts, JSON.stringify(msg).length + 200, sh.n); day = sh.key;
+    await fsCommit(token, sendWrites(sh));
+  }
   // الإشعارات بعد الردّ (waitUntil) فلا ينتظرها المرسل
   const job = notifyChat(token, c, cid, uid, msg).catch(e => console.log("push:", e && e.message));
   if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
   return { ts, day, id: msg.id };
 }
 async function dayMsg(token, cid, day, id) {
-  if (!/^\d{8}$/.test(String(day || "")) || !MSG_ID.test(String(id || ""))) throw new Error("bad message ref");
+  if (!DAY_REF.test(String(day || "")) || !MSG_ID.test(String(id || ""))) throw new Error("bad message ref");
   const d = await fsGet(token, "chats/" + cid + "/days/" + day);
   const v = d && d.fields && d.fields.msgs && d.fields.msgs.mapValue.fields && d.fields.msgs.mapValue.fields[id];
   if (!v) throw new Error("message not found");
@@ -1363,6 +1380,37 @@ async function deleteMedia(token, cid, mid) {
   const writes = chunks.map(d => ({ delete: d.name })).concat([{ delete: DOC_ROOT + "/" + base }]);
   await commitChunks(token, writes);
   return chunks.length;
+}
+/* v35: حجز الرفع — الجهاز يطلب الإذن قبل رفع أيّ وسيط (القواعد ترفض وسيطاً بلا حجز في mediaq).
+   حدٌّ يوميّ لكلّ مستخدم، وما لم يُرسَل خلال ٢٤ ساعة يحذفه الـCron (كانت الرفعات المتروكة تبقى إلى الأبد = تخزينٌ مجّانيّ بلا حدّ). */
+const MEDIA_DAY_MAX = 300 * 1024 * 1024;
+async function opMediaBegin(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const { cid, mid } = payload || {}, size = Math.floor(Number((payload || {}).size) || 0);
+  if (!MEDIA_ID.test(String(mid || ""))) throw new Error("bad media id");
+  if (!(size > 0 && size <= 16 * 1024 * 1024)) throw new Error("bad size");
+  await requireChatMember(token, cid, uid);
+  const day = dayKey(Date.now()), q = await fsGet(token, "quota/" + uid).catch(() => null);
+  const used = q && fstr(q, "d") === day ? fsInt(q, "bytes") : 0;
+  if (used + size > MEDIA_DAY_MAX) throw new Error("media quota");
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/mediaq/" + cid + "~" + mid, fields: { uid: { stringValue: uid }, cid: { stringValue: cid }, mid: { stringValue: mid }, size: { integerValue: String(size) }, ts: { integerValue: String(Date.now()) } } } },
+    { update: { name: DOC_ROOT + "/quota/" + uid, fields: { d: { stringValue: day }, bytes: { integerValue: String(used + size) } } } },
+  ]);
+  return { ok: true, left: MEDIA_DAY_MAX - used - size };
+}
+// الـCron: رفعاتٌ حُجزت ولم تُرسل خلال ٢٤ ساعة ⇒ تُحذف مع قطعها
+async function mediaGc(env, max) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "mediaq" }], where: { fieldFilter: { field: { fieldPath: "ts" }, op: "LESS_THAN", value: { integerValue: String(Date.now() - 86400000) } } }, limit: max || 5 } }) });
+  const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+  let n = 0;
+  for (const d of rows) {
+    const cid = fstr(d, "cid"), mid = fstr(d, "mid");
+    try { if (segOk(cid)) await deleteMedia(token, cid, mid); await fsCommit(token, [{ delete: d.name }]); n++; } catch (e) { console.log("mediaGc:", e && e.message); }
+  }
+  return { gc: n };
 }
 async function opMediaViewed(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -1418,7 +1466,7 @@ async function opChatReact(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const { cid, day, id } = payload || {};
   await requireChatMember(token, cid, uid);
-  if (!/^\d{8}$/.test(String(day || "")) || !MSG_ID.test(String(id || ""))) throw new Error("bad message ref");
+  if (!DAY_REF.test(String(day || "")) || !MSG_ID.test(String(id || ""))) throw new Error("bad message ref");
   const target = (await dayPeek(token, cid, day, [id]))[id];   // v33: لا تفاعل مع رسالةٍ غير موجودة أو محذوفة
   if (!target || !target.by || target.del) throw new Error("message not found");
   const emoji = payload.emoji ? String(payload.emoji).slice(0, 16) : null;
@@ -1477,7 +1525,7 @@ async function opChatSettings(uid, payload, env) {
   const allowed = [0, 3600, 86400, 604800, 7776000];
   const dis = Number(payload.disappear || 0);
   if (allowed.indexOf(dis) < 0) throw new Error("bad value");
-  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { disappear: { integerValue: String(dis) }, disappearBy: { stringValue: uid } } }, updateMask: { fieldPaths: ["disappear", "disappearBy"] } }]);
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { disappear: { integerValue: String(dis) }, disappearBy: { stringValue: uid }, disOn: { booleanValue: true } } }, updateMask: { fieldPaths: ["disappear", "disappearBy", "disOn"] } }]);
   return { disappear: dis };
 }
 // إعداداتي في المحادثات تتزامن بين أجهزتي: أرشفة، تثبيت، كتم، قفل، مجلّدات، سمات، نغمات، مميّزة، محذوفة عندي، محظورون
@@ -1514,20 +1562,46 @@ async function opChatPrefs(uid, payload, env) {
 /* تنظيف الرسائل المؤقّتة (Cron كلّ ١٥ دقيقة): محادثاتٌ فيها disappear > 0 ⇒ يُحذف ما انتهى أجله */
 async function cleanupDisappearing(env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
-  const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "chats" }], where: { fieldFilter: { field: { fieldPath: "disappear" }, op: "GREATER_THAN", value: { integerValue: "0" } } }, limit: 10 } }) });
-  const rows = (await res.json() || []).filter(r => r.document).map(r => r.document);
+  // v35: يمرّ على كلّ المحادثات بالدور (مؤشّرٌ محفوظ في meta/cleanup) — كان يعالج أوّل ١٠ محادثات فقط إلى الأبد.
+  //      disOn: كلّ محادثةٍ شُغّلت فيها المؤقّتة (ولو أُطفئت بعدها، لأنّ رسائلها القديمة ما زال لها أجل) حتّى لا يبقى فيها ما له أجل.
+  const q = (where, extra) => fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: Object.assign({ from: [{ collectionId: "chats" }], where, limit: 10 }, extra || {}) }) })
+    .then(r => r.json()).then(b => (b || []).filter(r => r.document).map(r => r.document)).catch(() => []);
+  const metaDoc = await fsGet(token, "meta/cleanup").catch(() => null);
+  const cur = fstr(metaDoc, "disCur") || "";
+  const eq = { fieldFilter: { field: { fieldPath: "disOn" }, op: "EQUAL", value: { booleanValue: true } } };
+  const rows = await q(eq, Object.assign({ orderBy: [{ field: { fieldPath: "__name__" }, direction: "ASCENDING" }] }, cur ? { startAt: { values: [{ referenceValue: cur }], before: false } } : {}));
+  // المحادثات القديمة (قبل v35) بلا disOn: مرورٌ واحد على كلّ المحادثات (٥٠ في كلّ دورة) يضمّ ما فيه المؤقّتة إلى الدور، ثمّ يتوقّف
+  let legacy = [], legCur = fstr(metaDoc, "legCur") || "", legDone = fbool(metaDoc, "legDone");
+  if (!legDone) {
+    const all = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ structuredQuery: Object.assign({ from: [{ collectionId: "chats" }], select: { fields: [{ fieldPath: "disappear" }, { fieldPath: "disOn" }] },
+        orderBy: [{ field: { fieldPath: "__name__" }, direction: "ASCENDING" }], limit: 50 }, legCur ? { startAt: { values: [{ referenceValue: legCur }], before: false } } : {}) }) })
+      .then(r => r.json()).then(b => (b || []).filter(r => r.document).map(r => r.document)).catch(() => null);
+    if (all) {
+      legacy = all.filter(c => fsInt(c, "disappear") > 0 && !fbool(c, "disOn"));
+      if (legacy.length) await fsCommit(token, legacy.map(c => ({ update: { name: c.name, fields: { disOn: { booleanValue: true } } }, updateMask: { fieldPaths: ["disOn"] } }))).catch(() => {});
+      legCur = all.length ? all[all.length - 1].name : legCur; legDone = all.length < 50;
+    }
+  }
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/meta/cleanup", fields: { disCur: { stringValue: rows.length === 10 ? rows[rows.length - 1].name : "" }, disTs: { integerValue: String(Date.now()) },
+    legCur: { stringValue: legCur }, legDone: { booleanValue: legDone } } },
+    updateMask: { fieldPaths: ["disCur", "disTs", "legCur", "legDone"] } }]).catch(() => {});
+  legacy = [];   // تُعالَج في دورها التالي (صار لها disOn)
   const now = Date.now(); let removed = 0;
   // v33: لا يُحذف إلّا ما له أجلٌ (exp) انقضى — كان اليوم كلّه يُحذف بحسب عمره، فتشغيل «المؤقّتة» يمسح التاريخ القديم كلّه.
   //      الوسائط أوّلاً (حتّى ٥ لكلّ يوم في الدورة)، ولا تُحذف رسالةٌ قبل وسيطها؛ ما بقي يكمل في الدورة التالية.
-  for (const c of rows) {
+  for (const c of rows.concat(legacy)) {
     const cid = c.name.split("/").pop();
     const days = await fsList(token, "chats/" + cid + "/days");
+    let pending = 0;
     for (const d of days) {
       const msgs = (d.fields && d.fields.msgs && d.fields.msgs.mapValue.fields) || {};
       const ids = Object.keys(msgs);
       const gone = ids.filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && m.exp < now; });
+      pending += ids.filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && m.exp >= now; }).length;
       if (!gone.length) continue;
+      pending += gone.length;   // ما لم يُحذف في هذه الدورة يُحسب حتّى يُحذف
       let budget = 5; const ready = [];
       for (const id of gone) {
         const m = fsToJs(msgs[id]), mid = m && m.extra && m.extra.mid;
@@ -1537,6 +1611,7 @@ async function cleanupDisappearing(env) {
         try { await deleteMedia(token, cid, mid); ready.push(id); } catch (e) {}
       }
       if (!ready.length) continue;
+      pending -= ready.length;
       if (ready.length === ids.length) await fsCommit(token, [{ delete: d.name }]);
       else await fsCommit(token, [{ update: { name: d.name, fields: {} }, updateMask: { fieldPaths: ready.map(id => fp("msgs", id)) } }]);
       removed += ready.length;
@@ -1544,8 +1619,10 @@ async function cleanupDisappearing(env) {
       if (last && ready.indexOf(last.id) >= 0) await fsCommit(token, [{ update: { name: c.name, fields: { last: { mapValue: { fields: { del: { booleanValue: true }, text: { stringValue: "" } } } } } },
         updateMask: { fieldPaths: ["last.del", "last.text"] } }]).catch(() => {});
     }
+    // المؤقّتة مطفأة ولم يبقَ ما له أجل ⇒ تخرج من الدور
+    if (!fsInt(c, "disappear") && pending <= 0) await fsCommit(token, [{ update: { name: c.name, fields: {} }, updateMask: { fieldPaths: ["disOn"] } }]).catch(() => {});
   }
-  return { chats: rows.length, removed };
+  return { chats: rows.length + legacy.length, removed };
 }
 
 /* ---------- 27) المجموعات (C3) ----------
@@ -1557,13 +1634,20 @@ async function contactSet(token, uid) {
   return m;
 }
 async function sysMsg(token, cid, uid, ev, extra) {
-  const ts = Date.now(), day = dayKey(ts), id = "s" + ts.toString(36) + Math.random().toString(36).slice(2, 7);
+  const ts = Date.now(), id = "s" + ts.toString(36) + Math.random().toString(36).slice(2, 7);
   const msg = { id, by: uid, ts, type: "system", extra: Object.assign({ ev }, extra || {}) };
-  await fsCommit(token, [
+  const w = (day) => [
     { update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day, fields: { msgs: { mapValue: { fields: { [id]: toFsValue(msg) } } } } }, updateMask: { fieldPaths: [fp("msgs", id)] } },
     { update: { name: DOC_ROOT + "/chats/" + cid, fields: { last: toFsValue({ id, by: uid, type: "system", text: "", ts, day, ev }), updatedTs: { integerValue: String(ts) } } },
       updateMask: { fieldPaths: ["last", "updatedTs"] }, currentDocument: { exists: true } },
-  ]);
+  ];
+  // v35: رسالة النظام تذهب إلى جزء اليوم الحاليّ (من وثيقة المحادثة) — قراءةٌ واحدة فقط إن امتلأ الجزء الأوّل
+  try { await fsCommit(token, w(dayKey(ts))); }
+  catch (e) {
+    if (!tooBig(e)) throw e;
+    const c = await chatDoc(token, cid), sh = shardOf(c, ts, 400);
+    try { await fsCommit(token, w(sh.key)); } catch (e2) { if (!tooBig(e2)) throw e2; await fsCommit(token, w(shardOf(c, ts, 400, sh.n).key)); }
+  }
 }
 async function requireGroupAdmin(token, cid, uid) {
   const c = await requireChatMember(token, cid, uid);
@@ -1716,6 +1800,18 @@ function nestFields(path, value) {
   for (let i = path.length - 1; i >= 1; i--) v = { mapValue: { fields: { [path[i]]: v } } };
   return { [path[0]]: v };
 }
+/* v35: الاستطلاع المجهول مجهولٌ فعلاً — الصوت يُخزَّن تحت مفتاحٍ مشتقّ (HMAC بسرّ الخادم) لا يُعرف منه صاحبه،
+   وصوتٌ واحد لكلّ عضو كما كان. الجهاز يعرف مفتاحه هو فقط (chat.pollKeys) ليُظهر اختياره. */
+let pollHmac = null;
+async function anonKey(env, uid, cid, id) {
+  if (!pollHmac) {
+    const secret = env.POLL_SECRET || (JSON.parse(env.SA_JSON).private_key || "") + "|poll";
+    pollHmac = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  }
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", pollHmac, new TextEncoder().encode(uid + "|" + cid + "|" + id)));
+  let b = ""; for (let i = 0; i < 12; i++) b += sig[i].toString(16).padStart(2, "0");
+  return "a" + b;
+}
 async function opChatVote(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const { m, cid, day, id } = await toolMsg(token, payload, uid, "poll");
@@ -1723,8 +1819,24 @@ async function opChatVote(uid, payload, env) {
   if (ex.deadline && Date.now() > ex.deadline) throw new Error("poll closed");
   const opt = payload.option == null ? null : Number(payload.option);
   if (opt != null && !(Number.isInteger(opt) && opt >= 0 && opt < (ex.options || []).length)) throw new Error("bad option");
+  if (ex.anonymous) {
+    const key = await anonKey(env, uid, cid, id);
+    const w = [setPath(cid, day, ["msgs", id, "votes", key], opt == null ? undefined : opt)];
+    if (m.votes && uid in m.votes) w.push(setPath(cid, day, ["msgs", id, "votes", uid], undefined));   // صوتٌ قديم باسمه (قبل v35) يُمحى
+    await fsCommit(token, w);
+    return { ok: true, key };
+  }
   await fsCommit(token, [setPath(cid, day, ["msgs", id, "votes", uid], opt == null ? undefined : opt)]);
   return { ok: true };
+}
+async function opChatPollKeys(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const cid = payload && payload.cid;
+  await requireChatMember(token, cid, uid);
+  const ids = (Array.isArray(payload.ids) ? payload.ids : []).filter(x => MSG_ID.test(String(x))).slice(0, 50);
+  const keys = {};
+  for (const id of ids) keys[id] = await anonKey(env, uid, cid, id);
+  return { keys };
 }
 async function opChatPollEdit(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -2025,8 +2137,8 @@ async function opSchedSet(uid, payload, env, claims, ctx) {
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/scheds/" + id, fields } }]);
   if (room) {   // بطاقة الغرفة جاهزة والمنظّم مضيفها — من يصل قبله يدخل، ولا يأخذ الاستضافة
     const meta = await rtdbGet(token, "rooms/" + room + "/meta").catch(() => null);
-    if (!meta) await rtdbPatch(token, { ["rooms/" + room + "/meta"]: { host: uid, title: item.title || "غرفة سوا", ts: now, sched: at, locked: false, lobby: !!item.approval, owner: uid } });
-    else if (meta.host === uid) await rtdbPatch(token, { ["rooms/" + room + "/meta/sched"]: at, ["rooms/" + room + "/meta/title"]: item.title || meta.title || "غرفة سوا" });
+    if (!meta) await rtdbPatch(token, { ["rooms/" + room + "/meta"]: { host: uid, title: item.title || "غرفة سوا", ts: now, sched: at, gc: at + 6 * 3600000, locked: false, lobby: !!item.approval, owner: uid } });
+    else if (meta.host === uid) await rtdbPatch(token, { ["rooms/" + room + "/meta/sched"]: at, ["rooms/" + room + "/meta/gc"]: at + 6 * 3600000, ["rooms/" + room + "/meta/title"]: item.title || meta.title || "غرفة سوا" });
   }
   if (!old) {   // إشعار الدعوة للمدعوّين
     let others = users.filter(u => u !== uid).slice(0, 8);
@@ -2100,7 +2212,7 @@ async function cleanupCalls(env) {
     for (const k in (calls || {})) { upd["calls/" + k] = null; n++; }
   } catch (e) {}
   try {
-    const gs = await rtdbGet(token, "gcalls", '&orderBy="ts"&endAt=' + (now - 2 * 3600000) + "&limitToFirst=20");
+    const gs = await rtdbGet(token, "gcalls", '&orderBy="ts"&endAt=' + (now - 2 * 3600000) + "&limitToFirst=40");
     for (const k in (gs || {})) {
       const g = gs[k] || {};
       if (!g.members || now - (g.ts || 0) > 12 * 3600000) { upd["gcalls/" + k] = null; if (g.cid) upd["gcur/" + g.cid] = null; n++; }
@@ -2108,7 +2220,10 @@ async function cleanupCalls(env) {
   } catch (e) {}
   // الغرف: فارغة وأقدم من ٣ ساعات (والمجدولة بعد مرور موعدها بـ٦ ساعات) أو منتهية
   try {
-    const rs = await rtdbGet(token, "rooms", '&orderBy="meta/ts"&endAt=' + (now - 3 * 3600000) + "&limitToFirst=20");
+    // v35: المجدولة (موعدها بعيد) كانت تسدّ أوّل ٢٠ فيتوقّف التنظيف — الآن meta/gc (موعد جواز الحذف) + القديمة بنافذةٍ أوسع
+    const rs = Object.assign({},
+      await rtdbGet(token, "rooms", '&orderBy="meta/ts"&endAt=' + (now - 3 * 3600000) + "&limitToFirst=40").catch(() => ({})),
+      await rtdbGet(token, "rooms", '&orderBy="meta/gc"&startAt=1&endAt=' + now + "&limitToFirst=20").catch(() => ({})));
     for (const k in (rs || {})) {
       const r = rs[k] || {}, m = r.meta || {};
       if ((!r.members && (!m.sched || m.sched < now - 6 * 3600000)) || m.ended) { upd["rooms/" + k] = null; n++; }
@@ -2821,7 +2936,7 @@ export default {
       if (r.reminders) return;
       const slot = Math.floor(new Date(event.scheduledTime || Date.now()).getUTCMinutes() / 5) % 3;
       if (slot === 0) await cleanupDisappearing(env).catch(e => console.log("cleanup:", e && e.message));
-      else if (slot === 1) await cleanupCalls(env).catch(e => console.log("calls cleanup:", e && e.message));
+      else if (slot === 1) { await cleanupCalls(env).catch(e => console.log("calls cleanup:", e && e.message)); await mediaGc(env, 4).catch(e => console.log("media gc:", e && e.message)); }
       else await purgeWork(env, 40).catch(e => console.log("purge:", e && e.message));   // حذف الحسابات: ما تبقّى من عائلاتٍ ومحادثات
     })());
   },
@@ -2932,6 +3047,7 @@ export default {
       if (op === "group.invite") { const r = await opGroupInvite(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "group.join") { const r = await opGroupJoin(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "media.viewed") { const r = await opMediaViewed(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.pollKeys") { const r = await opChatPollKeys(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.vote") { const r = await opChatVote(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.pollEdit") { const r = await opChatPollEdit(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.billPaid") { const r = await opChatBillPaid(uid, body.payload, env); return json({ ok: true, ...r }); }
@@ -2958,6 +3074,7 @@ export default {
       if (op === "chat.prefs") { const r = await opChatPrefs(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "people.list") { const r = await opPeopleList(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "people.invite") { const r = await opPeopleInvite(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "media.begin") { const r = await opMediaBegin(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "people.peek") { const r = await opPeoplePeek(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "group.peek") { const r = await opGroupPeek(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "people.accept") { const r = await opPeopleAccept(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
