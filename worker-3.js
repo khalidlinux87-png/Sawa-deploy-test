@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v31-stats";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v32-reports";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2602,8 +2602,67 @@ async function opAdminStats(uid, payload, env, claims) {
       return v ? Number(v.integerValue || 0) : 0;
     } catch (e) { return null; }
   };
-  const [accounts, chats, groups, purge] = await Promise.all([cnt("accounts"), cnt("chats"), cnt("groups"), cnt("purge")]);
-  return { admin: true, days, totals: { accounts, chats, groups, purgePending: purge }, ver: VER };
+  const [accounts, chats, groups, purge, openReports] = await Promise.all([cnt("accounts"), cnt("chats"), cnt("groups"), cnt("purge"),
+    fsQueryEq(token, "reports", { status: "open" }, 100).then(r => r.length).catch(() => null)]);
+  return { admin: true, days, totals: { accounts, chats, groups, purgePending: purge, openReports }, ver: VER };
+}
+
+/* ---------- 34) البلاغات (سياسة Google Play للمحتوى من المستخدمين) ----------
+   report.create {cid?, target?, reason, note}: المبلِّغ عضوٌ في المحادثة ⇒ يُرفق آخر ٢٠ رسالة (نصوصها مقتطعة) ليراجعها المدير.
+   reports/{id} = { by, byName, target, cid, type, reason, note, sample(JSON), ts, status: open|closed } — للخادم وحده.
+   admin.reports / admin.reportClose: للمدير (ADMIN_EMAIL). */
+const REPORT_REASONS = ["spam", "harassment", "hate", "violence", "sexual", "scam", "impersonation", "other"];
+async function recentMsgs(token, cid, n) {
+  const res = await fetch(FS_BASE + "/chats/" + cid + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "days" }], orderBy: [{ field: { fieldPath: "__name__" }, direction: "DESCENDING" }], limit: 2 } }) });
+  const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+  let all = [];
+  for (const d of rows) { const m = fsToJs((d.fields || {}).msgs || { nullValue: null }) || {}; for (const k in m) all.push(m[k]); }
+  return all.filter(x => x && !x.gone && x.type !== "system").sort((a, b) => (a.ts || 0) - (b.ts || 0)).slice(-n)
+    .map(x => ({ by: x.by || null, type: x.type || "text", text: typeof x.text === "string" ? x.text.slice(0, 300) : "", ts: x.ts || 0 }));
+}
+async function opReportCreate(uid, payload, env, claims) {
+  if (!codeRate(uid, "report", 10)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  payload = payload || {};
+  const reason = REPORT_REASONS.indexOf(payload.reason) >= 0 ? payload.reason : "other";
+  const note = String(payload.note || "").replace(/\s+/g, " ").trim().slice(0, 500);
+  let cid = payload.cid || null, target = payload.target || null, type = null, sample = [];
+  if (cid) {
+    if (!segOk(cid)) throw new Error("bad cid");
+    const c = await requireChatMember(token, cid, uid);
+    type = fstr(c, "type");
+    if (!target && type === "dm") target = fsArr(c, "members").find(x => x !== uid) || null;
+    try { sample = await recentMsgs(token, cid, 20); } catch (e) {}
+  }
+  if (target && !segOk(String(target))) throw new Error("bad target");
+  if (!cid && !target) throw new Error("nothing to report");
+  const id = "r" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), now = Date.now();
+  const me = memberIdFields(claims);
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/reports/" + id, fields: {
+    by: { stringValue: uid }, byName: me.name, target: target ? { stringValue: target } : { nullValue: null }, cid: cid ? { stringValue: cid } : { nullValue: null },
+    type: type ? { stringValue: type } : { nullValue: null }, reason: { stringValue: reason }, note: { stringValue: note },
+    sample: { stringValue: JSON.stringify(sample) }, ts: { integerValue: String(now) }, status: { stringValue: "open" } } } }]);
+  stat("report");
+  return { id };
+}
+async function opAdminReports(uid, payload, env, claims) {
+  if (!isAdmin(env, claims)) return { admin: false };
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const docs = await fsQueryEq(token, "reports", { status: "open" }, 30).catch(() => []);
+  const items = docs.map(d => { const v = fsToJs({ mapValue: { fields: d.fields || {} } }) || {}; let sample = []; try { sample = JSON.parse(v.sample || "[]"); } catch (e) {}
+    return { id: d.name.split("/").pop(), by: v.by, byName: v.byName, target: v.target, cid: v.cid, type: v.type, reason: v.reason, note: v.note, ts: v.ts, sample }; })
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  return { admin: true, items };
+}
+async function opAdminReportClose(uid, payload, env, claims) {
+  if (!isAdmin(env, claims)) return { admin: false };
+  const id = payload && payload.id;
+  if (!segOk(String(id || ""))) throw new Error("id required");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/reports/" + id, fields: { status: { stringValue: "closed" }, closedTs: { integerValue: String(Date.now()) } } },
+    updateMask: { fieldPaths: ["status", "closedTs"] }, currentDocument: { exists: true } }]);
+  return { admin: true, closed: id };
 }
 
 /* ---------- حدود الطلبات والمعرّفات ---------- */
@@ -2782,6 +2841,9 @@ export default {
       if (op === "code.reset") { const r = await opCodeReset(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "code.privacy") { const r = await opCodePrivacy(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "account.delete") { const r = await opAccountDelete(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "report.create") { const r = await opReportCreate(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "admin.reports") { const r = await opAdminReports(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "admin.reportClose") { const r = await opAdminReportClose(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "admin.stats") { const r = await opAdminStats(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "people.remove") { const r = await opPeopleRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "member.hello") { const r = await opMemberHello(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
