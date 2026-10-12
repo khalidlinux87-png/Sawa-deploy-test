@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v35-scale";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v36-e2e";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1257,6 +1257,113 @@ async function opChatOpen(uid, payload, env, claims) {
   await rtdbSetChatMembers(token, cid, [uid, to]);
   return { cid };
 }
+/* ---------- v36: المحادثات السرّيّة (تشفيرٌ بين الطرفين) ----------
+   الخادم لا يرى المحتوى: يحفظ المفاتيح العامّة لأجهزة الأعضاء ويمرّر النصّ المشفّر كما وصل.
+   chats/{cid}.e2e = { on: true, devs: { uid: devId }, keys: { devId: { u: uid, k: مفتاح P-256 العامّ (٦٥ بايت base64), ts } } }
+   - كلّ عضوٍ يربط جهازاً واحداً (devs). مفتاح الجهاز لا يتغيّر بعد تسجيله (keys إلحاقٌ فقط) ⇒ الرسائل القديمة تبقى قابلةً للفكّ.
+   - الرسالة: { id, type, enc: { v, d: جهاز المرسل, iv, ct, k: { devId: مفتاح الرسالة مغلّفاً لذلك الجهاز } }, reply: { id, day }, extra: { mid, viewOnce } } */
+const E2E_DEV = /^[A-Za-z0-9]{16,24}$/, E2E_B64 = /^[A-Za-z0-9+/]+={0,2}$/;
+const E2E_TYPES = ["text", "sticker", "contact", "voice", "image", "video", "file"];
+function e2eOf(c) { const v = c && c.fields && c.fields.e2e; const e = v ? fsToJs(v) : null; return e && e.on ? e : null; }
+function e2ePubOk(k) {
+  k = String(k || ""); if (k.length !== 88 || !E2E_B64.test(k)) return false;
+  try { const b = atob(k); return b.length === 65 && b.charCodeAt(0) === 4; } catch (e) { return false; }
+}
+// معرّف الجهاز مشتقٌّ من مفتاحه (أوّل ١٢ بايت من SHA-256 بالست عشريّ): لا ينتحل أحدٌ معرّف جهاز غيره بمفتاحٍ آخر
+async function e2eDevOf(k) {
+  const raw = Uint8Array.from(atob(k), ch => ch.charCodeAt(0));
+  const h = new Uint8Array(await crypto.subtle.digest("SHA-256", raw));
+  return Array.from(h.slice(0, 12), b => b.toString(16).padStart(2, "0")).join("");
+}
+async function e2eDevKey(p) {
+  const d = String((p && p.d) || ""), k = String((p && p.k) || "");
+  if (!E2E_DEV.test(d) || !e2ePubOk(k)) throw new Error("bad e2e key");
+  if (await e2eDevOf(k) !== d) throw new Error("bad e2e key");
+  return { d, k };
+}
+function cleanEnc(en, uid, e) {
+  if (!en || typeof en !== "object") throw new Error("encrypted payload required");
+  const myDev = e && e.devs && e.devs[uid];
+  if (!myDev || en.d !== myDev) throw new Error("e2e device not bound");
+  const iv = String(en.iv || ""), ct = String(en.ct || "");
+  if (iv.length !== 16 || !E2E_B64.test(iv)) throw new Error("bad e2e payload");
+  if (ct.length < 24 || ct.length > 40000 || !E2E_B64.test(ct)) throw new Error("bad e2e payload");
+  const k = {}; let n = 0;
+  for (const d of Object.keys(en.k || {})) {
+    const w = String(en.k[d] || "");
+    if (!E2E_DEV.test(d) || w.length < 40 || w.length > 120 || !E2E_B64.test(w)) throw new Error("bad e2e payload");
+    k[d] = w; if (++n > 300) throw new Error("bad e2e payload");
+  }
+  if (!n) throw new Error("bad e2e payload");
+  return { v: 1, d: en.d, iv, ct, k };
+}
+function cleanEncMsg(m, uid, ts, e) {
+  if (!m || !MSG_ID.test(String(m.id || ""))) throw new Error("bad message id");
+  const type = m.type || "text";
+  if (E2E_TYPES.indexOf(type) < 0) throw new Error("bad type for a secret chat");
+  const out = { id: m.id, by: uid, ts: ts, type: type, enc: cleanEnc(m.enc, uid, e) };   // لا نصّ ظاهر: ما ليس داخل enc يُهمَل
+  if (m.reply && MSG_ID.test(String(m.reply.id || ""))) out.reply = { id: m.reply.id, day: DAY_REF.test(String(m.reply.day || "")) ? String(m.reply.day) : null, e2e: true };
+  if (m.fwd) out.fwd = true;
+  if (Array.isArray(m.mentions)) out.mentions = m.mentions.filter(x => segOk(String(x))).slice(0, 50);
+  if (MEDIA_TYPES.indexOf(type) >= 0) {
+    const mid = m.extra && m.extra.mid;
+    if (!MEDIA_ID.test(String(mid || ""))) throw new Error("media id required");
+    out.extra = { mid: mid };
+    if (m.extra.viewOnce) out.extra.viewOnce = true;
+  }
+  if (JSON.stringify(out).length > 48000) throw new Error("message too large");
+  return out;
+}
+async function e2eNames(token, uid, to, me) {
+  const other = await fsGet(token, "accounts/" + uid + "/people/" + to);
+  let otherName = other ? fstr(other, "name") : null;
+  if (!otherName) {
+    for (const d of (await fsList(token, "accounts/" + uid + "/groups")).slice(0, 20)) {
+      const m = await fsGet(token, "groups/" + d.name.split("/").pop() + "/members/" + to); if (m && fstr(m, "name")) { otherName = fstr(m, "name"); break; }
+    }
+  }
+  return { [uid]: me.name.stringValue || null, [to]: otherName || null };
+}
+// محادثةٌ سرّيّة مع شخص: معرّفٌ جديد كلّ مرّة (sdm_…)، مرتبطةٌ بهذا الجهاز. الطرف الآخر يفعّلها على جهازه (e2e.join).
+async function opE2eDm(uid, payload, env, claims) {
+  if (!codeRate(uid, "e2e", 20)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const to = payload && payload.to;
+  if (!segOk(to) || to === uid) throw new Error("to required");
+  const dk = await e2eDevKey(payload);
+  if (!(await sharesContact(token, uid, to))) throw new Error("not a contact");
+  if (await blockedBy(token, to, uid)) throw new Error("not a contact");   // لا نخبره أنّه محظور
+  const now = Date.now(), cid = "sdm_" + crypto.randomUUID().replace(/-/g, "").slice(0, 20);
+  const names = await e2eNames(token, uid, to, memberIdFields(claims));
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { type: { stringValue: "dm" }, members: toFsValue([uid, to].sort()),
+    names: toFsValue(names), createdTs: { integerValue: String(now) }, createdBy: { stringValue: uid }, updatedTs: { integerValue: String(now) }, cnt: { integerValue: "0" },
+    e2e: toFsValue({ on: true, devs: { [uid]: dk.d }, keys: { [dk.d]: { u: uid, k: dk.k, ts: now } } }) } }, currentDocument: { exists: false } }]);
+  await rtdbSetChatMembers(token, cid, [uid, to]);
+  await sysMsg(token, cid, uid, "e2e_on", {});
+  try {   // إشعارٌ بالدعوة (بلا محتوى)
+    const c = await chatDoc(token, cid);
+    if (c) await notifyChat(token, c, cid, uid, { id: "e2einv", type: "text", text: "🔒 دعاك إلى محادثة سرّيّة", ts: now });
+  } catch (e) { console.log("e2e invite push:", e && e.message); }
+  return { cid };
+}
+// تفعيل المحادثة السرّيّة على هذا الجهاز (أوّل مرّة، أو نقلها من جهازٍ آخر ⇒ «تغيّر رمز الأمان» يظهر للجميع)
+async function opE2eJoin(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const cid = payload && payload.cid;
+  const c = await requireChatMember(token, cid, uid);
+  const e = e2eOf(c); if (!e) throw new Error("not a secret chat");
+  const dk = await e2eDevKey(payload), keys = e.keys || {}, devs = e.devs || {};
+  const had = keys[dk.d];
+  if (had && (had.u !== uid || had.k !== dk.k)) throw new Error("e2e key conflict");
+  if (devs[uid] === dk.d) return { joined: true, already: true };
+  if (!had && Object.keys(keys).length >= 300) throw new Error("too many devices");
+  const now = Date.now(), prev = devs[uid] || null;
+  const f = { e2e: { mapValue: { fields: { devs: { mapValue: { fields: { [uid]: { stringValue: dk.d } } } } } } } }, mask = [fp("e2e", "devs", uid)];
+  if (!had) { f.e2e.mapValue.fields.keys = { mapValue: { fields: { [dk.d]: toFsValue({ u: uid, k: dk.k, ts: now }) } } }; mask.push(fp("e2e", "keys", dk.d)); }
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: f }, updateMask: { fieldPaths: mask }, currentDocument: { exists: true } }]);
+  await sysMsg(token, cid, uid, prev ? "e2e_rekey" : "e2e_join", {});
+  return { joined: true, rekey: !!prev };
+}
 function cleanMsg(m, uid, ts) {
   if (!m || !MSG_ID.test(String(m.id || ""))) throw new Error("bad message id");
   const type = MSG_TYPES.indexOf(m.type) >= 0 ? m.type : "text";
@@ -1301,8 +1408,8 @@ async function opChatSend(uid, payload, env, ctx) {
   if (type === "group" && fbool(c, "adminsOnly")) {
     if (fsArr(c, "admins").indexOf(uid) < 0) throw new Error("only admins can send here");
   }
-  const ts = Date.now();
-  const msg = cleanMsg(payload.msg, uid, ts);
+  const ts = Date.now(), e2e = e2eOf(c);
+  const msg = e2e ? cleanEncMsg(payload.msg, uid, ts, e2e) : cleanMsg(payload.msg, uid, ts);
   let sh = shardOf(c, ts, JSON.stringify(msg).length + 200), day = sh.key;
   if (msg.extra && msg.extra.mid) {   // الوسيط رفعه المرسل نفسه في هذه المحادثة واكتمل
     const meta = await fsGet(token, "chats/" + cid + "/media/" + msg.extra.mid);
@@ -1318,7 +1425,7 @@ async function opChatSend(uid, payload, env, ctx) {
     if (peek[msg.id].by !== uid) throw new Error("message id taken");
     return { ts: peek[msg.id].ts || ts, day, id: msg.id, dup: true };
   }
-  if (msg.reply) {
+  if (msg.reply && !e2e) {   // v36: في السرّيّة الاقتباس داخل النصّ المشفّر — الخادم لا يقرؤه
     const orig = rday === day ? peek[msg.reply.id] : (await dayPeek(token, cid, rday, [msg.reply.id]))[msg.reply.id];
     if (orig && !orig.del) msg.reply = { id: msg.reply.id, by: orig.by || null, text: String(orig.text || previewOf(orig) || "").slice(0, 200), day: rday };
     else if (orig && orig.del) msg.reply = { id: msg.reply.id, by: orig.by || null, text: "", day: rday, del: true };
@@ -1331,7 +1438,7 @@ async function opChatSend(uid, payload, env, ctx) {
     { update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + sh.key, fields: { msgs: { mapValue: { fields: { [msg.id]: toFsValue(msg) } } } } },
       updateMask: { fieldPaths: [fp("msgs", msg.id)] } },
     { update: { name: DOC_ROOT + "/chats/" + cid, fields: {
-        last: toFsValue({ id: msg.id, by: uid, type: msg.type, text: previewOf(msg), ts: ts, day: sh.key }),
+        last: toFsValue(Object.assign({ id: msg.id, by: uid, type: msg.type, text: e2e ? "" : previewOf(msg), ts: ts, day: sh.key }, e2e ? { e2e: true } : {})),
         updatedTs: { integerValue: String(ts) },
         shard: toFsValue({ day: sh.day, n: sh.n, sz: sh.sz }),
         reads: { mapValue: { fields: { [uid]: { integerValue: String(ts) } } } },
@@ -1423,7 +1530,7 @@ async function opMediaViewed(uid, payload, env) {
   const others = fsArr(c, "members").filter(u => u !== m.by);
   const all = others.every(u => viewed[u]);
   const f = { viewed: { mapValue: { fields: { [uid]: { integerValue: String(viewed[uid]) } } } } }, mask = [fp("msgs", id, "viewed", uid)];
-  if (all) { f.gone = { booleanValue: true }; mask.push(fp("msgs", id, "gone"), fp("msgs", id, "extra", "thumb"), fp("msgs", id, "extra", "transcript")); }
+  if (all) { f.gone = { booleanValue: true }; mask.push(fp("msgs", id, "gone"), fp("msgs", id, "extra", "thumb"), fp("msgs", id, "extra", "transcript"), fp("msgs", id, "enc")); }
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day, fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: f } } } } } } },
     updateMask: { fieldPaths: mask } }]);
   if (all) await deleteMedia(token, cid, m.extra.mid);   // شاهده الجميع ⇒ يُحذف الوسيط نهائيّاً
@@ -1432,10 +1539,19 @@ async function opMediaViewed(uid, payload, env) {
 async function opChatEdit(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const { cid, day, id } = payload || {};
-  await requireChatMember(token, cid, uid);
+  const c = await requireChatMember(token, cid, uid);
   const m = await dayMsg(token, cid, day, id);
   if (m.by !== uid) throw new Error("only the sender can edit");
   if (m.del) throw new Error("message deleted");
+  const e2e = e2eOf(c);
+  if (e2e) {   // v36: التعديل في السرّيّة نصٌّ مشفّرٌ جديد للرسالة نفسها
+    if (m.type !== "text") throw new Error("only text can be edited");
+    const enc = cleanEnc(payload.enc, uid, e2e), now2 = Date.now();
+    await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day,
+      fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { enc: toFsValue(enc), edited: { integerValue: String(now2) } } } } } } } } },
+      updateMask: { fieldPaths: [fp("msgs", id, "enc"), fp("msgs", id, "edited")] } }]);
+    return { edited: now2 };
+  }
   const text = String((payload && payload.text) || "").slice(0, 4000);
   if (!text.trim()) throw new Error("empty message");
   const now = Date.now();
@@ -1456,7 +1572,7 @@ async function opChatDelete(uid, payload, env) {
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day,
     fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { del: { booleanValue: true }, delBy: { stringValue: uid } } } } } } } } },
     updateMask: { fieldPaths: [fp("msgs", id, "del"), fp("msgs", id, "delBy"), fp("msgs", id, "text"), fp("msgs", id, "extra"), fp("msgs", id, "reply"), fp("msgs", id, "contact"), fp("msgs", id, "re"),
-      fp("msgs", id, "votes"), fp("msgs", id, "paid"), fp("msgs", id, "contrib"), fp("msgs", id, "tstate"), fp("msgs", id, "mentions"), fp("msgs", id, "viewed"), fp("msgs", id, "fwd")] } }]);
+      fp("msgs", id, "votes"), fp("msgs", id, "paid"), fp("msgs", id, "contrib"), fp("msgs", id, "tstate"), fp("msgs", id, "mentions"), fp("msgs", id, "viewed"), fp("msgs", id, "fwd"), fp("msgs", id, "enc")] } }]);
   const lastId = c.fields.last && c.fields.last.mapValue && c.fields.last.mapValue.fields && c.fields.last.mapValue.fields.id && c.fields.last.mapValue.fields.id.stringValue;
   if (lastId === id) await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { last: { mapValue: { fields: { del: { booleanValue: true }, text: { stringValue: "" } } } } } },
     updateMask: { fieldPaths: ["last.del", "last.text"] } }]);
@@ -1672,13 +1788,17 @@ async function opGroupCreate2(uid, payload, env, claims) {
   const names = { [uid]: memberIdFields(claims).name.stringValue || null };
   members.forEach(u => { if (u !== uid) names[u] = contacts[u]; });
   const cid = "grp_" + crypto.randomUUID().replace(/-/g, "").slice(0, 20), now = Date.now();
-  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: {
+  const dk = payload.e2e ? await e2eDevKey(payload.e2e) : null;   // v36: مجموعةٌ سرّيّة
+  const gf = {
     type: { stringValue: "group" }, name: { stringValue: name }, desc: { stringValue: String(payload.desc || "").slice(0, 500) },
     members: toFsValue(members), admins: toFsValue([uid]), names: toFsValue(names), createdBy: { stringValue: uid },
-    createdTs: { integerValue: String(now) }, updatedTs: { integerValue: String(now) }, cnt: { integerValue: "0" }, adminsOnly: { booleanValue: false } } },
+    createdTs: { integerValue: String(now) }, updatedTs: { integerValue: String(now) }, cnt: { integerValue: "0" }, adminsOnly: { booleanValue: false } };
+  if (dk) gf.e2e = toFsValue({ on: true, devs: { [uid]: dk.d }, keys: { [dk.d]: { u: uid, k: dk.k, ts: now } } });
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: gf },
     currentDocument: { exists: false } }]);
   await rtdbSetChatMembers(token, cid, members);
   await sysMsg(token, cid, uid, "created", { name });
+  if (dk) await sysMsg(token, cid, uid, "e2e_on", {});
   return { cid, members, skipped: want.filter(u => !(u in contacts)) };
 }
 async function opGroupUpdate(uid, payload, env) {
@@ -1946,7 +2066,7 @@ async function notifyChat(token, c, cid, uid, msg) {
     .sort((a, b) => (mentions.indexOf(b) >= 0) - (mentions.indexOf(a) >= 0));
   if (!targets.length || type === "saved") return 0;
   const group = type === "group" || type === "family";
-  const body = msg.type === "text" || msg.type === "sticker" ? (msg.text || "") : ({ image: "📷 صورة", video: "🎥 فيديو", voice: "🎤 رسالة صوتيّة", file: "📎 ملفّ", poll: "📊 استطلاع", bill: "🧾 فاتورة", fund: "💝 تبرّعات", tasks: "✅ مهامّ", contact: "👤 جهة اتّصال" }[msg.type] || "رسالة");
+  const body = msg.enc ? "🔒 رسالة مشفّرة" : msg.type === "text" || msg.type === "sticker" ? (msg.text || "") : ({ image: "📷 صورة", video: "🎥 فيديو", voice: "🎤 رسالة صوتيّة", file: "📎 ملفّ", poll: "📊 استطلاع", bill: "🧾 فاتورة", fund: "💝 تبرّعات", tasks: "✅ مهامّ", contact: "👤 جهة اتّصال" }[msg.type] || "رسالة");
   const base = { t: "msg", cid, from: uid, mid: msg.id, title: group ? (fstr(c, "name") || "سوا") : senderName, body: group ? senderName + ": " + body : body, ts: msg.ts };
   let sent = 0;
   const ment = targets.filter(u => mentions.indexOf(u) >= 0), rest = targets.filter(u => mentions.indexOf(u) < 0);
@@ -1961,7 +2081,7 @@ async function syncMutedBy(token, uid, before, after) {
   a.forEach(cid => { if (!b.has(cid)) changes.push([cid, "appendMissingElements"]); });
   b.forEach(cid => { if (!a.has(cid)) changes.push([cid, "removeAllFromArray"]); });
   for (const [cid, op] of changes.slice(0, 20)) {
-    if (!/^(dm_|sv_|fam_|grp_)/.test(cid) || !segOk(cid)) continue;
+    if (!/^(dm_|sdm_|sv_|fam_|grp_)/.test(cid) || !segOk(cid)) continue;
     await fsCommit(token, [{ transform: { document: DOC_ROOT + "/chats/" + cid, fieldTransforms: [{ fieldPath: "mutedBy", [op]: { values: [{ stringValue: uid }] } }] },
       currentDocument: { exists: true } }]).catch(() => {});
   }
@@ -2876,6 +2996,9 @@ async function opReportCreate(uid, payload, env, claims) {
     type = fstr(c, "type");
     if (!target && type === "dm") target = fsArr(c, "members").find(x => x !== uid) || null;
     try { sample = await recentMsgs(token, cid, 20); } catch (e) {}
+    // v36: السرّيّة لا يقرؤها الخادم — المُبلِّغ يرفق آخر رسائلها من جهازه (مفكوكةً) ليراجعها فريقنا
+    if (e2eOf(c) && Array.isArray(payload.e2eSample)) sample = payload.e2eSample.slice(-20).map(x => ({ by: segOk(String((x && x.by) || "")) ? x.by : null,
+      type: "text", text: String((x && x.text) || "").slice(0, 300), ts: Number((x && x.ts) || 0) || 0, e2e: true }));
   }
   if (target && !segOk(String(target))) throw new Error("bad target");
   if (!cid && !target) throw new Error("nothing to report");
@@ -3055,6 +3178,9 @@ export default {
       if (op === "chat.task") { const r = await opChatTask(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.open") { const r = await opChatOpen(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "chat.send") { const r = await opChatSend(uid, body.payload, env, ctx); return json({ ok: true, ...r }); }
+      if (op === "e2e.dm") { const r = await opE2eDm(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "e2e.group") { if (!body.payload || !body.payload.e2e) throw new Error("bad e2e key"); const r = await opGroupCreate2(uid, body.payload, env, claims); return json({ ok: true, e2e: true, ...r }); }
+      if (op === "e2e.join") { const r = await opE2eJoin(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "rtc.ice") { const r = await opRtcIce(uid, body.payload, env, claims, request); return json({ ok: true, ...r }); }
       if (op === "call.ring") { const r = await opCallRing(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "gcall.start") { const r = await opGcallStart(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
