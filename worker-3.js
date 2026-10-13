@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v38-location";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v39-family";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -319,6 +319,7 @@ async function opInviteAccept(uid, payload, env, claims) {
   const grant = fstr(invite, "role") === "editor" ? "editor" : "viewer";
   const g = await fsGet(token, "groups/" + groupId);
   if (!g || fbool(g, "deleted")) throw new Error("this family was deleted");
+  if (fsArr(g, "banned").indexOf(uid) >= 0) throw new Error("removed from this family");   // v39: من أزاله المالك لا يعود بالرابط
   const gname = fstr(g, "name") || fstr(invite, "groupName") || "عائلتي";
   const now = new Date().toISOString();
   // عضوٌ سلفاً؟ لا نُنزِل دوره — نرفعه فقط إن كانت الدعوة أعلى
@@ -400,9 +401,18 @@ async function opPersonSet(uid, payload, env) {
     }
   } else { pid = crypto.randomUUID(); creating = true; }
 
-  const changed = [], updFields = {}, ftsSub = {};
-  for (const k of ALLOWED) if (k in fields) { updFields[k] = toFsValue(capVal(fields[k])); ftsSub[k] = { timestampValue: now }; changed.push(k); }
-  if (changed.length === 0 && !creating) throw new Error("no fields to set");
+  // v39: «الأحدث يفوز» لكلّ حقل — العميل يرسل وقت تعديله (ts)؛ حقلٌ كُتب في الخادم بعده يُترك كما هو (كان المتأخّر وصولاً يمسح الأحدث)
+  const editTs = Number(payload && payload.ts) || 0, exFts = (!creating && (await fsGet(token, "groups/" + groupId + "/persons/" + pid).catch(() => null)) || null);
+  const srvTs = (k) => { try { const v = exFts.fields.fts.mapValue.fields[k].timestampValue; return Date.parse(v) || 0; } catch (e) { return 0; } };
+  const changed = [], skipped = [], updFields = {}, ftsSub = {};
+  for (const k of ALLOWED) if (k in fields) {
+    if (editTs && exFts && srvTs(k) > editTs + 2000) { skipped.push(k); continue; }
+    updFields[k] = toFsValue(capVal(fields[k])); ftsSub[k] = { timestampValue: editTs ? new Date(Math.min(editTs, Date.now())).toISOString() : now }; changed.push(k);
+  }
+  if (changed.length === 0 && !creating) return { personId: pid, created: false, changed: [], skipped };
+  if (creating) {   // v39: سقف الأشخاص في العائلة
+    try { const n = await fsCount(token, "groups/" + groupId, "persons"); if (n >= 5000) throw new Error("family is full (5000)"); } catch (e) { if (/full/.test(String(e && e.message))) throw e; }
+  }
 
   // ترقيعٌ لا استبدال: updateMask يكتب الحقول المذكورة وحدها
   const mask = changed.slice();
@@ -419,7 +429,7 @@ async function opPersonSet(uid, payload, env) {
       fields: { ts: { timestampValue: now }, by: { stringValue: uid }, personId: { stringValue: pid },
                 op: { stringValue: "person.set" }, changed: toFsValue(changed) } } },
   ]);
-  return { personId: pid, created: creating, changed: changed };
+  return { personId: pid, created: creating, changed: changed, skipped };
 }
 
 /* ---------- 8) العمليّة: relation.add (بنيويّ — حارسٌ ثم مراجعة) ---------- */
@@ -435,6 +445,10 @@ async function opRelationAdd(uid, payload, env) {
   if (["parent", "spouse", "ex_spouse", "sibling"].indexOf(type) < 0) throw new Error("bad relation type");
   if (!from || !to) throw new Error("from/to required");
   if (from === to) throw new Error("from equals to");
+  if (!segOk(String(from)) || !segOk(String(to))) throw new Error("bad id");
+  // v39: الطرفان من هذه العائلة وغير محذوفَين (كانت تُقبل معرّفاتٌ من عائلةٍ أخرى أو وهميّة)
+  const [pf, pt] = await Promise.all([fsGet(token, "groups/" + groupId + "/persons/" + from), fsGet(token, "groups/" + groupId + "/persons/" + to)]);
+  if (!pf || fbool(pf, "deleted") || !pt || fbool(pt, "deleted")) throw new Error("person not found");
 
   // ⛔ لا نقرأ كلّ صلات العائلة (كانت تكلّف قراءةً لكلّ صلة في كلّ إضافة): استعلاماتٌ موجّهة فقط
   const gPath = "groups/" + groupId;
@@ -496,7 +510,7 @@ async function opRelationAdd(uid, payload, env) {
     { update: { name: DOC_ROOT + "/groups/" + groupId + "/relations/" + relId,
       fields: Object.assign({ type: { stringValue: type }, from: { stringValue: from }, to: { stringValue: to },
                 createdTs: { timestampValue: now }, deleted: { booleanValue: false } },
-                payload.inferred ? { inferred: { stringValue: String(payload.inferred) } } : {}) } },
+                payload.inferred ? { inferred: { stringValue: String(payload.inferred).slice(0, 60) } } : {}) } },
   ]);
   return { applied: true, relationId: relId };
 }
@@ -621,11 +635,12 @@ async function opBulkImport(uid, payload, env, claims) {
   for (const r of relations) {
     const from = map[r.fromLocalId], to = map[r.toLocalId];
     if (!from || !to) { orphans++; continue; }
+    if (["parent", "spouse", "ex_spouse", "sibling"].indexOf(r.type) < 0 || from === to) { orphans++; continue; }   // v39
     const rid = (r.localId && segOk(String(r.localId))) ? String(r.localId) : crypto.randomUUID();
     relWrites.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/relations/" + rid,
       fields: Object.assign({ type: { stringValue: r.type }, from: { stringValue: from }, to: { stringValue: to },
                 createdTs: { timestampValue: now }, deleted: { booleanValue: false } },
-                r.inferred ? { inferred: { stringValue: String(r.inferred) } } : {}) } });
+                r.inferred ? { inferred: { stringValue: String(r.inferred).slice(0, 60) } } : {}) } });
   }
 
   // عائلةٌ جديدة: الوثيقة + المالك. موجودةٌ: لا نمسّ المالك ولا الأعضاء.
@@ -694,6 +709,13 @@ async function opPersonDelete(uid, payload, env) {
   const ex = await fsGet(token, "groups/" + groupId + "/persons/" + pid);
   if (!ex) throw new Error("person not found");
   const now = new Date().toISOString();
+  // v39: صلاته تُشطب معه (كانت تبقى معلّقةً بشخصٍ محذوف)
+  const relW = [];
+  try {
+    const rs = [].concat(await fsQuerySub(token, "groups/" + groupId, "relations", [["from", "EQUAL", pid]], 200), await fsQuerySub(token, "groups/" + groupId, "relations", [["to", "EQUAL", pid]], 200));
+    for (const r of rs) if (!fbool(r, "deleted")) relW.push({ update: { name: r.name, fields: { deleted: { booleanValue: true }, deletedTs: { timestampValue: now } } }, updateMask: { fieldPaths: ["deleted", "deletedTs"] } });
+  } catch (e) { console.log("person.delete rels:", e && e.message); }
+  if (relW.length) await commitChunks(token, relW.slice(0, 400));
   await fsCommit(token, [
     { update: { name: DOC_ROOT + "/groups/" + groupId + "/persons/" + pid,
       fields: { deleted: { booleanValue: true }, deletedTs: { timestampValue: now }, deletedBy: { stringValue: uid } } },
@@ -824,6 +846,7 @@ async function opAccountAdopt(uid, payload, env, claims) {
     adopted.push(gid);
   }
   if (writes.length) await commitChunks(token, writes);
+  for (const gid of adopted.slice(0, 8)) { try { await famChatSync(token, gid); } catch (e) {} }   // v39: محادثة العائلة تعرف هويّتي الجديدة فوراً
   return { adopted: adopted, fromUid: fromUid };
 }
 
@@ -884,6 +907,9 @@ async function opGroupDelete(uid, payload, env) {
     writes.push({ delete: d.name });
     writes.push({ delete: DOC_ROOT + "/accounts/" + mu + "/groups/" + gid });
   }
+  // v39: المجموعات الفرعيّة (الأشخاص، الصلات، الصور…) كانت تبقى إلى الأبد — تُحذف بالـCron
+  const pj = "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  writes.push({ update: { name: DOC_ROOT + "/purge/" + pj, fields: { kind: { stringValue: "family" }, uid: { stringValue: "__deleted__" }, gid: { stringValue: gid }, cid: { nullValue: null }, ts: { integerValue: String(Date.now()) } } } });
   await commitChunks(token, writes);
   try { await famChatSync(token, gid, []); } catch (e) {}
   return { groupId: gid, deleted: true, membersRemoved: members.length };
@@ -992,7 +1018,17 @@ async function opMemberHello(uid, payload, env, claims) {
     updated.push(gid);
   }
   if (writes.length) await fsCommit(token, writes);
+  for (const gid of updated.slice(0, 6)) { try { await famChatSync(token, gid); } catch (e) {} }   // v39: اسمي في محادثة العائلة
   return { updated };
+}
+// v39: المالك يرفع المنع عن عضوٍ أزاله (ليعود بالرابط)
+async function opMemberUnban(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const gid = payload && payload.groupId, target = payload && payload.uid;
+  if (!segOk(gid) || !segOk(target)) throw new Error("groupId/uid required");
+  await requireOwner(token, gid, uid);
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/groups/" + gid }, updateMask: { fieldPaths: [] }, updateTransforms: [{ fieldPath: "banned", removeAllFromArray: { values: [{ stringValue: target }] } }] }]);
+  return { groupId: gid, uid: target, unbanned: true };
 }
 async function requireOwner(token, groupId, uid) {
   const me = await fsGet(token, "groups/" + groupId + "/members/" + uid);
@@ -1028,6 +1064,8 @@ async function opMemberRemove(uid, payload, env) {
   await fsCommit(token, [
     { delete: DOC_ROOT + "/groups/" + gid + "/members/" + target },
     { delete: DOC_ROOT + "/accounts/" + target + "/groups/" + gid },
+    // v39: يُمنع من العودة برابط دعوةٍ ما زال صالحاً (يزول المنع بدعوةٍ من المالك عبر member.unban أو بحذف الدعوات)
+    { update: { name: DOC_ROOT + "/groups/" + gid }, updateMask: { fieldPaths: [] }, updateTransforms: [{ fieldPath: "banned", appendMissingElements: { values: [{ stringValue: target }] } }] },
   ]);
   try { await famChatSync(token, gid); } catch (e) {}
   return { groupId: gid, uid: target, removed: true };
@@ -3252,6 +3290,7 @@ export default {
       if (op === "people.remove") { const r = await opPeopleRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "member.hello") { const r = await opMemberHello(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "member.setRole") { const r = await opMemberSetRole(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "member.unban") { const r = await opMemberUnban(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "member.remove") { const r = await opMemberRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "group.settings") { const r = await opGroupSettings(uid, body.payload, env); return json({ ok: true, ...r }); }
       return json({ ok: false, error: "unknown op: " + op }, 400);
