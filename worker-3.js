@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v39-family";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v40-authproxy";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -23,6 +23,23 @@ const FS_BASE = "https://firestore.googleapis.com/v1/" + DOC_ROOT;
 // Realtime Database (الحضور · «يكتب…» · إشارات المكالمات والغرف) — يكتب الـWorker فيها قوائم الصلاحيّة فقط
 const RTDB_URL = "https://sawa-test-9770f-default-rtdb.europe-west1.firebasedatabase.app";
 
+/* C36: وكيل مصادقة Firebase — يُظهر نطاقنا بدل firebaseapp.com في شاشة Google.
+   مسار Worker على www.sawaaap.com/__/* يمرّر /__/auth/* و/__/firebase/* إلى sawa-test-9770f.firebaseapp.com كما هي
+   (الطريقة التي توصي بها Firebase: "proxy auth requests to firebaseapp.com"). authDomain في التطبيق = www.sawaaap.com. */
+const FB_AUTH_HOST = "sawa-test-9770f.firebaseapp.com";
+function isAuthProxyPath(pathname) { return pathname.startsWith("/__/auth/") || pathname.startsWith("/__/firebase/"); }
+async function authProxy(request, u) {
+  const target = "https://" + FB_AUTH_HOST + u.pathname + u.search;
+  const h = new Headers();
+  for (const k of ["accept", "accept-language", "content-type", "user-agent", "referer", "origin", "cookie", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site"]) { const v = request.headers.get(k); if (v) h.set(k, v); }
+  const init = { method: request.method, headers: h, redirect: "manual" };
+  if (request.method !== "GET" && request.method !== "HEAD") init.body = request.body;
+  const r = await fetch(target, init);
+  const out = new Headers(r.headers);
+  out.delete("content-security-policy"); out.delete("x-frame-options");   // الـiframe يُحمَّل من نطاقنا الآن
+  out.set("cache-control", "no-store");
+  return new Response(r.body, { status: r.status, statusText: r.statusText, headers: out });
+}
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -3134,6 +3151,7 @@ export default {
     })());
   },
   async fetch(request, env, ctx) {
+    try { const u0 = new URL(request.url); if (isAuthProxyPath(u0.pathname)) return await authProxy(request, u0); } catch (e) { return new Response("auth proxy error", { status: 502 }); }
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
     let statOp = null;
     try {
