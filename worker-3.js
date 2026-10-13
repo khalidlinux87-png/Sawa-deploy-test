@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v36-e2e";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v37-admin";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2126,11 +2126,11 @@ async function opGcallStart(uid, payload, env, claims, ctx) {
       const live = await rtdbGet(token, "gcalls/" + curp.gid);
       if (live && live.members && Object.keys(live.members).length) {
         if (!(live.allow && live.allow[uid])) await rtdbPatch(token, { ["gcalls/" + curp.gid + "/allow/" + uid]: true });
-        return { gid: curp.gid, joined: true, type: live.type, title: live.title || title, by: live.by, approval: !!live.approval, cid };
+        return { gid: curp.gid, joined: true, type: live.type, title: live.title || title, by: live.by, approval: !!live.approval, cid, vc: !!live.vc };
       }
       await rtdbPatch(token, { ["gcalls/" + curp.gid]: null });   // مؤشّرٌ لمكالمةٍ انتهت
     }
-    ring = allow.filter(u => u !== uid);
+    ring = payload.vc ? [] : allow.filter(u => u !== uid);   // v37: «دردشة صوتيّة» = غرفةٌ مفتوحة بلا رنين
   } else if (payload.sched) {
     const sid = String(payload.sched);
     if (!/^[a-z0-9]{6,32}$/.test(sid)) throw new Error("bad id: sched");
@@ -2164,12 +2164,24 @@ async function opGcallStart(uid, payload, env, claims, ctx) {
   allow = allow.slice(0, 64);
   gid = gid || gcNewId();
   const now = Date.now();
+  const vc = !!(payload.vc && cid && !isSched);
+  if (vc) type = "audio";
   const node = { by, type, title: String(title || "").slice(0, 80), ts: now, approval: !!approval, allow: Object.fromEntries(allow.map(u => [u, true])) };
   if (cid) node.cid = cid;
+  if (vc) node.vc = true;
   const upd = { ["gcalls/" + gid]: node };
-  if (cid && !isSched) upd["gcur/" + cid] = { gid, type, by: uid, ts: now };
+  if (cid && !isSched) upd["gcur/" + cid] = vc ? { gid, type, by: uid, ts: now, vc: true } : { gid, type, by: uid, ts: now };
   for (const u of ring.slice(0, 63)) upd["inbox/" + u + "/" + gid] = { from: uid, fromName: me, type, ts: now, gid, title: node.title };
   await rtdbPatch(token, upd);
+  if (vc) {   // v37: لا رنين — رسالة نظامٍ في المحادثة وإشعارٌ عاديّ (لغير الكاتمين) يفتح المحادثة وفيها شريط «انضمام»
+    try { await sysMsg(token, cid, uid, "vc_on", {}); } catch (e) {}
+    const soft = allow.filter(u => u !== uid && muted.indexOf(u) < 0).slice(0, 10);
+    if (soft.length) {
+      const job = pushTo(token, soft, strData({ t: "msg", cid, from: uid, mid: "vc" + gid, title: node.title || "سوا", body: "🎙 " + me + " بدأ دردشة صوتيّة — انضمّ متى شئت", ts: now }));
+      if (ctx && ctx.waitUntil) ctx.waitUntil(job.catch(() => {})); else await job.catch(() => {});
+    }
+    return { gid, joined: false, type, title: node.title, by, approval: false, cid, vc: true };
+  }
   // إشعار رنين لمن لم يكتموا (≤ ١٠ — حدّ الطلبات الفرعيّة)
   // ≤ ١٠ للمجموعة، ≤ ٤ لجهات الاتّصال (حدّ ٥٠ طلباً فرعيّاً لكلّ طلب في خطّة Workers المجّانيّة)
   const targets = payload.__push || ring.filter(u => muted.indexOf(u) < 0).slice(0, 10);
@@ -3092,7 +3104,7 @@ export default {
       if (op === "profile.get") { const r = await opProfileGet(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "profile.set") { const r = await opProfileSet(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "whoami")
-        return json({ ok: true, uid, provider: claims.firebase && claims.firebase.sign_in_provider });
+        return json({ ok: true, uid, provider: claims.firebase && claims.firebase.sign_in_provider, admin: isAdmin(env, claims) });   // v37: «فحص الاتّصال» للمدير وحده
       if (op === "group.create") {
         const r = await opGroupCreate(uid, body.payload, env, claims);
         return json({ ok: true, uid, op, ...r });
