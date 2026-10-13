@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v37-admin";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v37-photo";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2414,8 +2414,21 @@ async function opProfileSet(uid, payload, env, claims) {
     else { phone = cleanPhone(payload.phone); if (!phone) throw new Error("رقم الهاتف غير صحيح — مثال: +249912345678"); }
     fields.phone = phone ? { stringValue: phone } : { nullValue: null }; fields.phoneVerified = { booleanValue: false }; mask.push("phone", "phoneVerified");
   }
+  // v37: صورة الحساب — avatars/{uid} = { d: data:image/… (≤ ٢٠ ألف حرف)، ts } يقرؤها كلّ مسجَّل (القواعد)، والخادم وحده يكتبها
+  let photo;
+  if ("photo" in payload) {
+    if (payload.photo === null || payload.photo === "") photo = "";
+    else {
+      photo = String(payload.photo);
+      if (!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(photo) || photo.length > 20000) throw new Error("bad photo");
+    }
+    fields.photoTs = photo ? { integerValue: String(Date.now()) } : { nullValue: null }; mask.push("photoTs");
+  }
   if (!mask.length) throw new Error("nothing to change");
-  await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields }, updateMask: { fieldPaths: mask } }]);
+  const pw = [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields }, updateMask: { fieldPaths: mask } }];
+  if (photo !== undefined) pw.push(photo ? { update: { name: DOC_ROOT + "/avatars/" + uid, fields: { d: { stringValue: photo }, ts: { integerValue: String(Date.now()) } } } } : { delete: DOC_ROOT + "/avatars/" + uid });
+  await fsCommit(token, pw);
+  if (name === undefined && phone === undefined) { const pv = PROFILE_CACHE.get(uid) || {}; return { profile: { name: pv.name || null, phone: pv.phone || null, phoneVerified: false, photo: !!photo }, propagated: 0 }; }
   const prev = PROFILE_CACHE.get(uid) || {};
   PROFILE_CACHE.set(uid, Object.assign({}, prev, { name: name !== undefined ? name : prev.name || null, phone: phone !== undefined ? (phone || null) : prev.phone || null, at: prev.at || Date.now() }));
   // النشر: عضويّاتي في العائلات · أسمائي في المحادثات · بطاقتي عند جهات اتّصالي (حدّ ٥٠ طلباً فرعيّاً)
@@ -2846,6 +2859,7 @@ async function opAccountDelete(uid, payload, env, claims) {
   for (const t of purge) writes.push({ update: { name: P("purge/" + t.id), fields: { kind: { stringValue: t.kind }, uid: { stringValue: uid },
     gid: t.gid ? { stringValue: t.gid } : { nullValue: null }, cid: t.cid ? { stringValue: t.cid } : { nullValue: null }, ts: { integerValue: String(now) } } } });
   writes.push({ delete: P("accounts/" + uid) });
+  writes.push({ delete: P("avatars/" + uid) });   // v37: الصورة
   await commitChunks(token, writes);
   // RTDB: حضوري، صلاحيّاتي، صندوق مكالماتي، ومن كان يرى حضوري
   try { const acl = await rtdbGet(token, "acl/" + uid); for (const o in (acl || {})) rt["acl/" + o + "/" + uid] = null; } catch (e) {}
