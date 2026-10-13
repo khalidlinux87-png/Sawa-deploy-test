@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v37-photo";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v38-location";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1169,7 +1169,7 @@ const fp = (...segs) => segs.map(s => "`" + String(s).replace(/`/g, "") + "`").j
 const MSG_ID = /^[A-Za-z0-9_]{6,40}$/;
 const MEDIA_ID = /^[A-Za-z0-9_]{6,40}$/;
 const MEDIA_TYPES = ["voice", "image", "video", "file"];
-const MSG_TYPES = ["text", "sticker", "contact", "voice", "image", "video", "file", "poll", "bill", "fund", "tasks", "system"];
+const MSG_TYPES = ["text", "sticker", "contact", "voice", "image", "video", "file", "poll", "bill", "fund", "tasks", "system", "location"];   // v38: موقع
 // v35: وثيقة اليوم حدّها ١ ميغابايت — المحادثة المزدحمة تكتب بعد ٨٥٠ ألف حرف في جزءٍ تالٍ «YYYYMMDD-2» (العميل يقرأ الأجزاء كأيّام)
 const DAY_REF = /^\d{8}(-\d{1,3})?$/, SHARD_MAX = 850000;
 const tooBig = (e) => /maximum allowed size|exceeds the maximum|too large|INVALID_ARGUMENT.*size/i.test(String((e && e.message) || e));
@@ -1263,7 +1263,7 @@ async function opChatOpen(uid, payload, env, claims) {
    - كلّ عضوٍ يربط جهازاً واحداً (devs). مفتاح الجهاز لا يتغيّر بعد تسجيله (keys إلحاقٌ فقط) ⇒ الرسائل القديمة تبقى قابلةً للفكّ.
    - الرسالة: { id, type, enc: { v, d: جهاز المرسل, iv, ct, k: { devId: مفتاح الرسالة مغلّفاً لذلك الجهاز } }, reply: { id, day }, extra: { mid, viewOnce } } */
 const E2E_DEV = /^[A-Za-z0-9]{16,24}$/, E2E_B64 = /^[A-Za-z0-9+/]+={0,2}$/;
-const E2E_TYPES = ["text", "sticker", "contact", "voice", "image", "video", "file"];
+const E2E_TYPES = ["text", "sticker", "contact", "voice", "image", "video", "file", "location"];
 function e2eOf(c) { const v = c && c.fields && c.fields.e2e; const e = v ? fsToJs(v) : null; return e && e.on ? e : null; }
 function e2ePubOk(k) {
   k = String(k || ""); if (k.length !== 88 || !E2E_B64.test(k)) return false;
@@ -1383,6 +1383,12 @@ function cleanMsg(m, uid, ts) {
     if (MEDIA_TYPES.indexOf(type) >= 0 && !MEDIA_ID.test(String(out.extra.mid || ""))) throw new Error("media id required");
   }
   if (MEDIA_TYPES.indexOf(type) >= 0 && !(out.extra && out.extra.mid)) throw new Error("media id required");
+  if (type === "location") {   // v38: إحداثيّاتٌ صحيحة فقط، وتسميةٌ قصيرة
+    const lat = Number(out.extra && out.extra.lat), lng = Number(out.extra && out.extra.lng);
+    if (!(lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180)) throw new Error("bad location");
+    out.extra = { lat: Math.round(lat * 1e6) / 1e6, lng: Math.round(lng * 1e6) / 1e6, acc: Math.min(99999, Math.max(0, Math.round(Number(out.extra.acc) || 0))) || null, label: String(out.extra.label || "").slice(0, 120) || null };
+    delete out.text;
+  }
   // v33: «مرّة واحدة» لا تترك أثراً — لا صورة مصغّرة ولا نصّ الرسالة الصوتيّة
   if (out.extra && out.extra.viewOnce) { delete out.extra.thumb; delete out.extra.transcript; }
   // v33: سقفٌ للرسالة كلّها — رسالةٌ واحدة ضخمة كانت تملأ وثيقة اليوم (١ ميغابايت) فتتعطّل المحادثة حتّى منتصف الليل
@@ -2066,7 +2072,7 @@ async function notifyChat(token, c, cid, uid, msg) {
     .sort((a, b) => (mentions.indexOf(b) >= 0) - (mentions.indexOf(a) >= 0));
   if (!targets.length || type === "saved") return 0;
   const group = type === "group" || type === "family";
-  const body = msg.enc ? "🔒 رسالة مشفّرة" : msg.type === "text" || msg.type === "sticker" ? (msg.text || "") : ({ image: "📷 صورة", video: "🎥 فيديو", voice: "🎤 رسالة صوتيّة", file: "📎 ملفّ", poll: "📊 استطلاع", bill: "🧾 فاتورة", fund: "💝 تبرّعات", tasks: "✅ مهامّ", contact: "👤 جهة اتّصال" }[msg.type] || "رسالة");
+  const body = msg.enc ? "🔒 رسالة مشفّرة" : msg.type === "text" || msg.type === "sticker" ? (msg.text || "") : ({ image: "📷 صورة", video: "🎥 فيديو", voice: "🎤 رسالة صوتيّة", file: "📎 ملفّ", poll: "📊 استطلاع", bill: "🧾 فاتورة", fund: "💝 تبرّعات", tasks: "✅ مهامّ", contact: "👤 جهة اتّصال", location: "📍 موقع" }[msg.type] || "رسالة");
   const base = { t: "msg", cid, from: uid, mid: msg.id, title: group ? (fstr(c, "name") || "سوا") : senderName, body: group ? senderName + ": " + body : body, ts: msg.ts };
   let sent = 0;
   const ment = targets.filter(u => mentions.indexOf(u) >= 0), rest = targets.filter(u => mentions.indexOf(u) < 0);
