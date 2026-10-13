@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v41-homes";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v41c-homes";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -253,7 +253,7 @@ function cleanLocations(v) {
     if (!l || typeof l !== "object") continue;
     const lat = Number(l.lat), lng = Number(l.lng);
     if (!(isFinite(lat) && isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) || (lat === 0 && lng === 0)) continue;
-    let r = Number(l.radius_meters); if (!isFinite(r)) r = 500; r = Math.min(5000, Math.max(100, Math.round(r)));
+    let r = Number(l.radius_meters); r = (isFinite(r) && r > 0) ? Math.min(5000, Math.max(100, Math.round(r))) : 0;   // 0 = النطاق العامّ لدى كلّ مستخدم
     out.push({ type: l.type === "work" ? "work" : "home", lat: Math.round(lat * 1e6) / 1e6, lng: Math.round(lng * 1e6) / 1e6, radius_meters: r, address_text: String(l.address_text || "").slice(0, 120) });
   }
   return out;
