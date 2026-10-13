@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v40-authproxy";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v41-homes";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -244,6 +244,20 @@ async function fsCount(accessToken, parentRel, collectionId, eq) {
   return v ? Number(v.integerValue || 0) : 0;
 }
 /* قصّ القيم قبل الحفظ: نصوصٌ ≤ ٢٠٠٠ حرف، قوائم ≤ ٥٠، عمقٌ ≤ ٤ — لا يملأ أحدٌ القاعدة بنصٍّ ضخم */
+/* C37: مواقع الأقارب — {type, lat, lng, radius_meters, address_text} حتى ٣، وإلّا تُسقَط */
+function cleanLocations(v) {
+  if (!Array.isArray(v)) return [];
+  const out = [];
+  for (const l of v.slice(0, 10)) {
+    if (out.length >= 3) break;
+    if (!l || typeof l !== "object") continue;
+    const lat = Number(l.lat), lng = Number(l.lng);
+    if (!(isFinite(lat) && isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) || (lat === 0 && lng === 0)) continue;
+    let r = Number(l.radius_meters); if (!isFinite(r)) r = 500; r = Math.min(5000, Math.max(100, Math.round(r)));
+    out.push({ type: l.type === "work" ? "work" : "home", lat: Math.round(lat * 1e6) / 1e6, lng: Math.round(lng * 1e6) / 1e6, radius_meters: r, address_text: String(l.address_text || "").slice(0, 120) });
+  }
+  return out;
+}
 function capVal(v, d) {
   d = d || 0;
   if (typeof v === "string") return v.length > 2000 ? v.slice(0, 2000) : v;
@@ -399,7 +413,7 @@ async function opPersonSet(uid, payload, env) {
   // و photo (حجمها) لا تُخزَّن على الخادم أبداً — ليست في القائمة فتُتجاهَل.
   const ALLOWED = ["local_name", "gender", "kinship", "proximity", "birthYear", "birthday", "alive",
                    "death_date", "deathYear", "contacts", "phones", "notes", "motherId",
-                   "status_detail", "noChildren"];
+                   "status_detail", "noChildren", "locations"];
 
   const now = new Date().toISOString();
   let pid = payload.personId, creating = false;
@@ -424,6 +438,7 @@ async function opPersonSet(uid, payload, env) {
   const changed = [], skipped = [], updFields = {}, ftsSub = {};
   for (const k of ALLOWED) if (k in fields) {
     if (editTs && exFts && srvTs(k) > editTs + 2000) { skipped.push(k); continue; }
+    if (k === "locations") fields[k] = cleanLocations(fields[k]);   // C37
     updFields[k] = toFsValue(capVal(fields[k])); ftsSub[k] = { timestampValue: editTs ? new Date(Math.min(editTs, Date.now())).toISOString() : now }; changed.push(k);
   }
   if (changed.length === 0 && !creating) return { personId: pid, created: false, changed: [], skipped };
@@ -587,9 +602,9 @@ async function opReviewResolve(uid, payload, env) {
       const pid = dv.personId, vals = dv.values || {};
       if (!pid) throw new Error("review detail missing");
       const ALLOWED = ["local_name", "gender", "kinship", "proximity", "birthYear", "birthday", "alive",
-                       "death_date", "deathYear", "contacts", "phones", "notes", "motherId", "status_detail", "noChildren"];
+                       "death_date", "deathYear", "contacts", "phones", "notes", "motherId", "status_detail", "noChildren", "locations"];
       const f = { deleted: { booleanValue: false }, updatedTs: { timestampValue: now } }, mask = ["deleted", "updatedTs"];
-      for (const k of ALLOWED) if (k in vals) { f[k] = toFsValue(capVal(vals[k])); mask.push(k); }
+      for (const k of ALLOWED) if (k in vals) { f[k] = toFsValue(capVal(k === "locations" ? cleanLocations(vals[k]) : vals[k])); mask.push(k); }
       await fsCommit(token, [
         { update: { name: DOC_ROOT + "/groups/" + groupId + "/persons/" + pid, fields: f }, updateMask: { fieldPaths: mask } },
         closeReview("applied"),
@@ -631,7 +646,7 @@ async function opBulkImport(uid, payload, env, claims) {
   // و photo (حجمها) لا تُخزَّن على الخادم أبداً — ليست في القائمة فتُتجاهَل.
   const ALLOWED = ["local_name", "gender", "kinship", "proximity", "birthYear", "birthday", "alive",
                    "death_date", "deathYear", "contacts", "phones", "notes", "motherId",
-                   "status_detail", "noChildren"];
+                   "status_detail", "noChildren", "locations"];
 
   // خريطة المعرّفات المحلّية → الخادم. مع حفظ المعرّفات: fid = lid (لا تبديل).
   const map = {}; let selfCount = 0; const personWrites = [];
@@ -641,7 +656,7 @@ async function opBulkImport(uid, payload, env, claims) {
     if (p.kinship === "نفسي") selfCount++;
     const f = { deleted: { booleanValue: false }, createdTs: { timestampValue: now }, updatedTs: { timestampValue: now } };
     const ftsSub = {};
-    for (const k of ALLOWED) if (k in p) { f[k] = toFsValue(capVal(p[k])); ftsSub[k] = { timestampValue: now }; }
+    for (const k of ALLOWED) if (k in p) { f[k] = toFsValue(capVal(k === "locations" ? cleanLocations(p[k]) : p[k])); ftsSub[k] = { timestampValue: now }; }
     // ⛔ healthStatus لا يُنسَخ (خارج ALLOWED) — لا يعبر القاعدة
     f.fts = { mapValue: { fields: ftsSub } };
     personWrites.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/persons/" + fid, fields: f } });
