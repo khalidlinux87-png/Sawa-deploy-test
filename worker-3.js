@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v41c-homes";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v42-verify";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1155,9 +1155,9 @@ async function opPeopleList(uid, payload, env, claims) {
   let aclOk = true;
   try { await rtdbPatch(token, updates); } catch (e) { aclOk = false; }
   const me = memberIdFields(claims);
-  let cd = { code: null, findable: true };
-  try { const pr = await profileOf(token, uid); cd = pr.code ? { code: pr.code, findable: pr.findable } : await ensureCode(token, uid, claims, false); } catch (e) {}
-  return { me: { uid, name: me.name.stringValue || null, anon: me.anon.booleanValue, phone: claims.sawaPhone || null, googleName: claims.name || null, code: cd.code, findable: cd.findable },
+  let cd = { code: null, findable: true }, pv = false;
+  try { const pr = await profileOf(token, uid); pv = !!pr.phoneVerified; cd = pr.code ? { code: pr.code, findable: pr.findable } : await ensureCode(token, uid, claims, false); } catch (e) {}
+  return { me: { uid, name: me.name.stringValue || null, anon: me.anon.booleanValue, phone: claims.sawaPhone || null, phoneVerified: pv, emailVerified: !!(claims.email && claims.email_verified), googleName: claims.name || null, code: cd.code, findable: cd.findable },
            people: list.map(p => ({ uid: p.uid, name: p.name, anon: p.anon, families: p.families, via: Object.keys(p.via), phone: p.phone || null })), acl: aclOk };
 }
 async function opPeopleInvite(uid, payload, env, claims) {
@@ -2457,7 +2457,8 @@ async function profileOf(token, uid) {
   const c = PROFILE_CACHE.get(uid);
   if (c && Date.now() - c.at < 10 * 60 * 1000) return c;
   const d = await fsGet(token, "accounts/" + uid).catch(() => null);
-  const v = { name: fstr(d, "displayName") || null, phone: fstr(d, "phone") || null, code: fstr(d, "code") || null, findable: accFindable(d), gname: fstr(d, "gname") || null, at: Date.now() };
+  const v = { name: fstr(d, "displayName") || null, phone: fstr(d, "phone") || null, code: fstr(d, "code") || null, findable: accFindable(d), gname: fstr(d, "gname") || null,
+    phoneVerified: fbool(d, "phoneVerified") === true, emailHash: fstr(d, "emailHash") || null, at: Date.now() };
   PROFILE_CACHE.set(uid, v);
   if (PROFILE_CACHE.size > 2000) PROFILE_CACHE.clear();
   return v;
@@ -2472,8 +2473,146 @@ async function opProfileGet(uid, payload, env, claims) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const p = await profileOf(token, uid);
   const cd = p.code ? { code: p.code, findable: p.findable } : await ensureCode(token, uid, claims, false).catch(() => ({ code: null, findable: true }));
-  return { profile: { name: p.name, phone: p.phone, phoneVerified: false, googleName: claims.name || null, code: cd.code, findable: cd.findable,
-    anon: !!(claims.firebase && claims.firebase.sign_in_provider === "anonymous") } };
+  const emailVerified = await ensureEmailIndex(token, uid, claims, p).catch(() => false);
+  return { profile: { name: p.name, phone: p.phone, phoneVerified: !!p.phoneVerified, emailVerified, email: emailVerified ? claims.email : null, googleName: claims.name || null, code: cd.code, findable: cd.findable,
+    anon: !!(claims.firebase && claims.firebase.sign_in_provider === "anonymous") }, verify: verifyConfig(env) };
+}
+/* ---------- 43) التحقّق من الهويّة (C43) ----------
+   • البريد: Google يوثّقه، وحساب البريد يوثَّق برابط Firebase (email_verified في الرمز). نفهرسه emails/{sha256(البريد)} = { uid } ليُعثر عليك به.
+   • الهاتف: بلا SMS (Blaze غير متاح). المستخدم يرسل «SAWA-XXXXXX» إلى رقم سوا على واتساب (محادثة يبدؤها المستخدم ⇒ مجّانيّة)،
+     وMeta تستدعي /wa/webhook فنقرأ رقم المرسل الموثَّق عند واتساب ونطابق الرمز. الرقم الذي أرسل الرمز هو الذي يُوثَّق (ويحلّ محلّ المكتوب).
+     الأسرار: WA_NUMBER (رقم سوا بصيغة أرقامٍ دوليّة بلا +) · WA_VERIFY_TOKEN (كلمة تحقّق الـwebhook) · WA_APP_SECRET (توقيع Meta)
+     · اختياريّان للردّ: WA_TOKEN و WA_PHONE_ID. */
+function verifyConfig(env) {
+  const wa = !!(env.WA_NUMBER && env.WA_VERIFY_TOKEN && env.WA_APP_SECRET);
+  return { whatsapp: wa, waNumber: wa ? String(env.WA_NUMBER).replace(/\D/g, "") : null };
+}
+async function sha256Hex(t) {
+  const h = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t)));
+  return Array.from(h).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+async function ensureEmailIndex(token, uid, claims, p) {
+  const em = claims && claims.email && claims.email_verified ? String(claims.email).trim().toLowerCase() : null;
+  if (!em) return false;
+  const h = await sha256Hex(em);
+  if (p.emailHash === h) return true;
+  const writes = [{ update: { name: DOC_ROOT + "/emails/" + h, fields: { uid: { stringValue: uid }, ts: { integerValue: String(Date.now()) } } } },
+                  { update: { name: DOC_ROOT + "/accounts/" + uid, fields: { emailHash: { stringValue: h } } }, updateMask: { fieldPaths: ["emailHash"] } }];
+  if (p.emailHash) writes.push({ delete: DOC_ROOT + "/emails/" + p.emailHash });
+  await fsCommit(token, writes);
+  p.emailHash = h;
+  return true;
+}
+function otpCode() { const a = new Uint32Array(1); crypto.getRandomValues(a); return String(100000 + (a[0] % 900000)); }
+async function opPhoneStart(uid, payload, env, claims) {
+  const cfg = verifyConfig(env);
+  if (!cfg.whatsapp) return { enabled: false };
+  if (!codeRate(uid, "otp", 6)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const p = await profileOf(token, uid);
+  const code = otpCode(), now = Date.now(), exp = now + 15 * 60 * 1000;
+  const writes = [{ update: { name: DOC_ROOT + "/otp/" + code, fields: { uid: { stringValue: uid }, phone: p.phone ? { stringValue: p.phone } : { nullValue: null }, exp: { integerValue: String(exp) }, at: { integerValue: String(now) } } } },
+                  { update: { name: DOC_ROOT + "/accounts/" + uid, fields: { otp: { stringValue: code }, otpExp: { integerValue: String(exp) } } }, updateMask: { fieldPaths: ["otp", "otpExp"] } }];
+  const acc = await fsGet(token, "accounts/" + uid).catch(() => null);
+  const old = fstr(acc, "otp"); if (old && old !== code) writes.push({ delete: DOC_ROOT + "/otp/" + old });
+  await fsCommit(token, writes);
+  const text = "رمز سوا: SAWA-" + code;
+  return { enabled: true, code, exp, link: "https://wa.me/" + cfg.waNumber + "?text=" + encodeURIComponent(text), text };
+}
+async function opPhoneStatus(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const d = await fsGet(token, "accounts/" + uid).catch(() => null);
+  const v = fbool(d, "phoneVerified") === true, phone = fstr(d, "phone") || null;
+  const c = PROFILE_CACHE.get(uid); if (c) { c.phoneVerified = v; c.phone = phone; }
+  const exp = Number(d && d.fields && d.fields.otpExp && d.fields.otpExp.integerValue || 0);
+  return { phone, phoneVerified: v, pending: !v && exp > Date.now(), mismatch: fstr(d, "otpMismatch") || null };
+}
+// Meta ⇒ /wa/webhook : التحقّق (GET) والرسائل (POST)
+async function waWebhook(request, env, ctx) {
+  const u = new URL(request.url);
+  if (request.method === "GET") {
+    if (u.searchParams.get("hub.mode") === "subscribe" && env.WA_VERIFY_TOKEN && u.searchParams.get("hub.verify_token") === env.WA_VERIFY_TOKEN)
+      return new Response(u.searchParams.get("hub.challenge") || "", { status: 200 });
+    return new Response("forbidden", { status: 403 });
+  }
+  if (request.method !== "POST") return new Response("method", { status: 405 });
+  if (!env.WA_APP_SECRET) return new Response("not configured", { status: 403 });
+  const raw = await request.text();
+  const sig = (request.headers.get("X-Hub-Signature-256") || "").replace(/^sha256=/, "");
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.WA_APP_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = Array.from(new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(raw)))).map(b => b.toString(16).padStart(2, "0")).join("");
+  if (!sig || sig.length !== mac.length || !timingEq(sig, mac)) return new Response("bad signature", { status: 403 });
+  let body = {}; try { body = JSON.parse(raw); } catch (e) {}
+  const msgs = [];
+  for (const e of (body.entry || [])) for (const ch of (e.changes || [])) for (const m of ((ch.value || {}).messages || [])) msgs.push(m);
+  const job = (async () => {
+    const token = await getAccessToken(JSON.parse(env.SA_JSON));
+    for (const m of msgs.slice(0, 10)) {
+      const from = String(m.from || "").replace(/\D/g, ""); if (!from) continue;
+      const text = (m.text && m.text.body) || (m.button && m.button.text) || "";
+      const mm = String(text).match(/SAWA\s*[-–—:]?\s*(\d{6})/i); if (!mm) continue;
+      await waVerify(token, env, mm[1], "+" + from).catch(e => console.log("wa verify:", e && e.message));
+    }
+  })();
+  if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
+  return new Response("ok", { status: 200 });
+}
+function timingEq(a, b) { let r = 0; for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i); return r === 0; }
+async function waVerify(token, env, code, from) {
+  const o = await fsGet(token, "otp/" + code);
+  const uid = fstr(o, "uid"); if (!uid) { await waReply(env, from, "الرمز غير معروف أو انتهى. افتح سوا ← حسابي ← تحقّق عبر واتساب واطلب رمزاً جديداً."); return; }
+  const exp = Number(o.fields.exp && o.fields.exp.integerValue || 0);
+  if (exp < Date.now()) { await fsCommit(token, [{ delete: DOC_ROOT + "/otp/" + code }]); await waReply(env, from, "انتهت صلاحيّة الرمز. اطلب رمزاً جديداً من سوا."); return; }
+  const phone = cleanPhone(from); if (!phone) return;
+  // من كان الرقم عنده موثَّقاً من قبل يفقده (رقمٌ واحد لحسابٍ واحد)
+  const prevOwner = fstr(await fsGet(token, "phones/" + phone).catch(() => null), "uid");
+  const writes = [
+    { update: { name: DOC_ROOT + "/accounts/" + uid, fields: { phone: { stringValue: phone }, phoneVerified: { booleanValue: true }, phoneVerifiedAt: { integerValue: String(Date.now()) }, otp: { nullValue: null }, otpExp: { nullValue: null }, otpMismatch: { nullValue: null } } },
+      updateMask: { fieldPaths: ["phone", "phoneVerified", "phoneVerifiedAt", "otp", "otpExp", "otpMismatch"] } },
+    { update: { name: DOC_ROOT + "/phones/" + phone, fields: { uid: { stringValue: uid }, ts: { integerValue: String(Date.now()) } } } },
+    { delete: DOC_ROOT + "/otp/" + code }];
+  if (prevOwner && prevOwner !== uid) writes.push({ update: { name: DOC_ROOT + "/accounts/" + prevOwner, fields: { phoneVerified: { booleanValue: false } } }, updateMask: { fieldPaths: ["phoneVerified"] } });
+  // الرقم القديم المكتوب في الحساب (إن اختلف) يفقد فهرسه إن كان لنا
+  const oldPhone = fstr(o, "phone");
+  if (oldPhone && oldPhone !== phone) { const op = await fsGet(token, "phones/" + oldPhone).catch(() => null); if (fstr(op, "uid") === uid) writes.push({ delete: DOC_ROOT + "/phones/" + oldPhone }); }
+  await fsCommit(token, writes);
+  PROFILE_CACHE.delete(uid); if (prevOwner) PROFILE_CACHE.delete(prevOwner);
+  await waReply(env, from, "تمّ توثيق رقمك في سوا ✓ — عد إلى التطبيق.");
+}
+async function waReply(env, to, text) {
+  if (!env.WA_TOKEN || !env.WA_PHONE_ID) return;
+  try {
+    await fetch("https://graph.facebook.com/v21.0/" + env.WA_PHONE_ID + "/messages", { method: "POST", headers: { Authorization: "Bearer " + env.WA_TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify({ messaging_product: "whatsapp", to: String(to).replace(/\D/g, ""), type: "text", text: { body: text } }) });
+  } catch (e) { console.log("wa reply:", e && e.message); }
+}
+// البحث بالهاتف الموثَّق أو البريد الموثَّق — بالشكل نفسه الذي يعيده code.find
+async function findTarget(token, uidHit) {
+  if (!uidHit) return null;
+  const acc = await fsGet(token, "accounts/" + uidHit);
+  if (!acc || !accFindable(acc)) return null;
+  return { uid: uidHit, code: fstr(acc, "code") || null, name: fstr(acc, "displayName") || fstr(acc, "gname") || null };
+}
+async function opFindBy(uid, payload, env, kind) {
+  if (!codeRate(uid, "find", 30)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  let t = null;
+  if (kind === "phone") {
+    const ph = cleanPhone(payload && payload.phone); if (!ph) throw new Error("bad_phone");
+    const d = await fsGet(token, "phones/" + ph).catch(() => null);
+    t = await findTarget(token, fstr(d, "uid"));
+    if (t) { const acc = await fsGet(token, "accounts/" + t.uid); if (fbool(acc, "phoneVerified") !== true || fstr(acc, "phone") !== ph) t = null; }
+  } else {
+    const em = String((payload && payload.email) || "").trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) throw new Error("bad_email");
+    const d = await fsGet(token, "emails/" + await sha256Hex(em)).catch(() => null);
+    t = await findTarget(token, fstr(d, "uid"));
+  }
+  if (!t) return { found: false };
+  if (t.uid === uid) return { found: true, self: true, name: t.name, code: t.code };
+  const [contact, outR, inR] = await Promise.all([sharesContact(token, uid, t.uid),
+    fsGet(token, "accounts/" + uid + "/creqout/" + t.uid), fsGet(token, "accounts/" + uid + "/creq/" + t.uid)]);
+  return { found: true, name: t.name, code: t.code, contact: !!contact, pending: inR ? "in" : outR ? "out" : null, uid: (contact || inR || outR) ? t.uid : undefined };
 }
 async function opProfileSet(uid, payload, env, claims) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -2502,11 +2641,17 @@ async function opProfileSet(uid, payload, env, claims) {
   }
   if (!mask.length) throw new Error("nothing to change");
   const pw = [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields }, updateMask: { fieldPaths: mask } }];
+  if (phone !== undefined) {   // C43: الرقم الموثَّق القديم يفقد فهرسه (إن كان لي)؛ الرقم الجديد غير موثَّق حتّى يُتحقَّق
+    const pv0 = PROFILE_CACHE.get(uid) || await profileOf(token, uid);
+    if (pv0.phone && pv0.phone !== phone) { const op = await fsGet(token, "phones/" + pv0.phone).catch(() => null); if (fstr(op, "uid") === uid) pw.push({ delete: DOC_ROOT + "/phones/" + pv0.phone }); }
+    if (pv0.phone === phone && pv0.phoneVerified) { delete fields.phoneVerified; const i = mask.indexOf("phoneVerified"); if (i >= 0) mask.splice(i, 1); }   // الرقم نفسه ⇒ يبقى موثَّقاً
+  }
   if (photo !== undefined) pw.push(photo ? { update: { name: DOC_ROOT + "/avatars/" + uid, fields: { d: { stringValue: photo }, ts: { integerValue: String(Date.now()) } } } } : { delete: DOC_ROOT + "/avatars/" + uid });
   await fsCommit(token, pw);
   if (name === undefined && phone === undefined) { const pv = PROFILE_CACHE.get(uid) || {}; return { profile: { name: pv.name || null, phone: pv.phone || null, phoneVerified: false, photo: !!photo }, propagated: 0 }; }
   const prev = PROFILE_CACHE.get(uid) || {};
-  PROFILE_CACHE.set(uid, Object.assign({}, prev, { name: name !== undefined ? name : prev.name || null, phone: phone !== undefined ? (phone || null) : prev.phone || null, at: prev.at || Date.now() }));
+  PROFILE_CACHE.set(uid, Object.assign({}, prev, { name: name !== undefined ? name : prev.name || null, phone: phone !== undefined ? (phone || null) : prev.phone || null,
+    phoneVerified: phone !== undefined && phone !== prev.phone ? false : !!prev.phoneVerified, at: prev.at || Date.now() }));
   // النشر: عضويّاتي في العائلات · أسمائي في المحادثات · بطاقتي عند جهات اتّصالي (حدّ ٥٠ طلباً فرعيّاً)
   const pf = {}, pm = [];
   if (name !== undefined) { pf.name = { stringValue: name }; pm.push("name"); }
@@ -2530,7 +2675,7 @@ async function opProfileSet(uid, payload, env, claims) {
     const other = d.name.split("/").pop();
     try { await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + other + "/people/" + uid, fields: pf }, updateMask: { fieldPaths: pm }, currentDocument: { exists: true } }]); n++; } catch (e) {}
   }
-  return { profile: { name: name !== undefined ? name : prev.name || null, phone: phone !== undefined ? (phone || null) : prev.phone || null, phoneVerified: false }, propagated: n };
+  return { profile: { name: name !== undefined ? name : prev.name || null, phone: phone !== undefined ? (phone || null) : prev.phone || null, phoneVerified: !!(PROFILE_CACHE.get(uid) || {}).phoneVerified }, propagated: n };
 }
 
 /* ---------- 29) المكالمات (C6) ----------
@@ -3168,6 +3313,7 @@ export default {
   async fetch(request, env, ctx) {
     try { const u0 = new URL(request.url); if (isAuthProxyPath(u0.pathname)) return await authProxy(request, u0); } catch (e) { return new Response("auth proxy error", { status: 502 }); }
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
+    try { if (new URL(request.url).pathname === "/wa/webhook") return await waWebhook(request, env, ctx); } catch (e) { return new Response("webhook error", { status: 500 }); }
     let statOp = null;
     try {
       const auth = request.headers.get("Authorization") || "";
@@ -3194,6 +3340,10 @@ export default {
       }
       if (op === "profile.get") { const r = await opProfileGet(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "profile.set") { const r = await opProfileSet(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "phone.start") { const r = await opPhoneStart(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "phone.status") { const r = await opPhoneStatus(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "find.phone") { const r = await opFindBy(uid, body.payload, env, "phone"); return json({ ok: true, ...r }); }
+      if (op === "find.email") { const r = await opFindBy(uid, body.payload, env, "email"); return json({ ok: true, ...r }); }
       if (op === "whoami")
         return json({ ok: true, uid, provider: claims.firebase && claims.firebase.sign_in_provider, admin: isAdmin(env, claims) });   // v37: «فحص الاتّصال» للمدير وحده
       if (op === "group.create") {
