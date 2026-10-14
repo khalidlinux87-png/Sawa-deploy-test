@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v43-vouch";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v44-sfu";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2166,6 +2166,96 @@ async function syncMutedBy(token, uid, before, after) {
 /* ---------- 30) المكالمات الجماعيّة (C7) ----------
    الخادم وحده ينشئ gcalls/{gid} ويحدّد من يُسمح له (allow)؛ الأجهزة تنضمّ وتتبادل الإشارات مباشرةً (قواعد RTDB).
    gcur/{cid} يشير للمكالمة الجارية في محادثةٍ جماعيّة (شريط «انضمام»). */
+/* ---------- 45) الغرف الكبيرة: وسيطٌ إلى Cloudflare Realtime SFU (C45) ----------
+   السرّان: CF_SFU_APP_ID و CF_SFU_APP_TOKEN (Cloudflare ← Realtime ← SFU ← Create application). المفتاح لا يغادر الخادم.
+   الحراسة: الغرفة كبيرة (rooms/$code/meta/big) وأنا عضوٌ فيها · الجلسة جلستي (sfuown/$sid) · المسار المسحوب لجلسة عضوٍ في الغرفة نفسها. */
+const SFU_BASE = "https://rtc.live.cloudflare.com/v1/apps/";
+const SFU_OWN = new Map();
+function sfuOn(env) { return !!(env.CF_SFU_APP_ID && env.CF_SFU_APP_TOKEN); }
+async function sfuApi(env, method, path, body) {
+  const res = await fetch(SFU_BASE + encodeURIComponent(String(env.CF_SFU_APP_ID).trim()) + path, {
+    method, headers: { Authorization: "Bearer " + String(env.CF_SFU_APP_TOKEN).trim(), "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok || j.errorCode) throw new Error("sfu " + res.status + ": " + (j.errorDescription || j.errorCode || "error"));
+  return j;
+}
+const SFU_ROOM_RE = /^[A-HJ-NP-Z2-9]{8}$/, SFU_SID_RE = /^[A-Za-z0-9_-]{8,80}$/, SFU_TRK_RE = /^[A-Za-z0-9_-]{1,40}$/, SFU_MID_RE = /^[A-Za-z0-9_-]{1,16}$/;
+async function sfuOwn(token, sid) {
+  const c = SFU_OWN.get(sid); if (c) return c;
+  const v = await rtdbGet(token, "sfuown/" + sid).catch(() => null);
+  if (v && v.u) { SFU_OWN.set(sid, v); if (SFU_OWN.size > 5000) SFU_OWN.clear(); }
+  return v;
+}
+async function sfuGuard(uid, payload, env, needSid) {
+  if (!sfuOn(env)) throw new Error("not_configured");
+  if (!codeRate(uid, "sfu", 900)) throw new Error("rate_limited");
+  const room = String((payload && payload.room) || "");
+  if (!SFU_ROOM_RE.test(room)) throw new Error("bad_room");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  let sid = null;
+  if (needSid) {
+    sid = String(payload.sid || "");
+    if (!SFU_SID_RE.test(sid)) throw new Error("bad_sid");
+    const o = await sfuOwn(token, sid);
+    if (!o || o.u !== uid || o.room !== room) throw new Error("not_yours");
+  }
+  return { token, room, sid };
+}
+async function opSfuCfg(uid, payload, env) { return { enabled: sfuOn(env), max: 30 }; }
+async function opSfuNew(uid, payload, env) {
+  const g = await sfuGuard(uid, payload, env, false);
+  const [big, mine] = await Promise.all([rtdbGet(g.token, "rooms/" + g.room + "/meta/big"), rtdbGet(g.token, "rooms/" + g.room + "/members/" + uid + "/sess")]);
+  if (big !== true) throw new Error("not_big");
+  if (!mine) throw new Error("not_member");
+  const j = await sfuApi(env, "POST", "/sessions/new");
+  if (!j.sessionId || !SFU_SID_RE.test(j.sessionId)) throw new Error("sfu: no session");
+  const own = { u: uid, room: g.room, ts: Date.now() };
+  await rtdbPatch(g.token, { ["sfuown/" + j.sessionId]: own });
+  SFU_OWN.set(j.sessionId, own);
+  stat("sfu:new");
+  return { sessionId: j.sessionId };
+}
+async function opSfuPush(uid, payload, env) {
+  const g = await sfuGuard(uid, payload, env, true);
+  const sdp = String(payload.sdp || ""); if (!sdp || sdp.length > 60000) throw new Error("bad_sdp");
+  const tracks = (payload.tracks || []).slice(0, 2).map(t => ({ location: "local", mid: String(t.mid), trackName: String(t.trackName) }));
+  if (!tracks.length || tracks.some(t => !SFU_MID_RE.test(t.mid) || !SFU_TRK_RE.test(t.trackName))) throw new Error("bad_tracks");
+  const j = await sfuApi(env, "POST", "/sessions/" + g.sid + "/tracks/new", { sessionDescription: { type: "offer", sdp }, tracks });
+  return { sdp: j.sessionDescription && j.sessionDescription.sdp, tracks: (j.tracks || []).map(t => ({ mid: t.mid, trackName: t.trackName, error: t.errorCode || null })) };
+}
+async function opSfuPull(uid, payload, env) {
+  const g = await sfuGuard(uid, payload, env, true);
+  const want = (payload.tracks || []).slice(0, 40).map(t => ({ sessionId: String(t.sessionId), trackName: String(t.trackName) }));
+  if (!want.length || want.some(t => !SFU_SID_RE.test(t.sessionId) || !SFU_TRK_RE.test(t.trackName) || t.sessionId === g.sid)) throw new Error("bad_tracks");
+  // كلّ جلسةٍ مسحوبة لعضوٍ في الغرفة نفسها، وصاحبها ما زال عضواً
+  const members = await rtdbGet(g.token, "rooms/" + g.room + "/members").catch(() => null) || {};
+  if (!members[uid]) throw new Error("not_member");
+  const ok = [], rejected = [];
+  for (const sid of Array.from(new Set(want.map(t => t.sessionId)))) {
+    const o = await sfuOwn(g.token, sid);
+    if (o && o.room === g.room && members[o.u]) ok.push(sid); else rejected.push(sid);
+  }
+  const tracks = want.filter(t => ok.indexOf(t.sessionId) >= 0).map(t => ({ location: "remote", sessionId: t.sessionId, trackName: t.trackName }));
+  const out = want.filter(t => ok.indexOf(t.sessionId) < 0).map(t => ({ sessionId: t.sessionId, trackName: t.trackName, error: "not_in_room" }));
+  if (!tracks.length) return { tracks: out, renegotiate: false };
+  const j = await sfuApi(env, "POST", "/sessions/" + g.sid + "/tracks/new", { tracks });
+  stat("sfu:pull");
+  return { sdp: j.sessionDescription && j.sessionDescription.sdp, renegotiate: !!j.requiresImmediateRenegotiation,
+    tracks: out.concat((j.tracks || []).map(t => ({ mid: t.mid || null, trackName: t.trackName, sessionId: t.sessionId, error: t.errorCode || null }))) };
+}
+async function opSfuReneg(uid, payload, env) {
+  const g = await sfuGuard(uid, payload, env, true);
+  const sdp = String(payload.sdp || ""); if (!sdp || sdp.length > 60000) throw new Error("bad_sdp");
+  await sfuApi(env, "PUT", "/sessions/" + g.sid + "/renegotiate", { sessionDescription: { type: "answer", sdp } });
+  return { done: true };
+}
+async function opSfuClose(uid, payload, env) {
+  const g = await sfuGuard(uid, payload, env, true);
+  const mids = (payload.mids || []).slice(0, 40).map(String).filter(m => SFU_MID_RE.test(m));
+  if (!mids.length) return { done: true };
+  await sfuApi(env, "PUT", "/sessions/" + g.sid + "/tracks/close", { tracks: mids.map(mid => ({ mid })), force: true });
+  return { done: true, renegotiate: false };
+}
 async function rtdbGet(token, path, q) {
   const res = await fetch(RTDB_URL + "/" + path + ".json?access_token=" + encodeURIComponent(token) + (q || ""));
   if (!res.ok) throw new Error("rtdb get: " + res.status);
@@ -3414,6 +3504,12 @@ export default {
       if (op === "phone.status") { const r = await opPhoneStatus(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "find.phone") { const r = await opFindBy(uid, body.payload, env, "phone"); return json({ ok: true, ...r }); }
       if (op === "find.email") { const r = await opFindBy(uid, body.payload, env, "email"); return json({ ok: true, ...r }); }
+      if (op === "sfu.cfg") { const r = await opSfuCfg(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "sfu.new") { const r = await opSfuNew(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "sfu.push") { const r = await opSfuPush(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "sfu.pull") { const r = await opSfuPull(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "sfu.reneg") { const r = await opSfuReneg(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "sfu.close") { const r = await opSfuClose(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "vouch.request") { const r = await opVouchRequest(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "vouch.respond") { const r = await opVouchRespond(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "whoami")
