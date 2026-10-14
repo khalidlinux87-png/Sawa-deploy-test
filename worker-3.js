@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v42-verify";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v43-vouch";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1157,7 +1157,7 @@ async function opPeopleList(uid, payload, env, claims) {
   const me = memberIdFields(claims);
   let cd = { code: null, findable: true }, pv = false;
   try { const pr = await profileOf(token, uid); pv = !!pr.phoneVerified; cd = pr.code ? { code: pr.code, findable: pr.findable } : await ensureCode(token, uid, claims, false); } catch (e) {}
-  return { me: { uid, name: me.name.stringValue || null, anon: me.anon.booleanValue, phone: claims.sawaPhone || null, phoneVerified: pv, emailVerified: !!(claims.email && claims.email_verified), googleName: claims.name || null, code: cd.code, findable: cd.findable },
+  return { me: { uid, name: me.name.stringValue || null, anon: me.anon.booleanValue, phone: claims.sawaPhone || null, phoneVerified: pv, verifiedBy: pv ? (((PROFILE_CACHE.get(uid) || {}).verifiedBy) || "whatsapp") : null, emailVerified: !!(claims.email && claims.email_verified), googleName: claims.name || null, code: cd.code, findable: cd.findable },
            people: list.map(p => ({ uid: p.uid, name: p.name, anon: p.anon, families: p.families, via: Object.keys(p.via), phone: p.phone || null })), acl: aclOk };
 }
 async function opPeopleInvite(uid, payload, env, claims) {
@@ -2458,7 +2458,7 @@ async function profileOf(token, uid) {
   if (c && Date.now() - c.at < 10 * 60 * 1000) return c;
   const d = await fsGet(token, "accounts/" + uid).catch(() => null);
   const v = { name: fstr(d, "displayName") || null, phone: fstr(d, "phone") || null, code: fstr(d, "code") || null, findable: accFindable(d), gname: fstr(d, "gname") || null,
-    phoneVerified: fbool(d, "phoneVerified") === true, emailHash: fstr(d, "emailHash") || null, at: Date.now() };
+    phoneVerified: fbool(d, "phoneVerified") === true, verifiedBy: fstr(d, "verifiedBy") || null, emailHash: fstr(d, "emailHash") || null, at: Date.now() };
   PROFILE_CACHE.set(uid, v);
   if (PROFILE_CACHE.size > 2000) PROFILE_CACHE.clear();
   return v;
@@ -2474,7 +2474,7 @@ async function opProfileGet(uid, payload, env, claims) {
   const p = await profileOf(token, uid);
   const cd = p.code ? { code: p.code, findable: p.findable } : await ensureCode(token, uid, claims, false).catch(() => ({ code: null, findable: true }));
   const emailVerified = await ensureEmailIndex(token, uid, claims, p).catch(() => false);
-  return { profile: { name: p.name, phone: p.phone, phoneVerified: !!p.phoneVerified, emailVerified, email: emailVerified ? claims.email : null, googleName: claims.name || null, code: cd.code, findable: cd.findable,
+  return { profile: { name: p.name, phone: p.phone, phoneVerified: !!p.phoneVerified, verifiedBy: p.phoneVerified ? (p.verifiedBy || "whatsapp") : null, emailVerified, email: emailVerified ? claims.email : null, googleName: claims.name || null, code: cd.code, findable: cd.findable,
     anon: !!(claims.firebase && claims.firebase.sign_in_provider === "anonymous") }, verify: verifyConfig(env) };
 }
 /* ---------- 43) التحقّق من الهويّة (C43) ----------
@@ -2525,7 +2525,76 @@ async function opPhoneStatus(uid, payload, env) {
   const v = fbool(d, "phoneVerified") === true, phone = fstr(d, "phone") || null;
   const c = PROFILE_CACHE.get(uid); if (c) { c.phoneVerified = v; c.phone = phone; }
   const exp = Number(d && d.fields && d.fields.otpExp && d.fields.otpExp.integerValue || 0);
-  return { phone, phoneVerified: v, pending: !v && exp > Date.now(), mismatch: fstr(d, "otpMismatch") || null };
+  const vouches = phone ? await vouchCount(token, uid, phone) : { n: 0, names: [] };
+  return { phone, phoneVerified: v, verifiedBy: v ? (fstr(d, "verifiedBy") || "whatsapp") : null, pending: !v && exp > Date.now(), mismatch: fstr(d, "otpMismatch") || null,
+    vouches: vouches.n, vouchers: vouches.names, needed: VOUCH_NEEDED };
+}
+/* ---------- 44) تأكيد الرقم عبر المعارف (C44) ----------
+   بلا Meta ولا SMS: صاحب الرقم يطلب من معارفه (جهات اتّصال متبادلة) تأكيد أنّ هذا رقمه. كلّ مؤكِّدٍ يجب أن يكون
+   غير مجهول وموثَّق البريد (Google/بريد مؤكَّد) أو موثَّق الهاتف. تأكيدان من شخصين مختلفين للرقم الحاليّ ⇒ phoneVerified
+   (verifiedBy = "contacts"). accounts/{to}/vouchin/{from} = طلب · vouches/{owner}/{voucher} = { phone, ts, matched }.
+   تغيير الرقم يُبطل التأكيدات القديمة (تُحسب فقط التي تحمل الرقم الحاليّ). رقمٌ واحد لحسابٍ واحد (phones/). */
+const VOUCH_NEEDED = 2;
+async function vouchCount(token, owner, phone) {
+  const vs = await fsList(token, "vouches/" + owner).catch(() => []);
+  const names = [];
+  for (const d of vs) if (fstr(d, "phone") === phone) names.push(fstr(d, "name") || null);
+  return { n: names.length, names: names.slice(0, 5) };
+}
+async function opVouchRequest(uid, payload, env, claims, ctx) {
+  if (!codeRate(uid, "vouch", 5)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const p = await profileOf(token, uid);
+  if (!p.phone) throw new Error("no_phone");
+  if (p.phoneVerified) return { already: true };
+  const to = Array.from(new Set(((payload && payload.to) || []).map(String))).filter(t => t && t !== uid).slice(0, 5);
+  if (!to.length) throw new Error("no_targets");
+  const me = await myName(token, uid, claims), now = Date.now();
+  const writes = [], sent = [], skipped = [];
+  for (const t of to) {
+    if (!(await sharesContact(token, uid, t)) || (await blockedBy(token, t, uid).catch(() => false))) { skipped.push(t); continue; }
+    writes.push({ update: { name: DOC_ROOT + "/accounts/" + t + "/vouchin/" + uid, fields: { name: me ? { stringValue: me } : { nullValue: null }, phone: { stringValue: p.phone }, ts: { integerValue: String(now) } } } });
+    sent.push(t);
+  }
+  if (writes.length) await fsCommit(token, writes);
+  if (sent.length) {
+    const job = pushTo(token, sent, strData({ t: "req", k: "vouch", from: uid, title: "تأكيد رقم في سوا", body: (me || "مستخدم سوا") + " يطلب منك تأكيد أنّ رقمه " + p.phone, ts: now })).catch(e => console.log("push:", e && e.message));
+    if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
+  }
+  return { sent: sent.length, skipped };
+}
+async function opVouchRespond(uid, payload, env, claims, ctx) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const owner = String((payload && payload.for) || ""), ok = !!(payload && payload.ok), matched = !!(payload && payload.matched);
+  if (!owner || owner === uid) throw new Error("bad_target");
+  const rq = await fsGet(token, "accounts/" + uid + "/vouchin/" + owner);
+  if (!rq) throw new Error("not_found");
+  const del = { delete: DOC_ROOT + "/accounts/" + uid + "/vouchin/" + owner };
+  if (!ok) { await fsCommit(token, [del]); return { done: true, counted: false }; }
+  if (claims.firebase && claims.firebase.sign_in_provider === "anonymous") throw new Error("not_eligible");
+  const mine = await profileOf(token, uid);
+  if (!(claims.email && claims.email_verified) && !mine.phoneVerified) throw new Error("not_eligible");
+  if (!(await sharesContact(token, uid, owner))) throw new Error("not_contact");
+  const target = await fsGet(token, "accounts/" + owner);
+  const tphone = fstr(target, "phone"), rqPhone = fstr(rq, "phone");
+  if (!tphone || tphone !== rqPhone) { await fsCommit(token, [del]); return { done: true, counted: false, stale: true }; }
+  const myNm = await myName(token, uid, claims);
+  await fsCommit(token, [del, { update: { name: DOC_ROOT + "/vouches/" + owner + "/" + uid, fields: { phone: { stringValue: tphone }, name: myNm ? { stringValue: myNm } : { nullValue: null }, ts: { integerValue: String(Date.now()) }, matched: { booleanValue: matched } } } }]);
+  const vc = await vouchCount(token, owner, tphone);
+  let verified = fbool(target, "phoneVerified") === true, conflict = false;
+  if (!verified && vc.n >= VOUCH_NEEDED) {
+    const ownerOfPhone = fstr(await fsGet(token, "phones/" + tphone).catch(() => null), "uid");
+    if (ownerOfPhone && ownerOfPhone !== owner) conflict = true;
+    else {
+      await fsCommit(token, [
+        { update: { name: DOC_ROOT + "/accounts/" + owner, fields: { phoneVerified: { booleanValue: true }, verifiedBy: { stringValue: "contacts" }, phoneVerifiedAt: { integerValue: String(Date.now()) } } }, updateMask: { fieldPaths: ["phoneVerified", "verifiedBy", "phoneVerifiedAt"] } },
+        { update: { name: DOC_ROOT + "/phones/" + tphone, fields: { uid: { stringValue: owner }, by: { stringValue: "contacts" }, ts: { integerValue: String(Date.now()) } } } }]);
+      PROFILE_CACHE.delete(owner); verified = true;
+      const job = pushTo(token, [owner], strData({ t: "vouchok", title: "تأكّد رقمك ✓", body: "أكّد اثنان من معارفك رقمك " + tphone + " — صار بإمكان معارفك إيجادك به", ts: Date.now() })).catch(() => {});
+      if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
+    }
+  }
+  return { done: true, counted: true, count: vc.n, needed: VOUCH_NEEDED, verified, conflict };
 }
 // Meta ⇒ /wa/webhook : التحقّق (GET) والرسائل (POST)
 async function waWebhook(request, env, ctx) {
@@ -2567,8 +2636,8 @@ async function waVerify(token, env, code, from) {
   // من كان الرقم عنده موثَّقاً من قبل يفقده (رقمٌ واحد لحسابٍ واحد)
   const prevOwner = fstr(await fsGet(token, "phones/" + phone).catch(() => null), "uid");
   const writes = [
-    { update: { name: DOC_ROOT + "/accounts/" + uid, fields: { phone: { stringValue: phone }, phoneVerified: { booleanValue: true }, phoneVerifiedAt: { integerValue: String(Date.now()) }, otp: { nullValue: null }, otpExp: { nullValue: null }, otpMismatch: { nullValue: null } } },
-      updateMask: { fieldPaths: ["phone", "phoneVerified", "phoneVerifiedAt", "otp", "otpExp", "otpMismatch"] } },
+    { update: { name: DOC_ROOT + "/accounts/" + uid, fields: { phone: { stringValue: phone }, phoneVerified: { booleanValue: true }, verifiedBy: { stringValue: "whatsapp" }, phoneVerifiedAt: { integerValue: String(Date.now()) }, otp: { nullValue: null }, otpExp: { nullValue: null }, otpMismatch: { nullValue: null } } },
+      updateMask: { fieldPaths: ["phone", "phoneVerified", "verifiedBy", "phoneVerifiedAt", "otp", "otpExp", "otpMismatch"] } },
     { update: { name: DOC_ROOT + "/phones/" + phone, fields: { uid: { stringValue: uid }, ts: { integerValue: String(Date.now()) } } } },
     { delete: DOC_ROOT + "/otp/" + code }];
   if (prevOwner && prevOwner !== uid) writes.push({ update: { name: DOC_ROOT + "/accounts/" + prevOwner, fields: { phoneVerified: { booleanValue: false } } }, updateMask: { fieldPaths: ["phoneVerified"] } });
@@ -2926,9 +2995,10 @@ function reqOut(d, dir) {
 }
 async function opCodeRequests(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
-  const [ins, outs] = await Promise.all([fsList(token, "accounts/" + uid + "/creq"), fsList(token, "accounts/" + uid + "/creqout")]);
+  const [ins, outs, vins] = await Promise.all([fsList(token, "accounts/" + uid + "/creq"), fsList(token, "accounts/" + uid + "/creqout"), fsList(token, "accounts/" + uid + "/vouchin").catch(() => [])]);
   const by = (a, b) => b.ts - a.ts;
-  return { incoming: ins.slice(0, 100).map(d => reqOut(d, "in")).sort(by), outgoing: outs.slice(0, 100).map(d => reqOut(d, "out")).sort(by) };
+  return { incoming: ins.slice(0, 100).map(d => reqOut(d, "in")).sort(by), outgoing: outs.slice(0, 100).map(d => reqOut(d, "out")).sort(by),
+    vouches: vins.slice(0, 50).map(d => ({ uid: d.name.split("/").pop(), name: fstr(d, "name") || null, phone: fstr(d, "phone") || null, ts: fsInt(d, "ts") })).sort(by) };
 }
 // القبول: جهتا اتّصال (كالرابط الشخصيّ) + محادثةٌ ثنائيّة أوّل رسائلها رسالة التعريف
 async function acceptReq(token, me, from, claims, ctx) {
@@ -3344,6 +3414,8 @@ export default {
       if (op === "phone.status") { const r = await opPhoneStatus(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "find.phone") { const r = await opFindBy(uid, body.payload, env, "phone"); return json({ ok: true, ...r }); }
       if (op === "find.email") { const r = await opFindBy(uid, body.payload, env, "email"); return json({ ok: true, ...r }); }
+      if (op === "vouch.request") { const r = await opVouchRequest(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "vouch.respond") { const r = await opVouchRespond(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "whoami")
         return json({ ok: true, uid, provider: claims.firebase && claims.firebase.sign_in_provider, admin: isAdmin(env, claims) });   // v37: «فحص الاتّصال» للمدير وحده
       if (op === "group.create") {
