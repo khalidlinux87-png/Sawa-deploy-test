@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v47-boot";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v48-send";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1476,28 +1476,29 @@ async function opChatSend(uid, payload, env, ctx) {
   const cid = payload && payload.cid;
   const c = await requireChatMember(token, cid, uid);
   const type = fstr(c, "type");
-  if (type === "dm") {   // الحظر: الطرف الآخر حظرني ⇒ لا تصل (ولا نخبر المرسل — كما في واتساب تبقى ✓ واحدة)
-    const other = fsArr(c, "members").find(x => x !== uid);
-    const pr = await fsGet(token, "accounts/" + other + "/chatprefs/main");
-    const blocked = pr && fstr(pr, "data") ? (JSON.parse(fstr(pr, "data")).blocked || []) : [];
-    if (blocked.indexOf(uid) >= 0) return { ts: Date.now(), day: null, blocked: true };
-  }
+  const other = type === "dm" ? fsArr(c, "members").find(x => x !== uid) : null;   // C55: فحص الحظر يُقرأ بالتوازي أدناه
   if (type === "group" && fbool(c, "adminsOnly")) {
     if (fsArr(c, "admins").indexOf(uid) < 0) throw new Error("only admins can send here");
   }
   const ts = Date.now(), e2e = e2eOf(c);
   const msg = e2e ? cleanEncMsg(payload.msg, uid, ts, e2e) : cleanMsg(payload.msg, uid, ts);
   let sh = shardOf(c, ts, JSON.stringify(msg).length + 200), day = sh.key;
-  if (msg.extra && msg.extra.mid) {   // الوسيط رفعه المرسل نفسه في هذه المحادثة واكتمل
-    const meta = await fsGet(token, "chats/" + cid + "/media/" + msg.extra.mid);
-    if (!meta || fstr(meta, "by") !== uid || !fbool(meta, "done")) throw new Error("media not uploaded");
-    msg.extra.size = fsInt(meta, "size"); msg.extra.mime = fstr(meta, "mime") || msg.extra.mime || null;
-  }
+  const metaP = msg.extra && msg.extra.mid ? fsGet(token, "chats/" + cid + "/media/" + msg.extra.mid) : Promise.resolve(undefined);   // C55
   // v33: معرّف الرسالة لا يُعاد استعماله — كان أيّ عضوٍ يستبدل رسالة غيره (أو رسالة نظام) بإرسال المعرّف نفسه.
   //      المعرّف نفسه من المرسل نفسه = إعادة محاولة ⇒ لا نكتب ثانيةً ولا نرسل إشعاراً مكرّراً.
   //      الاقتباس في الردّ يُؤخذ من الرسالة الأصليّة لا ممّا كتبه المرسل (إن كانت من اليوم أو من يومٍ أرسله العميل)
   const rday = msg.reply && DAY_REF.test(String((payload.msg.reply || {}).day || "")) ? String(payload.msg.reply.day) : day;
-  const peek = await dayPeek(token, cid, day, [msg.id].concat(msg.reply && rday === day ? [msg.reply.id] : []));
+  // C55: ثلاث قراءاتٍ بالتوازي بدل ثلاث رحلاتٍ متتالية: الحظر · بيانات الوسيط · رسائل اليوم
+  const [pr, meta, peek] = await Promise.all([other ? fsGet(token, "accounts/" + other + "/chatprefs/main") : Promise.resolve(null), metaP,
+    dayPeek(token, cid, day, [msg.id].concat(msg.reply && rday === day ? [msg.reply.id] : []))]);
+  if (other) {   // الحظر: الطرف الآخر حظرني ⇒ لا تصل (ولا نخبر المرسل — كما في واتساب تبقى ✓ واحدة)
+    const blocked = pr && fstr(pr, "data") ? (JSON.parse(fstr(pr, "data")).blocked || []) : [];
+    if (blocked.indexOf(uid) >= 0) return { ts: Date.now(), day: null, blocked: true };
+  }
+  if (msg.extra && msg.extra.mid) {   // الوسيط رفعه المرسل نفسه في هذه المحادثة واكتمل
+    if (!meta || fstr(meta, "by") !== uid || !fbool(meta, "done")) throw new Error("media not uploaded");
+    msg.extra.size = fsInt(meta, "size"); msg.extra.mime = fstr(meta, "mime") || msg.extra.mime || null;
+  }
   if (peek[msg.id]) {
     if (peek[msg.id].by !== uid) throw new Error("message id taken");
     return { ts: peek[msg.id].ts || ts, day, id: msg.id, dup: true };
