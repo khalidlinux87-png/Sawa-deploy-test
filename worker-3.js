@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v48-send";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v49-push";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2104,6 +2104,26 @@ async function opPushRegister(uid, payload, env) {
     token: { stringValue: t }, ua: { stringValue: String(payload.ua || "").slice(0, 160) }, ts: { integerValue: String(Date.now()) } } } }]);
   return { id };
 }
+// C56: إشعارٌ تجريبيّ إلى أجهزتي أنا مع نتيجة كلّ جهاز (يكشف أين تنقطع السلسلة: لا جهاز مسجّل · رمزٌ ميّت · خطأ FCM)
+async function opPushTest(uid, payload, env) {
+  if (!codeRate(uid, "ptest", 12)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const devs = await fsList(token, "accounts/" + uid + "/devices");
+  const now = Date.now(), results = [];
+  if (payload && payload.dry) return { devices: devs.length, results: [] };
+  for (const d of devs.slice(0, 3)) {
+    const dev = fstr(d, "token");
+    const res = await fetch("https://fcm.googleapis.com/v1/projects/" + PROJECT_ID + "/messages:send", {
+      method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: { token: dev, data: strData({ t: "test", title: "سوا — إشعار تجريبيّ ✓", body: "وصل الإشعار إلى هذا الجهاز. الرسائل والمكالمات ستصلك والتطبيق مغلق.", ts: now }),
+        webpush: { headers: { Urgency: "high", TTL: "120" } } } }) });
+    let err = "";
+    if (!res.ok) { const txt = await res.text(); err = (txt.match(/"message":\s*"([^"]{1,160})"/) || [])[1] || ("HTTP " + res.status); if (/UNREGISTERED|registration-token-not-registered|NOT_FOUND/.test(txt)) { await fsCommit(token, [{ delete: d.name }]).catch(() => {}); err = "gone"; } }
+    results.push({ ua: fstr(d, "ua").slice(0, 60), ts: fsInt(d, "ts"), ok: res.ok, err });
+  }
+  stat("push:test");
+  return { devices: devs.length, results };
+}
 async function opPushUnregister(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const t = String((payload && payload.token) || "");
@@ -3682,6 +3702,7 @@ export default {
       if (op === "sched.list") { const r = await opSchedList(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "sched.delete") { const r = await opSchedDelete(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "call.missed") { const r = await opCallMissed(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "push.test") { const r = await opPushTest(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "push.register") { const r = await opPushRegister(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "push.unregister") { const r = await opPushUnregister(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.edit") { const r = await opChatEdit(uid, body.payload, env); return json({ ok: true, ...r }); }
