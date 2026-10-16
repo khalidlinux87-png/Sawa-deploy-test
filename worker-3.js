@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v45-link";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v46-sig";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1186,6 +1186,7 @@ async function opPeopleAccept(uid, payload, env, claims) {
     { update: { name: DOC_ROOT + "/accounts/" + other + "/people/" + uid, fields: Object.assign({ ts: { timestampValue: now } }, mine) } },
   ]);
   try { await rtdbPatch(token, { ["acl/" + uid + "/" + other]: true, ["acl/" + other + "/" + uid]: true }); } catch (e) {}
+  await sigTo(token, [other], "reqok");
   return { uid: other, name: fstr(inv, "name") || null };
 }
 // v34: معاينة الرابط قبل القبول — التطبيق يسأل «أضِفه؟ / انضمّ؟» ولا يُنفَّذ الرابط وحده
@@ -2650,6 +2651,7 @@ async function opVouchRequest(uid, payload, env, claims, ctx) {
   if (sent.length) {
     const job = pushTo(token, sent, strData({ t: "req", k: "vouch", from: uid, title: "تأكيد رقم في سوا", body: (me || "مستخدم سوا") + " يطلب منك تأكيد أنّ رقمه " + p.phone, ts: now })).catch(e => console.log("push:", e && e.message));
     if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
+    await sigTo(token, sent, "req");
   }
   return { sent: sent.length, skipped };
 }
@@ -3102,6 +3104,12 @@ async function opCodeFind(uid, payload, env) {
     fsGet(token, "accounts/" + uid + "/creqout/" + t.uid), fsGet(token, "accounts/" + uid + "/creq/" + t.uid)]);
   return { found: true, name: t.name, code: t.code, contact: !!contact, pending: inR ? "in" : outR ? "out" : null, uid: (contact || inR || outR) ? t.uid : undefined };
 }
+// C50: إشارةٌ في RTDB يراقبها جهاز المستلم (sig/$uid — يقرؤها صاحبها فقط) فيحدّث الطلبات وجهات الاتّصال فوراً ولو كانت الإشعارات مغلقة
+async function sigTo(token, uids, kind) {
+  const pat = {}; const now = Date.now();
+  for (const u of [].concat(uids || [])) if (u) pat["sig/" + u] = { k: kind, ts: now };
+  if (Object.keys(pat).length) await rtdbPatch(token, pat).catch(e => console.log("sig:", e && e.message));
+}
 async function opCodeRequest(uid, payload, env, claims, ctx) {
   if (!codeRate(uid, "req", 10)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -3130,6 +3138,7 @@ async function opCodeRequest(uid, payload, env, claims, ctx) {
     const job = pushTo(token, [t.uid], strData({ t: "req", from: uid, title: "طلب تواصل في سوا", body: (me || "مستخدم سوا") + (text ? ": " + text : " يريد التواصل معك"), ts: now }))
       .catch(e => console.log("push:", e && e.message));
     if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
+    await sigTo(token, [t.uid], "req");
   }
   return { sent: true, name: t.name };
 }
@@ -3181,6 +3190,7 @@ async function acceptReq(token, me, from, claims, ctx) {
         currentDocument: { exists: true } },
     ]).catch(e => console.log("seed msg:", e && e.message));
   }
+  await sigTo(token, [from, me], "reqok");
   const job = pushTo(token, [from], strData({ t: "reqok", from: me, cid: cid, title: myNm || "سوا", body: "قبل طلب التواصل — يمكنكما المراسلة الآن ✓", ts: now }))
     .catch(e => console.log("push:", e && e.message));
   if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
