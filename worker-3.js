@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v46-sig";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v47-boot";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -3402,7 +3402,7 @@ async function purgeChat(token, cid, spend) {
    تُجمَع في الذاكرة وتُرسَل دفعةً (كلّ ٤٠ حدثاً أو ٥ دقائق) بزياداتٍ ذرّيّة — كتابةٌ واحدة بدل كتابةٍ لكلّ طلب.
    admin.stats: للمدير وحده (السرّ ADMIN_EMAIL = بريد حسابه في Google، مؤكَّد). */
 const STATS = { day: null, n: 0, at: Date.now(), m: {} };
-const HEAVY_OPS = new Set(["people.list", "profile.set", "account.delete", "gcall.start", "gcall.add", "sched.set", "bulk.import", "account.adopt", "group.members"]);
+const HEAVY_OPS = new Set(["boot", "people.list", "profile.set", "account.delete", "gcall.start", "gcall.add", "sched.set", "bulk.import", "account.adopt", "group.members"]);
 function stat(key, k) {
   const d = dayKey(Date.now());
   if (STATS.day !== d) { STATS.day = d; STATS.m = {}; STATS.n = 0; STATS.at = Date.now(); }
@@ -3568,6 +3568,11 @@ export default {
       if (op === "phone.start") { const r = await opPhoneStart(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "phone.status") { const r = await opPhoneStatus(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "find.phone") { const r = await opFindBy(uid, body.payload, env, "phone"); return json({ ok: true, ...r }); }
+      // C53: طلبٌ واحد عند الإقلاع بدل ثلاثة (people.list + chat.prefs + code.requests) — يوفّر رحلتين إلى الخادم على الشبكات البطيئة
+      if (op === "boot") {
+        const [people, prefs, requests] = await Promise.all([opPeopleList(uid, {}, env, claims), opChatPrefs(uid, {}, env), opCodeRequests(uid, {}, env)]);
+        return json({ ok: true, people, prefs, requests });
+      }
       if (op === "link.peek") { const r = await opLinkPeek(uid, body.payload, env); return json(r); }
       if (op === "find.email") { const r = await opFindBy(uid, body.payload, env, "email"); return json({ ok: true, ...r }); }
       if (op === "sfu.cfg") { const r = await opSfuCfg(uid, body.payload, env); return json({ ok: true, ...r }); }
