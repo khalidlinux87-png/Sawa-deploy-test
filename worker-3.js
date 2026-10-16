@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v49-push";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v50-push";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2102,16 +2102,22 @@ async function opPushRegister(uid, payload, env) {
   }
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid + "/devices/" + id, fields: {
     token: { stringValue: t }, ua: { stringValue: String(payload.ua || "").slice(0, 160) }, ts: { integerValue: String(Date.now()) } } } }]);
+  // C60: تنظيف — الأجهزة الأقدم من ٦٠ يوماً أو الزائدة عن الحدّ تُحذف (الرموز القديمة تموت غالباً، والمستخدم العاديّ له جهازٌ أو جهازان)
+  try {
+    const devs = await devsOf(token, uid), now = Date.now();
+    const old = devs.filter((d, i) => d.name.split("/").pop() !== id && (i >= DEV_MAX || now - devTs(d) > DEV_TTL)).slice(0, 20);
+    if (old.length) await fsCommit(token, old.map(d => ({ delete: d.name }))).catch(() => {});
+  } catch (e) {}
   return { id };
 }
 // C56: إشعارٌ تجريبيّ إلى أجهزتي أنا مع نتيجة كلّ جهاز (يكشف أين تنقطع السلسلة: لا جهاز مسجّل · رمزٌ ميّت · خطأ FCM)
 async function opPushTest(uid, payload, env) {
   if (!codeRate(uid, "ptest", 12)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
-  const devs = await fsList(token, "accounts/" + uid + "/devices");
+  const devs = await devsOf(token, uid);
   const now = Date.now(), results = [];
   if (payload && payload.dry) return { devices: devs.length, results: [] };
-  for (const d of devs.slice(0, 3)) {
+  for (const d of devs.slice(0, DEV_MAX)) {
     const dev = fstr(d, "token");
     const res = await fetch("https://fcm.googleapis.com/v1/projects/" + PROJECT_ID + "/messages:send", {
       method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
@@ -2140,12 +2146,20 @@ async function fcmSend(token, devToken, data) {
   const txt = await res.text();
   return /UNREGISTERED|registration-token-not-registered|INVALID_ARGUMENT|NOT_FOUND/.test(txt) ? "gone" : "err";
 }
+// C60: أجهزة المستخدم مرتّبةً بالأحدث تسجيلاً (ts) — حتى لا يحجب رمزٌ ميّت قديم رمزاً حيّاً جديداً
+const DEV_MAX = 5, DEV_TTL = 60 * 86400000;
+function devTs(d) { return Number(((d.fields || {}).ts || {}).integerValue || 0); }
+async function devsOf(token, uid) {
+  const devs = await fsList(token, "accounts/" + uid + "/devices");
+  devs.sort((a, b) => devTs(b) - devTs(a));
+  return devs;
+}
 // يُرسل لأجهزة مستخدمين (حتّى ١٢ مستخدماً لكلّ حدث — حدّ ٥٠ طلباً فرعيّاً)، ويحذف الرموز الميّتة
 async function pushTo(token, uids, data) {
   let sent = 0;
   for (const u of uids.slice(0, 12)) {
-    const devs = await fsList(token, "accounts/" + u + "/devices");
-    for (const d of devs.slice(0, 3)) {
+    const devs = await devsOf(token, u);
+    for (const d of devs.slice(0, DEV_MAX)) {
       const r = await fcmSend(token, fstr(d, "token"), data);
       if (r === "ok") { sent++; stat("push"); }
       else if (r === "gone") await fsCommit(token, [{ delete: d.name }]).catch(() => {});
