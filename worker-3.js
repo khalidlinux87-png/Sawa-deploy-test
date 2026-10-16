@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v44-sfu";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v45-link";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -3011,6 +3011,61 @@ async function ensureCode(token, uid, claims, force) {
 }
 // حدّ البحث والطلبات: ٣٠ بحثاً و١٠ طلبات في الساعة لكلّ مستخدم (يمنع تخمين الرموز وإغراق الناس بالطلبات)
 const CODE_RL = new Map();
+/* ---------- 49) معاينة الروابط (C49) ----------
+   link.peek {url}: http(s) فقط · لا عناوين خاصّة/محلّيّة (حماية SSRF) · حدّ ١٠ ثوانٍ و٢٥٦ كيلوبايت · HTML فقط · ذاكرة ساعة · ٦٠/ساعة لكلّ مستخدم.
+   الصورة لا تمرّ عبر الخادم: نعيد عنوانها فقط والجهاز يحمّلها. */
+const LINK_CACHE = new Map();
+function linkHostOk(h) {
+  h = String(h || "").toLowerCase();
+  if (!h || h === "localhost" || /\.(local|internal|localhost)$/.test(h)) return false;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) {   // IPv4 حرفيّ: نرفض الخاصّ والمحلّيّ
+    const [a, b] = h.split(".").map(Number);
+    if (a === 10 || a === 127 || a === 0 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254) || a >= 224) return false;
+  }
+  if (h.indexOf(":") >= 0) return false;         // IPv6 حرفيّ
+  return true;
+}
+function htmlDecode(t) { return String(t || "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&nbsp;/g, " ").replace(/&#(\d+);/g, (m, n) => { try { return String.fromCodePoint(Number(n)); } catch (e) { return ""; } }).replace(/\s+/g, " ").trim(); }
+function metaOf(html, names) {
+  for (const n of names) {
+    const re1 = new RegExp("<meta[^>]+(?:property|name)=[\"']" + n.replace(/:/g, "\\:") + "[\"'][^>]*content=[\"']([^\"']{1,600})[\"']", "i");
+    const re2 = new RegExp("<meta[^>]+content=[\"']([^\"']{1,600})[\"'][^>]*(?:property|name)=[\"']" + n.replace(/:/g, "\\:") + "[\"']", "i");
+    const m = html.match(re1) || html.match(re2); if (m) return htmlDecode(m[1]);
+  }
+  return "";
+}
+async function opLinkPeek(uid, payload, env) {
+  if (!codeRate(uid, "link", 60)) throw new Error("rate_limited");
+  let u; try { u = new URL(String((payload && payload.url) || "")); } catch (e) { throw new Error("bad url"); }
+  if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("bad url");
+  if (!linkHostOk(u.hostname)) throw new Error("bad url");
+  u.hash = ""; const key = u.toString().slice(0, 1500);
+  const c = LINK_CACHE.get(key); if (c && Date.now() - c.at < 3600000) return c.v;
+  const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 10000);
+  let out = { ok: true, url: key, host: u.hostname.replace(/^www\./, ""), title: "", desc: "", image: "" };
+  try {
+    const res = await fetch(key, { redirect: "follow", signal: ctl.signal, headers: { "User-Agent": "Mozilla/5.0 (compatible; SawaLinkPreview/1; +https://www.sawaaap.com)", "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5", "Accept-Language": "ar,en;q=0.8" } });
+    const ct = String(res.headers.get("content-type") || "");
+    if (res.ok && /text\/html|application\/xhtml/i.test(ct)) {
+      const reader = res.body.getReader(); const chunks = []; let got = 0;
+      while (got < 262144) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); got += value.length; }
+      try { reader.cancel(); } catch (e) {}
+      const buf = new Uint8Array(got); let o = 0; for (const ch of chunks) { buf.set(ch.subarray(0, Math.min(ch.length, got - o)), o); o += ch.length; if (o >= got) break; }
+      const html = new TextDecoder("utf-8", { fatal: false }).decode(buf);
+      const tm2 = html.match(/<title[^>]*>([^<]{1,300})<\/title>/i);
+      out.title = metaOf(html, ["og:title", "twitter:title"]) || (tm2 ? htmlDecode(tm2[1]) : "");
+      out.desc = metaOf(html, ["og:description", "twitter:description", "description"]).slice(0, 220);
+      let img = metaOf(html, ["og:image", "og:image:url", "twitter:image", "twitter:image:src"]);
+      if (img) { try { const iu = new URL(img, res.url || key); if ((iu.protocol === "https:" || iu.protocol === "http:") && linkHostOk(iu.hostname)) out.image = iu.toString().slice(0, 1000); } catch (e) {} }
+      try { out.host = new URL(res.url || key).hostname.replace(/^www\./, ""); } catch (e) {}
+    } else if (res.ok && /^image\//i.test(ct)) { out.image = key; }
+  } catch (e) { out.err = "unreachable"; }
+  clearTimeout(tm);
+  out.title = String(out.title || "").slice(0, 160);
+  LINK_CACHE.set(key, { at: Date.now(), v: out }); if (LINK_CACHE.size > 2000) LINK_CACHE.clear();
+  stat("link:peek");
+  return out;
+}
 function codeRate(uid, kind, max) {
   const k = uid + ":" + kind, now = Date.now(); let e = CODE_RL.get(k);
   if (!e || now - e.t > 3600000) { e = { t: now, n: 0 }; CODE_RL.set(k, e); }
@@ -3503,6 +3558,7 @@ export default {
       if (op === "phone.start") { const r = await opPhoneStart(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "phone.status") { const r = await opPhoneStatus(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "find.phone") { const r = await opFindBy(uid, body.payload, env, "phone"); return json({ ok: true, ...r }); }
+      if (op === "link.peek") { const r = await opLinkPeek(uid, body.payload, env); return json(r); }
       if (op === "find.email") { const r = await opFindBy(uid, body.payload, env, "email"); return json({ ok: true, ...r }); }
       if (op === "sfu.cfg") { const r = await opSfuCfg(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "sfu.new") { const r = await opSfuNew(uid, body.payload, env); return json({ ok: true, ...r }); }
