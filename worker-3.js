@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v50-push";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v51-ring";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2111,12 +2111,22 @@ async function opPushRegister(uid, payload, env) {
   return { id };
 }
 // C56: إشعارٌ تجريبيّ إلى أجهزتي أنا مع نتيجة كلّ جهاز (يكشف أين تنقطع السلسلة: لا جهاز مسجّل · رمزٌ ميّت · خطأ FCM)
-async function opPushTest(uid, payload, env) {
+async function opPushTest(uid, payload, env, ctx) {
   if (!codeRate(uid, "ptest", 12)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const devs = await devsOf(token, uid);
   const now = Date.now(), results = [];
   if (payload && payload.dry) return { devices: devs.length, results: [] };
+  // C71: «بعد ١٥ ثانية» — ليغلق المستخدم التطبيق ويرى هل يصله الإشعار في الخلفيّة (حالة الشكوى الحقيقيّة)
+  if (payload && payload.delay && ctx && ctx.waitUntil) {
+    const ms = Math.min(20000, Math.max(5000, Number(payload.delay) || 15000));
+    ctx.waitUntil((async () => {
+      await new Promise((r) => setTimeout(r, ms));
+      for (const d of devs.slice(0, DEV_MAX)) await fcmSend(token, fstr(d, "token"), strData({ t: "test", title: "سوا — إشعار في الخلفيّة ✓", body: "وصل والتطبيق مغلق — الإشعارات والمكالمات ستصلك.", ts: Date.now() })).catch(() => {});
+      stat("push:test-bg");
+    })());
+    return { devices: devs.length, queued: true, delay: ms };
+  }
   for (const d of devs.slice(0, DEV_MAX)) {
     const dev = fstr(d, "token");
     const res = await fetch("https://fcm.googleapis.com/v1/projects/" + PROJECT_ID + "/messages:send", {
@@ -2141,7 +2151,7 @@ async function fcmSend(token, devToken, data) {
   const res = await fetch("https://fcm.googleapis.com/v1/projects/" + PROJECT_ID + "/messages:send", {
     method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
     body: JSON.stringify({ message: { token: devToken, data: data,
-      webpush: { headers: { Urgency: data.t === "call" ? "high" : "normal", TTL: data.t === "call" ? "45" : "86400" } } } }) });
+      webpush: { headers: { Urgency: data.t === "call" || data.t === "test" ? "high" : "normal", TTL: data.t === "call" ? "45" : data.t === "test" ? "120" : "86400" } } } }) });
   if (res.ok) return "ok";
   const txt = await res.text();
   return /UNREGISTERED|registration-token-not-registered|INVALID_ARGUMENT|NOT_FOUND/.test(txt) ? "gone" : "err";
@@ -2936,6 +2946,7 @@ async function opRtcIce(uid, payload, env, claims, request) {
     return viaMetered({ iceServers: iceCache, turn: true });
   } catch (e) { return viaMetered({ iceServers: stun, turn: false, err: String(e.message || e) }); }
 }
+const RING_REPEATS = 3, RING_GAP_MS = (typeof globalThis !== "undefined" && globalThis.__RING_GAP_MS) || 8000;
 async function opCallRing(uid, payload, env, claims, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const to = payload && payload.to, callId = String((payload && payload.callId) || "");
@@ -2950,9 +2961,20 @@ async function opCallRing(uid, payload, env, claims, ctx) {
   if (!call || call.from !== uid || call.to !== to || call.state !== "ringing") return { queued: true };
   const name = memberIdFields(claims).name.stringValue || "سوا";
   const video = payload.type === "video";
-  const job = pushTo(token, [to], strData({ t: "call", call: callId, from: uid, cid: dmId(uid, to), type: video ? "video" : "audio",
-    title: name, body: video ? "📹 مكالمة فيديو واردة" : "📞 مكالمة صوتيّة واردة", ts: Date.now() }));
-  if (ctx && ctx.waitUntil) { ctx.waitUntil(job); return { queued: true }; }
+  const data = (n) => strData({ t: "call", call: callId, from: uid, cid: dmId(uid, to), type: video ? "video" : "audio",
+    title: name, body: (video ? "📹 مكالمة فيديو واردة" : "📞 مكالمة صوتيّة واردة") + (n ? " · " + "●".repeat(n) : ""), ts: Date.now(), ring: String(n) });
+  // C71: رنينٌ متكرّر كتطبيقات المكالمات — إشعارٌ كلّ ٨ ثوانٍ (بالوسم نفسه مع renotify ⇒ صوتٌ واهتزازٌ من جديد) ما دامت المكالمة ترنّ، حتى ~٢٤ ث
+  const job = (async () => {
+    let sent = await pushTo(token, [to], data(0));
+    for (let n = 1; n <= RING_REPEATS; n++) {
+      await new Promise((r) => setTimeout(r, RING_GAP_MS));
+      const c = await rtdbGet(token, "calls/" + callId).catch(() => null);
+      if (!c || c.state !== "ringing" || c.acc) break;
+      sent += await pushTo(token, [to], data(n));
+    }
+    return sent;
+  })();
+  if (ctx && ctx.waitUntil) { ctx.waitUntil(job.catch(() => {})); return { queued: true }; }
   return { sent: await job };
 }
 async function opCallMissed(uid, payload, env, claims, ctx) {
@@ -3716,7 +3738,7 @@ export default {
       if (op === "sched.list") { const r = await opSchedList(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "sched.delete") { const r = await opSchedDelete(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "call.missed") { const r = await opCallMissed(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
-      if (op === "push.test") { const r = await opPushTest(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "push.test") { const r = await opPushTest(uid, body.payload, env, ctx); return json({ ok: true, ...r }); }
       if (op === "push.register") { const r = await opPushRegister(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "push.unregister") { const r = await opPushUnregister(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.edit") { const r = await opChatEdit(uid, body.payload, env); return json({ ok: true, ...r }); }
