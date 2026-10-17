@@ -3421,4 +3421,365 @@ async function purgeFamily(token, gid, uid, spend) {
   if (live.length) {
     // نقل الملكيّة: محرّر قبل مشاهد، والأقدم انضماماً أوّلاً
     const rank = (m) => ROLE_RANK[fstr(m, "role")] || 0;
-    const ts = (m) => { const v = m.fields && m.fields.joinedTs && m.fields.joinedTs.timestampValue; return v ? Date.parse(v) : 0;
+    const ts = (m) => { const v = m.fields && m.fields.joinedTs && m.fields.joinedTs.timestampValue; return v ? Date.parse(v) : 0; };
+    live.sort((a, b) => rank(b) - rank(a) || ts(a) - ts(b));
+    const heir = live[0].name.split("/").pop();
+    if (!spend()) return false;
+    const g = await fsGet(token, "groups/" + gid);
+    if (!spend()) return false;
+    await fsCommit(token, [
+      { update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + heir, fields: { role: { stringValue: "owner" } } }, updateMask: { fieldPaths: ["role"] } },
+      indexWrite(heir, gid, fstr(g, "name"), "owner", new Date().toISOString()),
+      { delete: DOC_ROOT + "/groups/" + gid + "/members/" + uid },
+    ]);
+    if (spend(3)) { try { await famChatSync(token, gid); } catch (e) {} }
+    return true;
+  }
+  // وحده فيها: حذفٌ كامل للشجرة
+  for (const sub of GROUP_SUBS) if (!(await purgeColl(token, "groups/" + gid + "/" + sub, spend))) return false;
+  if (!spend(2)) return false;
+  await fsCommit(token, [{ delete: DOC_ROOT + "/groups/" + gid }, { delete: DOC_ROOT + "/chats/fam_" + gid }]).catch(() => {});
+  try { await rtdbPatch(token, { ["chatm/fam_" + gid]: null }); } catch (e) {}
+  return true;
+}
+async function purgeChat(token, cid, spend) {
+  if (!segOk(cid)) return true;
+  if (!(await purgeColl(token, "chats/" + cid + "/days", spend))) return false;
+  if (!spend()) return false;
+  const media = await fsList(token, "chats/" + cid + "/media").catch(() => []);
+  for (const m of media) {
+    if (!(await purgeColl(token, "chats/" + cid + "/media/" + m.name.split("/").pop() + "/c", spend))) return false;
+    if (!spend()) return false;
+    await fsCommit(token, [{ delete: m.name }]).catch(() => {});
+  }
+  if (!spend()) return false;
+  await fsCommit(token, [{ delete: DOC_ROOT + "/chats/" + cid }]).catch(() => {});
+  return true;
+}
+
+/* ---------- 33) لوحة الاستهلاك (للمدير) ----------
+   عدّاداتٌ يوميّة في stats/{YYYYMMDD}: الطلبات لكلّ عمليّة (ops.*) · الأخطاء (err.*) · الإشعارات المرسلة · بيانات TURN المُعطاة لكلّ مزوّد.
+   تُجمَع في الذاكرة وتُرسَل دفعةً (كلّ ٤٠ حدثاً أو ٥ دقائق) بزياداتٍ ذرّيّة — كتابةٌ واحدة بدل كتابةٍ لكلّ طلب.
+   admin.stats: للمدير وحده (السرّ ADMIN_EMAIL = بريد حسابه في Google، مؤكَّد). */
+const STATS = { day: null, n: 0, at: Date.now(), m: {} };
+const HEAVY_OPS = new Set(["boot", "people.list", "profile.set", "account.delete", "gcall.start", "gcall.add", "sched.set", "bulk.import", "account.adopt", "group.members"]);
+function stat(key, k) {
+  const d = dayKey(Date.now());
+  if (STATS.day !== d) { STATS.day = d; STATS.m = {}; STATS.n = 0; STATS.at = Date.now(); }
+  STATS.m[key] = (STATS.m[key] || 0) + (k || 1); STATS.n++;
+}
+async function flushStats(env, force) {
+  if (!STATS.n || !env.SA_JSON || (!force && STATS.n < 40 && Date.now() - STATS.at < 300000)) return;
+  const m = STATS.m, d = STATS.day; STATS.m = {}; STATS.n = 0; STATS.at = Date.now();
+  try {
+    const token = await getAccessToken(JSON.parse(env.SA_JSON));
+    const tr = Object.keys(m).map(k => { const [a, b] = k.split(":"); return { fieldPath: b ? fp(a, b) : fp(a), increment: { integerValue: String(m[k]) } }; });
+    await fsCommit(token, [{ update: { name: DOC_ROOT + "/stats/" + d, fields: {} }, updateMask: { fieldPaths: [] }, updateTransforms: tr }]);
+  } catch (e) { console.log("stats:", e && e.message); }
+}
+function isAdmin(env, claims) {
+  const want = String(env.ADMIN_EMAIL || "").trim().toLowerCase();
+  return !!(want && claims && claims.email && claims.email_verified && String(claims.email).toLowerCase() === want);
+}
+async function opAdminStats(uid, payload, env, claims) {
+  if (!isAdmin(env, claims)) return { admin: false };
+  await flushStats(env, true);
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const days = (await fsList(token, "stats").catch(() => [])).map(d => ({ day: d.name.split("/").pop(), v: fsToJs({ mapValue: { fields: d.fields || {} } }) || {} }))
+    .sort((a, b) => b.day.localeCompare(a.day)).slice(0, 14);
+  const cnt = async (c) => {   // عدّ مجموعةٍ في الجذر (قراءةٌ واحدة لكلّ ١٠٠٠ وثيقة)
+    try {
+      const res = await fetch(FS_BASE + ":runAggregationQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+        body: JSON.stringify({ structuredAggregationQuery: { structuredQuery: { from: [{ collectionId: c }] }, aggregations: [{ alias: "n", count: {} }] } }) });
+      const r = ((await res.json()) || []).find(x => x.result);
+      const v = r && r.result.aggregateFields && r.result.aggregateFields.n;
+      return v ? Number(v.integerValue || 0) : 0;
+    } catch (e) { return null; }
+  };
+  const [accounts, chats, groups, purge, openReports] = await Promise.all([cnt("accounts"), cnt("chats"), cnt("groups"), cnt("purge"),
+    fsQueryEq(token, "reports", { status: "open" }, 100).then(r => r.length).catch(() => null)]);
+  return { admin: true, days, totals: { accounts, chats, groups, purgePending: purge, openReports }, ver: VER };
+}
+
+/* ---------- 34) البلاغات (سياسة Google Play للمحتوى من المستخدمين) ----------
+   report.create {cid?, target?, reason, note}: المبلِّغ عضوٌ في المحادثة ⇒ يُرفق آخر ٢٠ رسالة (نصوصها مقتطعة) ليراجعها المدير.
+   reports/{id} = { by, byName, target, cid, type, reason, note, sample(JSON), ts, status: open|closed } — للخادم وحده.
+   admin.reports / admin.reportClose: للمدير (ADMIN_EMAIL). */
+const REPORT_REASONS = ["spam", "harassment", "hate", "violence", "sexual", "scam", "impersonation", "other"];
+async function recentMsgs(token, cid, n) {
+  const res = await fetch(FS_BASE + "/chats/" + cid + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "days" }], orderBy: [{ field: { fieldPath: "__name__" }, direction: "DESCENDING" }], limit: 2 } }) });
+  const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+  let all = [];
+  for (const d of rows) { const m = fsToJs((d.fields || {}).msgs || { nullValue: null }) || {}; for (const k in m) all.push(m[k]); }
+  return all.filter(x => x && !x.gone && x.type !== "system").sort((a, b) => (a.ts || 0) - (b.ts || 0)).slice(-n)
+    .map(x => ({ by: x.by || null, type: x.type || "text", text: typeof x.text === "string" ? x.text.slice(0, 300) : "", ts: x.ts || 0 }));
+}
+async function opReportCreate(uid, payload, env, claims) {
+  if (!codeRate(uid, "report", 10)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  payload = payload || {};
+  const reason = REPORT_REASONS.indexOf(payload.reason) >= 0 ? payload.reason : "other";
+  const note = String(payload.note || "").replace(/\s+/g, " ").trim().slice(0, 500);
+  let cid = payload.cid || null, target = payload.target || null, type = null, sample = [];
+  if (cid) {
+    if (!segOk(cid)) throw new Error("bad cid");
+    const c = await requireChatMember(token, cid, uid);
+    type = fstr(c, "type");
+    if (!target && type === "dm") target = fsArr(c, "members").find(x => x !== uid) || null;
+    try { sample = await recentMsgs(token, cid, 20); } catch (e) {}
+    // v36: السرّيّة لا يقرؤها الخادم — المُبلِّغ يرفق آخر رسائلها من جهازه (مفكوكةً) ليراجعها فريقنا
+    if (e2eOf(c) && Array.isArray(payload.e2eSample)) sample = payload.e2eSample.slice(-20).map(x => ({ by: segOk(String((x && x.by) || "")) ? x.by : null,
+      type: "text", text: String((x && x.text) || "").slice(0, 300), ts: Number((x && x.ts) || 0) || 0, e2e: true }));
+  }
+  if (target && !segOk(String(target))) throw new Error("bad target");
+  if (!cid && !target) throw new Error("nothing to report");
+  const id = "r" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), now = Date.now();
+  const me = memberIdFields(claims);
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/reports/" + id, fields: {
+    by: { stringValue: uid }, byName: me.name, target: target ? { stringValue: target } : { nullValue: null }, cid: cid ? { stringValue: cid } : { nullValue: null },
+    type: type ? { stringValue: type } : { nullValue: null }, reason: { stringValue: reason }, note: { stringValue: note },
+    sample: { stringValue: JSON.stringify(sample) }, ts: { integerValue: String(now) }, status: { stringValue: "open" } } } }]);
+  stat("report");
+  return { id };
+}
+async function opAdminReports(uid, payload, env, claims) {
+  if (!isAdmin(env, claims)) return { admin: false };
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const docs = await fsQueryEq(token, "reports", { status: "open" }, 30).catch(() => []);
+  const items = docs.map(d => { const v = fsToJs({ mapValue: { fields: d.fields || {} } }) || {}; let sample = []; try { sample = JSON.parse(v.sample || "[]"); } catch (e) {}
+    return { id: d.name.split("/").pop(), by: v.by, byName: v.byName, target: v.target, cid: v.cid, type: v.type, reason: v.reason, note: v.note, ts: v.ts, sample }; })
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  return { admin: true, items };
+}
+async function opAdminReportClose(uid, payload, env, claims) {
+  if (!isAdmin(env, claims)) return { admin: false };
+  const id = payload && payload.id;
+  if (!segOk(String(id || ""))) throw new Error("id required");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/reports/" + id, fields: { status: { stringValue: "closed" }, closedTs: { integerValue: String(Date.now()) } } },
+    updateMask: { fieldPaths: ["status", "closedTs"] }, currentDocument: { exists: true } }]);
+  return { admin: true, closed: id };
+}
+
+/* ---------- حدود الطلبات والمعرّفات ---------- */
+const RL = new Map(), RL_WINDOW = 5 * 60 * 1000, RL_MAX = 400;   // ٤٠٠ طلب / ٥ دقائق لكلّ مستخدم
+function rateOk(uid) {
+  const now = Date.now(); let e = RL.get(uid);
+  if (!e || now - e.t > RL_WINDOW) { e = { t: now, n: 0 }; RL.set(uid, e); }
+  e.n++;
+  if (RL.size > 5000) { for (const [k, v] of RL) if (now - v.t > RL_WINDOW) RL.delete(k); }
+  return e.n <= RL_MAX;
+}
+// كلّ معرّفٍ يدخل مسار Firestore: بلا «/» ولا «..» ولا طولٍ مفرط
+const ID_KEYS = ["groupId", "personId", "eventId", "relationId", "reviewId", "token", "uid", "from", "to", "cid"];
+function badIds(p) {
+  if (!p || typeof p !== "object") return null;
+  for (const k of ID_KEYS) if (k in p && p[k] != null && !segOk(String(p[k]))) return k;
+  if (Array.isArray(p.groupIds) && p.groupIds.some(x => !segOk(String(x)))) return "groupIds";
+  return null;
+}
+
+export default {
+  // Cron (wrangler.toml: [triggers] crons = ["*/5 * * * *"]): تذكيرات المواعيد كلّ تشغيل؛ والتنظيف بالتناوب
+  // (حدّ ٥٠ طلباً فرعيّاً لكلّ تشغيل: لا تنظيف في تشغيلٍ أرسل تذكيراً)
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil((async () => {
+      await flushStats(env, true);
+      let r = { reminders: 0 };
+      try { r = await schedReminders(env); } catch (e) { console.log("reminders:", e && e.message); }
+      if (r.reminders) return;
+      const slot = Math.floor(new Date(event.scheduledTime || Date.now()).getUTCMinutes() / 5) % 3;
+      if (slot === 0) await cleanupDisappearing(env).catch(e => console.log("cleanup:", e && e.message));
+      else if (slot === 1) { await cleanupCalls(env).catch(e => console.log("calls cleanup:", e && e.message)); await mediaGc(env, 4).catch(e => console.log("media gc:", e && e.message)); }
+      else await purgeWork(env, 40).catch(e => console.log("purge:", e && e.message));   // حذف الحسابات: ما تبقّى من عائلاتٍ ومحادثات
+    })());
+  },
+  async fetch(request, env, ctx) {
+    try { const u0 = new URL(request.url); if (isAuthProxyPath(u0.pathname)) return await authProxy(request, u0); } catch (e) { return new Response("auth proxy error", { status: 502 }); }
+    if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
+    try { if (new URL(request.url).pathname === "/wa/webhook") return await waWebhook(request, env, ctx); } catch (e) { return new Response("webhook error", { status: 500 }); }
+    let statOp = null;
+    try {
+      const auth = request.headers.get("Authorization") || "";
+      const m = auth.match(/^Bearer (.+)$/);
+      if (!m) return json({ ok: false, error: "no bearer token" }, 401);
+      let claims = await verifyIdToken(m[1]);
+      const uid = claims.sub;
+
+      // حدٌّ لكلّ مستخدم (تقريبيّ، لكلّ نسخةٍ من الـWorker): يحمي الحصّة المجانيّة من عميلٍ معطوب أو مسيء
+      if (!rateOk(uid)) return json({ ok: false, error: "rate_limited" }, 429);
+      let body = {};
+      try { body = await request.json(); } catch (e) {}
+      const op = body.op || "whoami";
+      statOp = String(op).replace(/[^a-z0-9._-]/gi, "").slice(0, 40) || "?";
+      stat("ops:" + statOp); stat("req");
+      // العمليّات الثقيلة قريبة من حدّ ٥٠ طلباً فرعيّاً — لا نضيف إليها الإرسال
+      if (ctx && ctx.waitUntil && !HEAVY_OPS.has(statOp)) ctx.waitUntil(flushStats(env));
+      const bad = badIds(body.payload);
+      if (bad) return json({ ok: false, error: "bad id: " + bad }, 400);
+
+      // اسم «سوا» المحفوظ يسبق اسم Google في كلّ العمليّات (ذاكرة مؤقّتة — لا قراءة في كلّ طلب)
+      if (op !== "whoami" && op !== "rtc.ice" && op !== "chat.mark" && env.SA_JSON) {
+        try { const pr = await profileOf(await getAccessToken(JSON.parse(env.SA_JSON)), uid); claims = Object.assign({}, claims, { sawaName: pr.name || null, sawaPhone: pr.phone || null }); } catch (e) {}
+      }
+      if (op === "profile.get") { const r = await opProfileGet(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "profile.set") { const r = await opProfileSet(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "phone.start") { const r = await opPhoneStart(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "phone.status") { const r = await opPhoneStatus(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "find.phone") { const r = await opFindBy(uid, body.payload, env, "phone"); return json({ ok: true, ...r }); }
+      // C53: طلبٌ واحد عند الإقلاع بدل ثلاثة (people.list + chat.prefs + code.requests) — يوفّر رحلتين إلى الخادم على الشبكات البطيئة
+      if (op === "boot") {
+        const [people, prefs, requests] = await Promise.all([opPeopleList(uid, {}, env, claims), opChatPrefs(uid, {}, env), opCodeRequests(uid, {}, env)]);
+        return json({ ok: true, people, prefs, requests });
+      }
+      if (op === "link.peek") { const r = await opLinkPeek(uid, body.payload, env); return json(r); }
+      if (op === "find.email") { const r = await opFindBy(uid, body.payload, env, "email"); return json({ ok: true, ...r }); }
+      if (op === "sfu.cfg") { const r = await opSfuCfg(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "sfu.new") { const r = await opSfuNew(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "sfu.push") { const r = await opSfuPush(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "sfu.pull") { const r = await opSfuPull(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "sfu.reneg") { const r = await opSfuReneg(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "sfu.close") { const r = await opSfuClose(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "vouch.request") { const r = await opVouchRequest(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "vouch.respond") { const r = await opVouchRespond(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "whoami")
+        return json({ ok: true, uid, provider: claims.firebase && claims.firebase.sign_in_provider, admin: isAdmin(env, claims) });   // v37: «فحص الاتّصال» للمدير وحده
+      if (op === "group.create") {
+        const r = await opGroupCreate(uid, body.payload, env, claims);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "invite.create") {
+        const r = await opInviteCreate(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "invite.accept") {
+        const r = await opInviteAccept(uid, body.payload, env, claims);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "person.set") {
+        const r = await opPersonSet(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "relation.add") {
+        const r = await opRelationAdd(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "review.resolve") {
+        const r = await opReviewResolve(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "bulk.import") {
+        const r = await opBulkImport(uid, body.payload, env, claims);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "person.delete") {
+        const r = await opPersonDelete(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "review.list") { const r = await opReviewList(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "photo.set") { const r = await opPhotoSet(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "event.set") { const r = await opEventSet(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "event.delete") { const r = await opEventDelete(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "schedules.sync") { const r = await opSchedulesSync(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "group.delete") {
+        const r = await opGroupDelete(uid, body.payload, env);
+        return json({ ok: true, ...r });
+      }
+      if (op === "group.leave") {
+        const r = await opGroupLeave(uid, body.payload, env);
+        return json({ ok: true, ...r });
+      }
+      if (op === "contacts.sync") {
+        const r = await opContactsSync(uid, body.payload, env);
+        return json({ ok: true, ...r });
+      }
+      if (op === "my.groups") {
+        const r = await opMyGroups(uid, body.payload, env);
+        return json({ ok: true, ...r });
+      }
+      if (op === "account.index") {
+        const r = await opAccountIndex(uid, body.payload, env);
+        return json({ ok: true, ...r });
+      }
+      if (op === "account.adopt") {
+        const r = await opAccountAdopt(uid, body.payload, env, claims);
+        return json({ ok: true, ...r });
+      }
+      if (op === "relation.update") {
+        const r = await opRelationUpdate(uid, body.payload, env);
+        return json({ ok: true, ...r });
+      }
+      if (op === "relation.remove") {
+        const r = await opRelationRemove(uid, body.payload, env);
+        return json({ ok: true, uid, op, ...r });
+      }
+      if (op === "group.new") { const r = await opGroupCreate2(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "group.update") { const r = await opGroupUpdate(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "group.members") { const r = await opGroupMembers(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "group.admin") { const r = await opGroupAdmin(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "group.exit") { const r = await opGroupLeave2(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "group.invite") { const r = await opGroupInvite(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "group.join") { const r = await opGroupJoin(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "media.viewed") { const r = await opMediaViewed(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.pollKeys") { const r = await opChatPollKeys(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.vote") { const r = await opChatVote(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.pollEdit") { const r = await opChatPollEdit(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.billPaid") { const r = await opChatBillPaid(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.fund") { const r = await opChatFund(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.task") { const r = await opChatTask(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.open") { const r = await opChatOpen(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "chat.send") { const r = await opChatSend(uid, body.payload, env, ctx); return json({ ok: true, ...r }); }
+      if (op === "e2e.dm") { const r = await opE2eDm(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "e2e.group") { if (!body.payload || !body.payload.e2e) throw new Error("bad e2e key"); const r = await opGroupCreate2(uid, body.payload, env, claims); return json({ ok: true, e2e: true, ...r }); }
+      if (op === "e2e.join") { const r = await opE2eJoin(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "rtc.ice") { const r = await opRtcIce(uid, body.payload, env, claims, request); return json({ ok: true, ...r }); }
+      if (op === "call.ring") { const r = await opCallRing(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "gcall.start") { const r = await opGcallStart(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "gcall.add") { const r = await opGcallAdd(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "sched.set") { const r = await opSchedSet(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "sched.list") { const r = await opSchedList(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "sched.delete") { const r = await opSchedDelete(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "call.missed") { const r = await opCallMissed(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "push.test") { const r = await opPushTest(uid, body.payload, env, ctx); return json({ ok: true, ...r }); }
+      if (op === "push.register") { const r = await opPushRegister(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "push.unregister") { const r = await opPushUnregister(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.edit") { const r = await opChatEdit(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.delete") { const r = await opChatDelete(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.react") { const r = await opChatReact(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.pin") { const r = await opChatPin(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.mark") { const r = await opChatMark(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.settings") { const r = await opChatSettings(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.prefs") { const r = await opChatPrefs(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "people.list") { const r = await opPeopleList(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "people.invite") { const r = await opPeopleInvite(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "media.begin") { const r = await opMediaBegin(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "people.peek") { const r = await opPeoplePeek(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "group.peek") { const r = await opGroupPeek(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "people.accept") { const r = await opPeopleAccept(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "code.mine") { const r = await opCodeMine(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "code.find") { const r = await opCodeFind(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "code.request") { const r = await opCodeRequest(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "code.requests") { const r = await opCodeRequests(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "code.respond") { const r = await opCodeRespond(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "code.cancel") { const r = await opCodeCancel(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "code.reset") { const r = await opCodeReset(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "code.privacy") { const r = await opCodePrivacy(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "account.delete") { const r = await opAccountDelete(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "report.create") { const r = await opReportCreate(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "admin.reports") { const r = await opAdminReports(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "admin.reportClose") { const r = await opAdminReportClose(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "admin.stats") { const r = await opAdminStats(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "people.remove") { const r = await opPeopleRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "member.hello") { const r = await opMemberHello(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "member.setRole") { const r = await opMemberSetRole(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "member.unban") { const r = await opMemberUnban(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "member.remove") { const r = await opMemberRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "group.settings") { const r = await opGroupSettings(uid, body.payload, env); return json({ ok: true, ...r }); }
+      return json({ ok: false, error: "unknown op: " + op }, 400);
+    } catch (e) {
+      if (statOp) { stat("err:" + statOp); if (ctx && ctx.waitUntil) ctx.waitUntil(flushStats(env)); }
+      return json({ ok: false, error: String((e && e.message) || e) }, 401);
+    }
+  },
+};
