@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v54-sched";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v55-ring";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2127,7 +2127,10 @@ async function opPushTest(uid, payload, env, ctx) {
     const ms = Math.min(20000, Math.max(5000, Number(payload.delay) || 15000));
     ctx.waitUntil((async () => {
       await new Promise((r) => setTimeout(r, ms));
-      for (const d of devs.slice(0, DEV_MAX)) await fcmSend(token, fstr(d, "token"), strData({ t: "test", title: "سوا — إشعار في الخلفيّة ✓", body: "وصل والتطبيق مغلق — الإشعارات والمكالمات ستصلك.", ts: Date.now() })).catch(() => {});
+      const callTest = payload.kind === "call";   // v55: اختبار «مكالمة» حقيقيّ الشكل (t=call) — يرنّ كما ترنّ المكالمة
+      for (const d of devs.slice(0, DEV_MAX)) await fcmSend(token, fstr(d, "token"), strData(callTest
+        ? { t: "call", call: "test_" + Date.now().toString(36), from: uid, type: "audio", title: "سوا — اختبار مكالمة", body: "📞 مكالمة تجريبيّة", ts: Date.now(), ring: "0" }
+        : { t: "test", title: "سوا — إشعار في الخلفيّة ✓", body: "وصل والتطبيق مغلق — الإشعارات والمكالمات ستصلك.", ts: Date.now() })).catch(() => {});
       stat("push:test-bg");
     })());
     return { devices: devs.length, queued: true, delay: ms };
