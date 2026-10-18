@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v55-ring";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v56-push";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2165,7 +2165,10 @@ async function fcmSend(token, devToken, data) {
       webpush: { headers: { Urgency: data.t === "call" || data.t === "test" ? "high" : "normal", TTL: data.t === "call" ? "45" : data.t === "test" ? "120" : "86400" } } } }) });
   if (res.ok) return "ok";
   const txt = await res.text();
-  return /UNREGISTERED|registration-token-not-registered|INVALID_ARGUMENT|NOT_FOUND/.test(txt) ? "gone" : "err";
+  // v56: INVALID_ARGUMENT لا يعني رمزاً ميّتاً إلّا إن كان عن الرمز نفسه (كانت أخطاء الحمولة تحذف أجهزة سليمة)
+  if (/UNREGISTERED|registration-token-not-registered|NOT_FOUND/.test(txt) || (/INVALID_ARGUMENT/.test(txt) && /registration token/i.test(txt))) return "gone";
+  console.log("fcm err:", txt.slice(0, 300)); stat("push:err");
+  return "err";
 }
 // C60: أجهزة المستخدم مرتّبةً بالأحدث تسجيلاً (ts) — حتى لا يحجب رمزٌ ميّت قديم رمزاً حيّاً جديداً
 const DEV_MAX = 5, DEV_TTL = 60 * 86400000;
@@ -2188,7 +2191,10 @@ async function pushTo(token, uids, data) {
   }
   return sent;
 }
-function strData(o) { const out = {}; for (const k in o) if (o[k] != null) out[k] = String(o[k]).slice(0, 900); return out; }
+// v56: «from» مفتاحٌ محجوز في FCM (ومعه message_type و google.*/gcm.*) — وجوده يجعل FCM يرفض الرسالة كلّها (INVALID_ARGUMENT):
+//      كلّ مكالمةٍ ورسالةٍ وطلبٍ كان يُرفض بصمت (الإشعار التجريبيّ وحده بلا from فيصل)، بل كان الرفض يُعدّ «رمزاً ميّتاً» فيُحذف جهاز المستلم.
+//      المرسِل صار «uf»، والواجهات تقرأ uf || from.
+function strData(o) { const out = {}; for (const k in o) if (o[k] != null) { const kk = k === "from" ? "uf" : k; if (kk === "message_type" || kk === "notification" || /^(google|gcm)/i.test(kk)) continue; out[kk] = String(o[k]).slice(0, 900); } return out; }
 async function notifyChat(token, c, cid, uid, msg) {
   const members = fsArr(c, "members"), muted = fsArr(c, "mutedBy"), type = fstr(c, "type");
   const names = fsToJs((c.fields || {}).names || { nullValue: null }) || {};
