@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v56-push";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v57-heal";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2115,6 +2115,20 @@ async function opPushRegister(uid, payload, env) {
   } catch (e) {}
   return { id };
 }
+// v57: «هل هذا الجهاز ما زال مسجّلاً؟» — يسأله التطبيق عند كلّ فتح (كلّ ٢٠ دقيقة على الأكثر)؛ إن لم يجده الخادم يسجّله فوراً (إصلاحٌ ذاتيّ)
+async function opPushCheck(uid, payload, env) {
+  const t = String((payload && payload.token) || "");
+  if (t.length < 20 || t.length > 4096) throw new Error("bad token");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const doc = await fsGet(token, "accounts/" + uid + "/devices/" + (await tokenId(t)));
+  if (doc && fstr(doc, "token") === t) {
+    if (Date.now() - devTs(doc) > 86400000) await fsCommit(token, [{ update: { name: doc.name, fields: { ts: { integerValue: String(Date.now()) } } }, updateMask: { fieldPaths: ["ts"] } }]).catch(() => {});
+    return { had: true };
+  }
+  await opPushRegister(uid, payload, env);
+  stat("push:heal");
+  return { had: false, healed: true };
+}
 // C56: إشعارٌ تجريبيّ إلى أجهزتي أنا مع نتيجة كلّ جهاز (يكشف أين تنقطع السلسلة: لا جهاز مسجّل · رمزٌ ميّت · خطأ FCM)
 async function opPushTest(uid, payload, env, ctx) {
   if (!codeRate(uid, "ptest", 12)) throw new Error("rate_limited");
@@ -3787,6 +3801,7 @@ export default {
       if (op === "sched.delete") { const r = await opSchedDelete(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "call.missed") { const r = await opCallMissed(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "push.test") { const r = await opPushTest(uid, body.payload, env, ctx); return json({ ok: true, ...r }); }
+      if (op === "push.check") { const r = await opPushCheck(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "push.register") { const r = await opPushRegister(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "push.unregister") { const r = await opPushUnregister(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.edit") { const r = await opChatEdit(uid, body.payload, env); return json({ ok: true, ...r }); }
