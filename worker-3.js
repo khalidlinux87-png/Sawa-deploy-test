@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v52-native";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v53-kin";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -531,7 +531,8 @@ async function opRelationAdd(uid, payload, env) {
                   proposedBy: { stringValue: uid }, ts: { timestampValue: now },
                   status: { stringValue: "pending" },
                   detail: toFsValue({ type: type, from: from, to: to, conflict: conflict,
-                                      relationId: payload.relationId ? String(payload.relationId) : null }) } } },
+                                      relationId: payload.relationId ? String(payload.relationId) : null,
+                                      half: (type === "sibling" && (payload.half === "father" || payload.half === "mother")) ? payload.half : null }) } } },
     ]);
     return { applied: false, queued: true, reviewId: rid, reason: conflict };
   }
@@ -542,7 +543,9 @@ async function opRelationAdd(uid, payload, env) {
     { update: { name: DOC_ROOT + "/groups/" + groupId + "/relations/" + relId,
       fields: Object.assign({ type: { stringValue: type }, from: { stringValue: from }, to: { stringValue: to },
                 createdTs: { timestampValue: now }, deleted: { booleanValue: false } },
-                payload.inferred ? { inferred: { stringValue: String(payload.inferred).slice(0, 60) } } : {}) } },
+                payload.inferred ? { inferred: { stringValue: String(payload.inferred).slice(0, 60) } } : {},
+                // v53: الأخوّة غير الشقيقة — «من الأب» أو «من الأم» (C75)
+                (type === "sibling" && (payload.half === "father" || payload.half === "mother")) ? { half: { stringValue: payload.half } } : {}) } },
   ]);
   return { applied: true, relationId: relId };
 }
@@ -591,7 +594,8 @@ async function opReviewResolve(uid, payload, env) {
         { update: { name: DOC_ROOT + "/groups/" + groupId + "/relations/" + relId,
           fields: { type: { stringValue: type }, from: { stringValue: from }, to: { stringValue: to },
                     createdTs: { timestampValue: now }, deleted: { booleanValue: false },
-                    fromReview: { stringValue: reviewId } } } },
+                    fromReview: { stringValue: reviewId },
+                    ...((d.half && d.half.stringValue && type === "sibling") ? { half: { stringValue: d.half.stringValue } } : {}) } } },
         closeReview("applied"),
       ]);
       return { resolved: true, resolution: "applied", relationId: relId };
@@ -672,7 +676,8 @@ async function opBulkImport(uid, payload, env, claims) {
     relWrites.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/relations/" + rid,
       fields: Object.assign({ type: { stringValue: r.type }, from: { stringValue: from }, to: { stringValue: to },
                 createdTs: { timestampValue: now }, deleted: { booleanValue: false } },
-                r.inferred ? { inferred: { stringValue: String(r.inferred).slice(0, 60) } } : {}) } });
+                r.inferred ? { inferred: { stringValue: String(r.inferred).slice(0, 60) } } : {},
+                (r.type === "sibling" && (r.half === "father" || r.half === "mother")) ? { half: { stringValue: r.half } } : {}) } });
   }
 
   // عائلةٌ جديدة: الوثيقة + المالك. موجودةٌ: لا نمسّ المالك ولا الأعضاء.
