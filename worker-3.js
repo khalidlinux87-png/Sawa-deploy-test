@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v57-heal";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v58-codes";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -3238,7 +3238,7 @@ async function opCodeRequest(uid, payload, env, claims, ctx) {
   // طلبه إليّ قائم ⇒ قبولٌ متبادل فوراً
   if (await fsGet(token, "accounts/" + uid + "/creq/" + t.uid)) {
     const r = await acceptReq(token, uid, t.uid, claims, ctx);
-    return Object.assign({ accepted: true }, r);
+    return Object.assign({ accepted: true, uid: t.uid }, r);
   }
   const outs = await fsList(token, "accounts/" + uid + "/creqout");
   if (outs.length >= 20 && !outs.some(d => d.name.split("/").pop() === t.uid)) throw new Error("too_many_pending");
@@ -3258,7 +3258,24 @@ async function opCodeRequest(uid, payload, env, claims, ctx) {
     if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
     await sigTo(token, [t.uid], "req");
   }
-  return { sent: true, name: t.name };
+  return { sent: true, name: t.name, uid: t.uid };   // v58: ليحفظ المرسل اسمه عنده (تسمية) قبل القبول
+}
+// v58: رموز سوا (١٠ أرقام) لجهات اتّصالي — بدل «عضو · A1B2». لجهات اتّصالي فقط (acl/{uid})، ولمن لم يُخفِ رمزه.
+//      من لا رمز له بعد يُنشأ له (حتّى ٥ في الطلب).
+async function opCodeOf(uid, payload, env) {
+  if (!codeRate(uid, "codeof", 40)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const want = [...new Set((Array.isArray(payload && payload.uids) ? payload.uids : []).map(String).filter(segOk))].slice(0, 25);
+  const acl = (await rtdbGet(token, "acl/" + uid).catch(() => null)) || {};
+  const codes = {}; let made = 0;
+  await Promise.all(want.filter(u => acl[u] === true && u !== uid).map(async (u) => {
+    const acc = await fsGet(token, "accounts/" + u).catch(() => null);
+    if (!acc || !accFindable(acc)) { codes[u] = null; return; }
+    let c = fstr(acc, "code");
+    if (!c && made < 5) { made++; c = (await ensureCode(token, u, null, false).catch(() => ({}))).code || ""; }
+    codes[u] = c || null;
+  }));
+  return { codes };
 }
 function reqOut(d, dir) {
   const f = d.fields || {}, o = { uid: d.name.split("/").pop(), name: fstr(d, "name") || null, ts: fsInt(d, "ts"), code: fstr(d, "code") || null };
@@ -3817,6 +3834,7 @@ export default {
       if (op === "people.peek") { const r = await opPeoplePeek(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "group.peek") { const r = await opGroupPeek(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "people.accept") { const r = await opPeopleAccept(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "code.of") { const r = await opCodeOf(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "code.mine") { const r = await opCodeMine(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "code.find") { const r = await opCodeFind(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "code.request") { const r = await opCodeRequest(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
