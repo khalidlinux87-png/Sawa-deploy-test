@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v53-kin";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v54-sched";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2121,7 +2121,7 @@ async function opPushTest(uid, payload, env, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const devs = await devsOf(token, uid);
   const now = Date.now(), results = [];
-  if (payload && payload.dry) return { devices: devs.length, results: [] };
+  if (payload && payload.dry) return { devices: devs.length, results: [], tails: devs.slice(0, DEV_MAX).map(d => ({ tail: fstr(d, "token").slice(-8), ua: fstr(d, "ua").slice(0, 60), ts: fsInt(d, "ts") })) };   // v54
   // C71: «بعد ١٥ ثانية» — ليغلق المستخدم التطبيق ويرى هل يصله الإشعار في الخلفيّة (حالة الشكوى الحقيقيّة)
   if (payload && payload.delay && ctx && ctx.waitUntil) {
     const ms = Math.min(20000, Math.max(5000, Number(payload.delay) || 15000));
@@ -2141,7 +2141,7 @@ async function opPushTest(uid, payload, env, ctx) {
         webpush: { headers: { Urgency: "high", TTL: "120" } } } }) });
     let err = "";
     if (!res.ok) { const txt = await res.text(); err = (txt.match(/"message":\s*"([^"]{1,160})"/) || [])[1] || ("HTTP " + res.status); if (/UNREGISTERED|registration-token-not-registered|NOT_FOUND/.test(txt)) { await fsCommit(token, [{ delete: d.name }]).catch(() => {}); err = "gone"; } }
-    results.push({ ua: fstr(d, "ua").slice(0, 60), ts: fsInt(d, "ts"), ok: res.ok, err });
+    results.push({ ua: fstr(d, "ua").slice(0, 60), ts: fsInt(d, "ts"), ok: res.ok, err, tail: dev.slice(-8) });   // v54: ليعرف الهاتف «هذا أنا»
   }
   stat("push:test");
   return { devices: devs.length, results };
@@ -2489,8 +2489,8 @@ async function opSchedSet(uid, payload, env, claims, ctx) {
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/scheds/" + id, fields } }]);
   if (room) {   // بطاقة الغرفة جاهزة والمنظّم مضيفها — من يصل قبله يدخل، ولا يأخذ الاستضافة
     const meta = await rtdbGet(token, "rooms/" + room + "/meta").catch(() => null);
-    if (!meta) await rtdbPatch(token, { ["rooms/" + room + "/meta"]: { host: uid, title: item.title || "غرفة سوا", ts: now, sched: at, gc: at + 6 * 3600000, locked: false, lobby: !!item.approval, owner: uid } });
-    else if (meta.host === uid) await rtdbPatch(token, { ["rooms/" + room + "/meta/sched"]: at, ["rooms/" + room + "/meta/gc"]: at + 6 * 3600000, ["rooms/" + room + "/meta/title"]: item.title || meta.title || "غرفة سوا" });
+    if (!meta) await rtdbPatch(token, { ["rooms/" + room + "/meta"]: { host: uid, title: item.title || "غرفة سوا", ts: now, sched: at, sid: id, gc: at + 6 * 3600000, locked: false, lobby: !!item.approval, owner: uid } });
+    else if (meta.host === uid) await rtdbPatch(token, { ["rooms/" + room + "/meta/sid"]: id, ["rooms/" + room + "/meta/sched"]: at, ["rooms/" + room + "/meta/gc"]: at + 6 * 3600000, ["rooms/" + room + "/meta/title"]: item.title || meta.title || "غرفة سوا" });
   }
   if (!old) {   // إشعار الدعوة للمدعوّين
     let others = users.filter(u => u !== uid).slice(0, 8);
@@ -2502,6 +2502,34 @@ async function opSchedSet(uid, payload, env, claims, ctx) {
     }
   }
   return { item: Object.assign({ id }, item) };
+}
+// v54 (C84): من وصله رابط غرفةٍ مجدولة ⇒ تُضاف إلى «مواعيدي» عنده ويصله التذكير — الرابط نفسه هو الدعوة
+async function opSchedJoin(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const room = String((payload && payload.room) || "").toUpperCase();
+  if (!/^[A-HJ-NP-Z2-9]{8}$/.test(room)) throw new Error("bad id: room");
+  const meta = await rtdbGet(token, "rooms/" + room + "/meta").catch(() => null);
+  let doc = null;
+  if (meta && meta.sid && /^[a-z0-9]{6,32}$/.test(String(meta.sid))) doc = await fsGet(token, "scheds/" + meta.sid);
+  if (!doc) {   // غرفٌ جُدولت قبل v54 (بلا sid في بطاقتها)
+    const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "scheds" }], where: { fieldFilter: { field: { fieldPath: "room" }, op: "EQUAL", value: { stringValue: room } } }, limit: 3 } }) });
+    const data = await res.json().catch(() => []);
+    const docs = (Array.isArray(data) ? data : []).filter(r => r.document).map(r => r.document).sort((a, b) => fsInt(b, "at") - fsInt(a, "at"));
+    doc = docs[0] || null;
+  }
+  if (!doc || fstr(doc, "room") !== room) return { joined: false, reason: "not scheduled" };
+  const at = fsInt(doc, "at"), end = fsInt(doc, "end") || at + 1800000;
+  if (end < Date.now() - 3600000) return { joined: false, reason: "past" };
+  const users = fsArr(doc, "users");
+  if (users.indexOf(uid) < 0) {
+    if (users.length >= 300) return { joined: false, reason: "full" };
+    const blk = await blockedSet(token, [fstr(doc, "by")], uid).catch(() => new Set());
+    if (blk.has(fstr(doc, "by"))) return { joined: false, reason: "blocked" };
+    users.push(uid);
+    await fsCommit(token, [{ update: { name: doc.name, fields: { users: toFsValue(users) } }, updateMask: { fieldPaths: ["users"] } }]);
+  }
+  return { joined: true, item: schedOut(Object.assign({}, doc, { fields: Object.assign({}, doc.fields, { users: toFsValue(users) }) })) };
 }
 async function opSchedList(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -2541,13 +2569,15 @@ async function schedReminders(env) {
   const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
   let sent = 0;
   for (const d of rows.slice(0, 1)) {   // واحدٌ لكلّ تشغيل (حدّ الطلبات الفرعيّة) — الباقي في التشغيل التالي
+    // C84: الغرف المنشورة برابط قد يكثر مدعوّوها ⇒ دفعات من ١٢ في كلّ تشغيل (rqOff)
+    const allU = fsArr(d, "users"), off = fsInt(d, "rqOff") || 0, batch = allU.slice(off, off + 12), more = off + 12 < allU.length;
     // أوّلاً: علّمه مُرسَلاً (لا تكرار لو تعثّر الإرسال)
-    await fsCommit(token, [{ update: { name: d.name, fields: { rq: { integerValue: "0" } } }, updateMask: { fieldPaths: ["rq"] } }]);
+    await fsCommit(token, [{ update: { name: d.name, fields: more ? { rqOff: { integerValue: String(off + 12) } } : { rq: { integerValue: "0" }, rqOff: { integerValue: "0" } } }, updateMask: { fieldPaths: more ? ["rqOff"] : ["rq", "rqOff"] } }]);
     const at = fsInt(d, "at");
     if (at < now - 10 * 60000) continue;   // فات موعده
     const mins = Math.max(1, Math.round((at - now) / 60000));
     const title = fstr(d, "title") || fstr(d, "toName") || "", room = fstr(d, "room") || "";
-    sent += await pushTo(token, fsArr(d, "users").slice(0, 8), strData({ t: "sched", sid: d.name.split("/").pop(), cid: fstr(d, "cid") || "", room,
+    sent += await pushTo(token, batch, strData({ t: "sched", sid: d.name.split("/").pop(), cid: fstr(d, "cid") || "", room,
       title: "⏰ تذكير: " + (room ? "غرفة سوا" : fstr(d, "type") === "video" ? "مكالمة فيديو" : "مكالمة صوتيّة") + (title ? " · " + title : ""),
       body: room ? (at > now + 60000 ? "تبدأ بعد " + minsAr(mins) + " — اضغط للدخول" : "حان الموعد — اضغط للدخول")
                  : at > now + 60000 ? "تبدأ بعد " + minsAr(mins) + " — من «المكالمات المجدولة» اضغط «ابدأ الآن»" : "حان الموعد — افتح «المكالمات المجدولة» وانضمّ", ts: now }));
@@ -3743,6 +3773,7 @@ export default {
       if (op === "gcall.start") { const r = await opGcallStart(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "gcall.add") { const r = await opGcallAdd(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "sched.set") { const r = await opSchedSet(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "sched.join") { const r = await opSchedJoin(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "sched.list") { const r = await opSchedList(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "sched.delete") { const r = await opSchedDelete(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "call.missed") { const r = await opCallMissed(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
