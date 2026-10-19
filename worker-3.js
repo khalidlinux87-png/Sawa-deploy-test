@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v58-codes";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v59-stories";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -3260,6 +3260,117 @@ async function opCodeRequest(uid, payload, env, claims, ctx) {
   }
   return { sent: true, name: t.name, uid: t.uid };   // v58: ليحفظ المرسل اسمه عنده (تسمية) قبل القبول
 }
+// ============================================================
+//  v59: القصص (الاستوري) — لجهات اتّصالي، تختفي بعد ٢٤ ساعة
+//  stories/{u} = { name, aud[] (جهات اتّصاله − المُخفى عنهم), hide[], items[] ≤ ٣٠ (نصّ/صورة/فيديو), exp (أقرب انتهاء), ts }
+//  stories/{u}/media/{mid}{by,mime,size,n,ts,done} + c/{i}{d} — يرفعها صاحبها مباشرةً (القواعد)، ويقرؤها من في aud
+//  stories/{u}/seen/{sid~viewer} = { sid, by, ts } — «شاهدها» يقرؤه صاحب القصّة وحده
+// ============================================================
+const STORY_TTL = 24 * 3600000, STORY_MAX = 30, STORY_BG = 8;
+function storyItems(doc) {
+  const v = doc && doc.fields && doc.fields.items;
+  const arr = v && v.arrayValue && v.arrayValue.values ? v.arrayValue.values.map(fsToJs) : [];
+  return arr.filter(x => x && x.id);
+}
+async function storyAud(token, uid, hide) {
+  const acl = (await rtdbGet(token, "acl/" + uid).catch(() => null)) || {};
+  const h = new Set(hide || []);
+  return Object.keys(acl).filter(u => acl[u] === true && u !== uid && segOk(u) && !h.has(u)).slice(0, 2000);
+}
+function storyMinExp(items) { return items.length ? Math.min(...items.map(x => Number(x.exp) || 0)) : 0; }
+async function storyWrite(token, uid, name, aud, hide, items) {
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/stories/" + uid, fields: {
+    name: { stringValue: String(name || "").slice(0, 80) }, aud: toFsValue(aud), hide: toFsValue(hide || []), items: toFsValue(items),
+    exp: { integerValue: String(storyMinExp(items)) }, ts: { integerValue: String(Date.now()) } } } }]);
+}
+async function storyDropMedia(token, owner, it) {
+  if (!it || !it.mid || !/^[a-z0-9]{6,32}$/.test(String(it.mid))) return;
+  const base = DOC_ROOT + "/stories/" + owner + "/media/" + it.mid, n = Math.min(40, Number(it.n) || 33);
+  const w = [{ delete: base }]; for (let i = 0; i < n; i++) w.push({ delete: base + "/c/" + i });
+  await fsCommit(token, w).catch(() => {});
+}
+async function opStoryPost(uid, payload, env, claims) {
+  if (!codeRate(uid, "story", 30)) throw new Error("rate_limited");
+  const p = payload || {}, t = String(p.t || "");
+  if (["text", "image", "video"].indexOf(t) < 0) throw new Error("bad type");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const now = Date.now();
+  const item = { id: "s" + now.toString(36) + Math.random().toString(36).slice(2, 6), t, ts: now, exp: now + STORY_TTL,
+    text: String(p.text || "").replace(/\r/g, "").slice(0, 700), bg: Math.max(0, Math.min(STORY_BG - 1, Number(p.bg) || 0)) };
+  if (t === "text" && !item.text.trim()) throw new Error("empty");
+  if (t !== "text") {
+    const mid = String(p.mid || "");
+    if (!/^[a-z0-9]{6,32}$/.test(mid)) throw new Error("bad id: mid");
+    const md = await fsGet(token, "stories/" + uid + "/media/" + mid);
+    if (!md || fstr(md, "by") !== uid || !fbool(md, "done")) throw new Error("media not uploaded");
+    Object.assign(item, { mid, mime: fstr(md, "mime").slice(0, 100), size: fsInt(md, "size"), n: fsInt(md, "n") });
+    if (p.thumb && typeof p.thumb === "string" && p.thumb.length <= 8000 && /^data:image\/(jpeg|png|webp);base64,/.test(p.thumb)) item.thumb = p.thumb;
+    if (Number(p.w) > 0 && Number(p.h) > 0) { item.w = Math.round(Number(p.w)); item.h = Math.round(Number(p.h)); }
+    if (t === "video") item.dur = Math.max(1, Math.min(31, Math.round(Number(p.dur) || 15)));
+  }
+  const doc = await fsGet(token, "stories/" + uid).catch(() => null);
+  const hide = fsArr(doc, "hide");
+  const items = storyItems(doc).filter(x => Number(x.exp) > now);
+  if (items.length >= STORY_MAX) throw new Error("too_many");
+  items.push(item);
+  const [aud, name] = await Promise.all([storyAud(token, uid, hide), myName(token, uid, claims)]);
+  await storyWrite(token, uid, name, aud, hide, items);
+  stat("story:post");
+  return { item, aud: aud.length };
+}
+async function opStoryDelete(uid, payload, env, claims) {
+  const sid = String((payload && payload.sid) || "");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const doc = await fsGet(token, "stories/" + uid);
+  if (!doc) return { deleted: false };
+  const all = storyItems(doc), it = all.find(x => x.id === sid);
+  if (!it) return { deleted: false };
+  await storyDropMedia(token, uid, it);
+  const items = all.filter(x => x.id !== sid && Number(x.exp) > Date.now());
+  await storyWrite(token, uid, fstr(doc, "name"), fsArr(doc, "aud"), fsArr(doc, "hide"), items);
+  return { deleted: true };
+}
+async function opStoryView(uid, payload, env) {
+  const owner = String((payload && payload.owner) || ""), sid = String((payload && payload.sid) || "");
+  if (!segOk(owner) || !/^s[a-z0-9]{4,20}$/.test(sid)) throw new Error("bad id");
+  if (owner === uid) return { ok: true };
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const doc = await fsGet(token, "stories/" + owner);
+  if (!doc || fsArr(doc, "aud").indexOf(uid) < 0 || !storyItems(doc).some(x => x.id === sid)) return { ok: false };
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/stories/" + owner + "/seen/" + sid + "~" + uid, fields: {
+    sid: { stringValue: sid }, by: { stringValue: uid }, ts: { integerValue: String(Date.now()) } } } }]);
+  return { ok: true };
+}
+// المُخفى عنهم قصصي (والجمهور يُعاد حسابه من جهات الاتّصال الحاليّة)
+async function opStoryAudience(uid, payload, env, claims) {
+  const hide = [...new Set((Array.isArray(payload && payload.hide) ? payload.hide : []).map(String).filter(segOk))].slice(0, 2000);
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const doc = await fsGet(token, "stories/" + uid).catch(() => null);
+  const items = storyItems(doc).filter(x => Number(x.exp) > Date.now());
+  const [aud, name] = await Promise.all([storyAud(token, uid, hide), myName(token, uid, claims)]);
+  await storyWrite(token, uid, name, aud, hide, items);
+  return { aud: aud.length, hide };
+}
+// Cron: إزالة المنتهية ووسائطها
+async function storyGc(env, max) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const now = Date.now();
+  const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "stories" }], where: { compositeFilter: { op: "AND", filters: [
+      { fieldFilter: { field: { fieldPath: "exp" }, op: "GREATER_THAN", value: { integerValue: "0" } } },
+      { fieldFilter: { field: { fieldPath: "exp" }, op: "LESS_THAN_OR_EQUAL", value: { integerValue: String(now) } } }] } }, limit: max || 2 } }) });
+  const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+  let n = 0;
+  for (const d of rows) {
+    const owner = d.name.split("/").pop(), all = storyItems(d);
+    const gone = all.filter(x => Number(x.exp) <= now), keep = all.filter(x => Number(x.exp) > now);
+    for (const it of gone.slice(0, 3)) await storyDropMedia(token, owner, it);
+    const left = keep.concat(gone.slice(3));
+    await storyWrite(token, owner, fstr(d, "name"), fsArr(d, "aud"), fsArr(d, "hide"), left).catch(() => {});
+    n += Math.min(3, gone.length);
+  }
+  return { gc: n };
+}
 // v58: رموز سوا (١٠ أرقام) لجهات اتّصالي — بدل «عضو · A1B2». لجهات اتّصالي فقط (acl/{uid})، ولمن لم يُخفِ رمزه.
 //      من لا رمز له بعد يُنشأ له (حتّى ٥ في الطلب).
 async function opCodeOf(uid, payload, env) {
@@ -3666,7 +3777,7 @@ export default {
       if (r.reminders) return;
       const slot = Math.floor(new Date(event.scheduledTime || Date.now()).getUTCMinutes() / 5) % 3;
       if (slot === 0) await cleanupDisappearing(env).catch(e => console.log("cleanup:", e && e.message));
-      else if (slot === 1) { await cleanupCalls(env).catch(e => console.log("calls cleanup:", e && e.message)); await mediaGc(env, 4).catch(e => console.log("media gc:", e && e.message)); }
+      else if (slot === 1) { await cleanupCalls(env).catch(e => console.log("calls cleanup:", e && e.message)); await mediaGc(env, 4).catch(e => console.log("media gc:", e && e.message)); await storyGc(env, 2).catch(e => console.log("story gc:", e && e.message)); }
       else await purgeWork(env, 40).catch(e => console.log("purge:", e && e.message));   // حذف الحسابات: ما تبقّى من عائلاتٍ ومحادثات
     })());
   },
@@ -3834,6 +3945,10 @@ export default {
       if (op === "people.peek") { const r = await opPeoplePeek(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "group.peek") { const r = await opGroupPeek(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "people.accept") { const r = await opPeopleAccept(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "story.post") { const r = await opStoryPost(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "story.delete") { const r = await opStoryDelete(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "story.view") { const r = await opStoryView(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "story.audience") { const r = await opStoryAudience(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "code.of") { const r = await opCodeOf(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "code.mine") { const r = await opCodeMine(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "code.find") { const r = await opCodeFind(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
