@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v59-stories";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v60-relays";       // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2984,28 +2984,44 @@ async function opRtcIce(uid, payload, env, claims, request) {
   if (!(cached && Date.now() - cached.at < 2 * 3600 * 1000)) {
     if (!iceRateOk("u:" + uid, anon ? 6 : 20) || (anon && !iceRateOk("ip:" + ip, 20))) { stat("turn:limited"); return { iceServers: stun, turn: false, limited: true }; }
   }
-  let cfErr = null;
-  if (env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN && env.TURN_PROVIDER !== "metered") {
-    try { const l = await cloudflareIce(env, uid); stat("turn:cloudflare"); return { turn: true, provider: "cloudflare", iceServers: stun.concat(l) }; }
+  // v60 (C94): عدّة وسطاء — يُعاد كلّ وسيطٍ متاح في «relays» ليقيس التطبيق أقربها لشبكته ويختاره (أو يختار المستخدم يدويّاً).
+  //   Cloudflare (CF_TURN_*) · Metered (METERED_USER/PASS مع METERED_HOSTS: مضيفون مفصولون بفاصلة، أو METERED_HOST) أو مفتاح API
+  //   · وسطاء إضافيّون في السرّ TURN_EXTRA: [{"label":"…","urls":[…],"username":"…","credential":"…"}]
+  //   iceServers = STUN + كلّ الوسطاء (الترتيب الافتراضيّ) للنسخ القديمة.
+  const relays = []; let cfErr = null, mErr = null;
+  if (env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN) {
+    try { relays.push({ id: "cf", label: "Cloudflare", iceServers: await cloudflareIce(env, uid) }); }
     catch (e) { cfErr = String((e && e.message) || e); console.log("cf turn:", cfErr); }
   }
-  const viaMetered = (r) => { if (r.turn) stat("turn:metered"); return Object.assign(r, r.turn ? { provider: "metered" } : {}, cfErr ? { cfErr } : {}); };
-  // الطريقة الأبسط: اسم المستخدم وكلمة المرور من صفحة المفتاح في Metered (سرّان في Cloudflare) — لا تحتاج اسم التطبيق
   if (env.METERED_USER && env.METERED_PASS) {
-    const h = env.METERED_HOST || "global.relay.metered.ca";
-    return viaMetered({ turn: true, iceServers: stun.concat([{ urls: "stun:stun.relay.metered.ca:80" },
-      { urls: ["turn:" + h + ":80", "turn:" + h + ":80?transport=tcp", "turn:" + h + ":443", "turns:" + h + ":443?transport=tcp"],
-        username: env.METERED_USER, credential: env.METERED_PASS }]) });
+    const hosts = String(env.METERED_HOSTS || env.METERED_HOST || "global.relay.metered.ca").split(/[\s,]+/).filter(h => /^[a-z0-9.-]{3,80}$/i.test(h)).slice(0, 6);
+    for (const h of hosts) relays.push({ id: "m:" + h, label: "Metered " + (h.split(".")[0] === "global" ? "global" : h.split(".")[0]),
+      iceServers: [{ urls: ["turn:" + h + ":80", "turn:" + h + ":80?transport=tcp", "turn:" + h + ":443", "turns:" + h + ":443?transport=tcp"], username: env.METERED_USER, credential: env.METERED_PASS }] });
+  } else if (env.METERED_KEY && env.METERED_APP) {
+    try {
+      if (!(iceCache && Date.now() - iceAt < 30 * 60 * 1000)) {
+        const res = await fetch("https://" + env.METERED_APP + ".metered.live/api/v1/turn/credentials?apiKey=" + encodeURIComponent(env.METERED_KEY));
+        const list = await res.json();
+        if (!res.ok || !Array.isArray(list)) throw new Error("metered " + res.status);
+        iceCache = list.filter(x => [].concat(x.urls || []).some(u => /^turns?:/.test(String(u)))); iceAt = Date.now();
+      }
+      if (iceCache.length) relays.push({ id: "metered", label: "Metered", iceServers: iceCache });
+    } catch (e) { mErr = String((e && e.message) || e); }
   }
-  if (!env.METERED_KEY || !env.METERED_APP) return viaMetered({ iceServers: stun, turn: false });
-  if (iceCache && Date.now() - iceAt < 30 * 60 * 1000) return viaMetered({ iceServers: iceCache, turn: true });
-  try {
-    const res = await fetch("https://" + env.METERED_APP + ".metered.live/api/v1/turn/credentials?apiKey=" + encodeURIComponent(env.METERED_KEY));
-    const list = await res.json();
-    if (!res.ok || !Array.isArray(list)) throw new Error("metered " + res.status);
-    iceCache = stun.concat(list); iceAt = Date.now();
-    return viaMetered({ iceServers: iceCache, turn: true });
-  } catch (e) { return viaMetered({ iceServers: stun, turn: false, err: String(e.message || e) }); }
+  if (env.TURN_EXTRA) {
+    try {
+      const ex = JSON.parse(env.TURN_EXTRA);
+      (Array.isArray(ex) ? ex : []).slice(0, 6).forEach((x, i) => {
+        const urls = [].concat((x && x.urls) || []).map(String).filter(u => /^turns?:/.test(u) && !/:53(\?|$)/.test(u));
+        if (urls.length) relays.push({ id: "x" + i, label: String(x.label || "TURN " + (i + 1)).slice(0, 30), iceServers: [{ urls, username: x.username, credential: x.credential }] });
+      });
+    } catch (e) { console.log("TURN_EXTRA:", String(e.message || e)); }
+  }
+  if (env.TURN_PROVIDER === "metered") relays.sort((a, b) => (/^m/.test(b.id) ? 1 : 0) - (/^m/.test(a.id) ? 1 : 0));
+  if (!relays.length) return Object.assign({ iceServers: stun, turn: false }, cfErr ? { cfErr } : {}, mErr ? { err: mErr } : {});
+  stat("turn:" + relays[0].id.split(":")[0]);
+  const all = []; relays.forEach(r => r.iceServers.forEach(x => all.push(x)));
+  return Object.assign({ turn: true, provider: relays[0].id === "cf" ? "cloudflare" : "metered", iceServers: stun.concat(all), relays }, cfErr ? { cfErr } : {});
 }
 const RING_REPEATS = 3, RING_GAP_MS = (typeof globalThis !== "undefined" && globalThis.__RING_GAP_MS) || 8000;
 async function opCallRing(uid, payload, env, claims, ctx) {
