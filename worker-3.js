@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v61-chatsec";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v63-famlink2";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1066,6 +1066,121 @@ async function opMemberUnban(uid, payload, env) {
   await requireOwner(token, gid, uid);
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/groups/" + gid }, updateMask: { fieldPaths: [] }, updateTransforms: [{ fieldPath: "banned", removeAllFromArray: { values: [{ stringValue: target }] } }] }]);
   return { groupId: gid, uid: target, unbanned: true };
+}
+// v62 (C106): ربط شخصٍ في الشجرة بحساب سوا — المرحلة ١: «هذا أنا» على الخادم (groups/{g}/members/{uid}.personId)
+//   العضو يربط نفسه بشخص (أو يفكّ الربط بـ personId:null) · المالك يفكّ ربط غيره إن كان خطأً (target).
+//   شخصٌ واحد لكلّ حساب، وحسابٌ واحد لكلّ شخص في الشجرة نفسها.
+async function opFamClaim(uid, payload, env) {
+  if (!codeRate(uid, "famclaim", 30)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const gid = String((payload && payload.groupId) || ""), pid = payload && payload.personId != null ? String(payload.personId) : null;
+  const target = payload && payload.target ? String(payload.target) : uid;
+  if (!segOk(gid) || (pid !== null && !segOk(pid)) || !segOk(target)) throw new Error("bad id");
+  const me = await fsGet(token, "groups/" + gid + "/members/" + uid);
+  if (!me) throw new Error("not a member");
+  if (target !== uid) {   // فكّ ربط غيري: للمالك وحده، وإلى لا شيء فقط
+    if (fstr(me, "role") !== "owner" || pid !== null) throw new Error("only the owner can unlink others");
+    const t0 = await fsGet(token, "groups/" + gid + "/members/" + target);
+    if (!t0) throw new Error("not a member");
+  }
+  if (pid !== null) {
+    const pd = await fsGet(token, "groups/" + gid + "/persons/" + pid);
+    if (!pd || fbool(pd, "deleted")) throw new Error("person not found");
+    const taken = (await fsList(token, "groups/" + gid + "/members")).find(d => fstr(d, "personId") === pid && d.name.split("/").pop() !== target);
+    if (taken) throw new Error("person taken");
+  }
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + target,
+    fields: pid !== null ? { personId: { stringValue: pid }, personTs: { integerValue: String(Date.now()) } } : {} },
+    updateMask: { fieldPaths: ["personId", "personTs"] }, currentDocument: { exists: true } }]);
+  stat("fam:claim");
+  return { personId: pid };
+}
+// v63 (C107): المرحلة ٢ — المحرّر يربط قريباً بحسابه (برمز سوا أو من جهات اتّصاله) ⇒ طلب موافقة يصل صاحبَ الحساب إشعاراً
+//   famreq/{gid~pid~uid} · القبول يضمّه عضواً «مشاهداً» (إن لم يكن) ويربطه بالشخص · الرفض يحذف الطلب. لا ربط بلا موافقة.
+const FAMREQ_TTL = 14 * 86400000;
+function famReqId(gid, pid, u) { return gid + "~" + pid + "~" + u; }
+async function opFamLinkReq(uid, payload, env, claims, ctx) {
+  if (!codeRate(uid, "famreq", 20)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const p = payload || {}, gid = String(p.groupId || ""), pid = String(p.personId || "");
+  if (!segOk(gid) || !segOk(pid)) throw new Error("bad id");
+  await requireEditor(token, gid, uid);
+  const [g, pd] = await Promise.all([fsGet(token, "groups/" + gid), fsGet(token, "groups/" + gid + "/persons/" + pid)]);
+  if (!g || fbool(g, "deleted")) throw new Error("family not found");
+  if (!pd || fbool(pd, "deleted")) throw new Error("person not found");
+  let t = null;
+  if (p.code) t = await codeTarget(token, p.code);   // يحترم «إخفاء رمزي»
+  else if (p.uid && segOk(String(p.uid))) {
+    if (!(await sharesContact(token, uid, String(p.uid)))) throw new Error("not a contact");
+    const acc = await fsGet(token, "accounts/" + p.uid).catch(() => null);
+    t = { uid: String(p.uid), name: fstr(acc, "displayName") || fstr(acc, "gname") || null };
+  }
+  if (!t) return { found: false };
+  if (t.uid === uid) throw new Error("use this is me");
+  const ms = await fsList(token, "groups/" + gid + "/members");
+  if (ms.some(d => fstr(d, "personId") === pid)) throw new Error("person taken");
+  const tm = ms.find(d => d.name.split("/").pop() === t.uid);
+  if (tm && fstr(tm, "personId")) throw new Error("already linked");
+  if (fsArr(g, "banned").indexOf(t.uid) >= 0) throw new Error("removed from this family");
+  // من حظرني: لا يصله شيء ولا أخبر المرسل
+  if (await blockedBy(token, t.uid, uid).catch(() => false)) return { sent: true, name: t.name || null };
+  const me = await myName(token, uid, claims), now = Date.now();
+  const pname = fstr(pd, "local_name") || "", gname = fstr(g, "name") || "عائلتي";
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/famreq/" + famReqId(gid, pid, t.uid), fields: {
+    gid: { stringValue: gid }, pid: { stringValue: pid }, uid: { stringValue: t.uid }, by: { stringValue: uid },
+    byName: { stringValue: String(me || "").slice(0, 80) }, gname: { stringValue: gname.slice(0, 80) }, pname: { stringValue: pname.slice(0, 80) },
+    ts: { integerValue: String(now) } } } }]);
+  const job = pushTo(token, [t.uid], strData({ t: "famreq", title: "طلب ربط في شجرة العائلة",
+    body: (me || "قريبك") + " يقول إنك «" + pname + "» في شجرة «" + gname + "» — هل هذا أنت؟", ts: now })).catch(e => console.log("push:", e && e.message));
+  if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
+  await sigTo(token, [t.uid], "famreq");
+  stat("fam:linkreq");
+  return { sent: true, name: t.name || null };
+}
+async function opFamReqs(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const rows = await fsQueryEq(token, "famreq", { uid: uid }, 30);
+  const now = Date.now();
+  return { reqs: rows.filter(d => now - fsInt(d, "ts") < FAMREQ_TTL).map(d => ({ groupId: fstr(d, "gid"), personId: fstr(d, "pid"), by: fstr(d, "by"),
+    byName: fstr(d, "byName") || null, groupName: fstr(d, "gname"), personName: fstr(d, "pname"), ts: fsInt(d, "ts") })) };
+}
+async function opFamLinkRespond(uid, payload, env, claims) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const p = payload || {}, gid = String(p.groupId || ""), pid = String(p.personId || "");
+  if (!segOk(gid) || !segOk(pid)) throw new Error("bad id");
+  const rq = await fsGet(token, "famreq/" + famReqId(gid, pid, uid));
+  if (!rq) throw new Error("request not found");
+  await fsCommit(token, [{ delete: rq.name }]);
+  if (!p.accept) return { ok: true, declined: true };
+  if (Date.now() - fsInt(rq, "ts") > FAMREQ_TTL) throw new Error("request expired");
+  const g = await fsGet(token, "groups/" + gid);
+  if (!g || fbool(g, "deleted")) throw new Error("family not found");
+  if (fsArr(g, "banned").indexOf(uid) >= 0) throw new Error("removed from this family");
+  const pd = await fsGet(token, "groups/" + gid + "/persons/" + pid);
+  if (!pd || fbool(pd, "deleted")) throw new Error("person not found");
+  const ms = await fsList(token, "groups/" + gid + "/members");
+  if (ms.some(d => fstr(d, "personId") === pid && d.name.split("/").pop() !== uid)) throw new Error("person taken");
+  const gname = fstr(g, "name") || "عائلتي", nowIso = new Date().toISOString();
+  const mine = ms.find(d => d.name.split("/").pop() === uid);
+  const role = mine ? fstr(mine, "role") : "viewer";
+  const w = [];
+  if (!mine) {
+    w.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid,
+      fields: Object.assign({ role: { stringValue: "viewer" }, joinedTs: { timestampValue: nowIso }, invitedBy: { stringValue: fstr(rq, "by") },
+        personId: { stringValue: pid }, personTs: { integerValue: String(Date.now()) } }, memberIdFields(claims)) } });
+    w.push(indexWrite(uid, gid, gname, "viewer", nowIso));
+  } else {
+    w.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid, fields: { personId: { stringValue: pid }, personTs: { integerValue: String(Date.now()) } } },
+      updateMask: { fieldPaths: ["personId", "personTs"] } });
+  }
+  await fsCommit(token, w);
+  if (!mine) { try { await famChatSync(token, gid); } catch (e) {} }
+  const by = fstr(rq, "by");
+  if (by) {
+    await pushTo(token, [by], strData({ t: "famok", title: "تمّ الربط ✓", body: (await myName(token, uid, claims) || "قريبك") + " أكّد أنّه «" + (fstr(pd, "local_name") || "") + "» في «" + gname + "»", ts: Date.now() })).catch(() => {});
+  }
+  stat("fam:linkok");
+  return { ok: true, groupId: gid, name: gname, role: role, personId: pid, joined: !mine };
 }
 async function requireOwner(token, groupId, uid) {
   const me = await fsGet(token, "groups/" + groupId + "/members/" + uid);
@@ -4030,6 +4145,10 @@ export default {
       if (op === "admin.reportClose") { const r = await opAdminReportClose(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "admin.stats") { const r = await opAdminStats(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "people.remove") { const r = await opPeopleRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "fam.linkReq") { const r = await opFamLinkReq(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "fam.reqs") { const r = await opFamReqs(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "fam.linkRespond") { const r = await opFamLinkRespond(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "fam.claim") { const r = await opFamClaim(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "member.hello") { const r = await opMemberHello(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "member.setRole") { const r = await opMemberSetRole(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "member.unban") { const r = await opMemberUnban(uid, body.payload, env); return json({ ok: true, ...r }); }
