@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v60-relays";       // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v61-chatsec";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1619,6 +1619,12 @@ async function opMediaViewed(uid, payload, env) {
   if (all) await deleteMedia(token, cid, m.extra.mid);   // شاهده الجميع ⇒ يُحذف الوسيط نهائيّاً
   return { gone: all };
 }
+// v61: المحظور في الخاصّة لا يغيّر شيئاً فيها (تعديل · تفاعل · تثبيت · إعدادات) — كان الحظر في الإرسال وحده
+async function dmBlocked(token, c, uid) {
+  if (fstr(c, "type") !== "dm") return false;
+  const other = fsArr(c, "members").find(u => u !== uid);
+  return other ? blockedBy(token, other, uid) : false;
+}
 async function opChatEdit(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const { cid, day, id } = payload || {};
@@ -1626,6 +1632,8 @@ async function opChatEdit(uid, payload, env) {
   const m = await dayMsg(token, cid, day, id);
   if (m.by !== uid) throw new Error("only the sender can edit");
   if (m.del) throw new Error("message deleted");
+  if (m.type && m.type !== "text") throw new Error("only text can be edited");   // v61
+  if (await dmBlocked(token, c, uid)) return { edited: Date.now(), blocked: true };
   const e2e = e2eOf(c);
   if (e2e) {   // v36: التعديل في السرّيّة نصٌّ مشفّرٌ جديد للرسالة نفسها
     if (m.type !== "text") throw new Error("only text can be edited");
@@ -1641,6 +1649,10 @@ async function opChatEdit(uid, payload, env) {
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day,
     fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { text: { stringValue: text }, edited: { integerValue: String(now) } } } } } } } } },
     updateMask: { fieldPaths: [fp("msgs", id, "text"), fp("msgs", id, "edited")] } }]);
+  // v61: معاينة قائمة المحادثات تتبع التعديل إن كانت آخر رسالة
+  const lf = c.fields && c.fields.last && c.fields.last.mapValue && c.fields.last.mapValue.fields;
+  if (lf && lf.id && lf.id.stringValue === id) await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { last: { mapValue: { fields: { text: { stringValue: text.slice(0, 200) } } } } } },
+    updateMask: { fieldPaths: ["last.text"] } }]).catch(() => {});
   return { edited: now };
 }
 async function opChatDelete(uid, payload, env) {
@@ -1664,8 +1676,9 @@ async function opChatDelete(uid, payload, env) {
 async function opChatReact(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const { cid, day, id } = payload || {};
-  await requireChatMember(token, cid, uid);
+  const c = await requireChatMember(token, cid, uid);
   if (!DAY_REF.test(String(day || "")) || !MSG_ID.test(String(id || ""))) throw new Error("bad message ref");
+  if (await dmBlocked(token, c, uid)) return { ok: true };   // v61
   const target = (await dayPeek(token, cid, day, [id]))[id];   // v33: لا تفاعل مع رسالةٍ غير موجودة أو محذوفة
   if (!target || !target.by || target.del) throw new Error("message not found");
   const emoji = payload.emoji ? String(payload.emoji).slice(0, 16) : null;
@@ -1680,6 +1693,7 @@ async function opChatPin(uid, payload, env) {
   const c = await requireChatMember(token, cid, uid);
   // v33: «المشرفون فقط يعدّلون معلومات المجموعة» يشمل التثبيت
   if (fstr(c, "type") === "group" && (fbool(c, "infoAdminsOnly") || fbool(c, "adminsOnly")) && fsArr(c, "admins").indexOf(uid) < 0) throw new Error("only admins can change this");
+  if (await dmBlocked(token, c, uid)) throw new Error("blocked");   // v61
   const id = payload.id && MSG_ID.test(String(payload.id)) ? String(payload.id) : null;
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { pinned: id ? { stringValue: id } : { nullValue: null } } }, updateMask: { fieldPaths: ["pinned"] } }]);
   return { pinned: id };
@@ -1716,6 +1730,7 @@ async function opChatSettings(uid, payload, env) {
   const cid = payload && payload.cid;
   const c = await requireChatMember(token, cid, uid);
   if (fstr(c, "type") === "group" && fsArr(c, "admins").indexOf(uid) < 0) throw new Error("only admins can change this");
+  if (await dmBlocked(token, c, uid)) throw new Error("blocked");   // v61
   // v33: محادثة العائلة — المالك والمحرّرون فقط (كان أيّ عضوٍ يشغّلها)
   if (/^fam_/.test(cid)) {
     const mem = await fsGet(token, "groups/" + cid.slice(4) + "/members/" + uid).catch(() => null);
@@ -1867,7 +1882,8 @@ async function opGroupCreate2(uid, payload, env, claims) {
   if (!name) throw new Error("name required");
   const want = Array.isArray(payload.members) ? payload.members.filter(x => segOk(String(x)) && x !== uid).slice(0, 100) : [];
   const contacts = await contactSet(token, uid);
-  const members = [uid].concat(want.filter(u => u in contacts));
+  const blk = await blockedSet(token, want.filter(u => u in contacts), uid);   // v61: من حظرني لا أضيفه إلى مجموعة
+  const members = [uid].concat(want.filter(u => (u in contacts) && !blk.has(u)));
   const names = { [uid]: memberIdFields(claims).name.stringValue || null };
   members.forEach(u => { if (u !== uid) names[u] = contacts[u]; });
   const cid = "grp_" + crypto.randomUUID().replace(/-/g, "").slice(0, 20), now = Date.now();
@@ -1882,7 +1898,7 @@ async function opGroupCreate2(uid, payload, env, claims) {
   await rtdbSetChatMembers(token, cid, members);
   await sysMsg(token, cid, uid, "created", { name });
   if (dk) await sysMsg(token, cid, uid, "e2e_on", {});
-  return { cid, members, skipped: want.filter(u => !(u in contacts)) };
+  return { cid, members, skipped: want.filter(u => !(u in contacts) || blk.has(u)) };
 }
 async function opGroupUpdate(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -1918,7 +1934,8 @@ async function opGroupMembers(uid, payload, env) {
   let added = [];
   if (add.length) {
     const contacts = await contactSet(token, uid);
-    added = add.filter(u => (u in contacts) && members.indexOf(u) < 0);
+    const blk = await blockedSet(token, add.filter(u => (u in contacts) && members.indexOf(u) < 0), uid);   // v61
+    added = add.filter(u => (u in contacts) && members.indexOf(u) < 0 && !blk.has(u));
     added.forEach(u => { members.push(u); names[u] = contacts[u]; });
   }
   const removed = remove.filter(u => members.indexOf(u) >= 0);
@@ -2235,6 +2252,10 @@ async function syncMutedBy(token, uid, before, after) {
   b.forEach(cid => { if (!a.has(cid)) changes.push([cid, "removeAllFromArray"]); });
   for (const [cid, op] of changes.slice(0, 20)) {
     if (!/^(dm_|sdm_|sv_|fam_|grp_)/.test(cid) || !segOk(cid)) continue;
+    if (op === "appendMissingElements") {   // v61: العضو وحده يضيف نفسه إلى mutedBy
+      const cd = await fsGet(token, "chats/" + cid).catch(() => null);
+      if (!cd || fsArr(cd, "members").indexOf(uid) < 0) continue;
+    }
     await fsCommit(token, [{ transform: { document: DOC_ROOT + "/chats/" + cid, fieldTransforms: [{ fieldPath: "mutedBy", [op]: { values: [{ stringValue: uid }] } }] },
       currentDocument: { exists: true } }]).catch(() => {});
   }
@@ -3305,6 +3326,34 @@ async function storyDropMedia(token, owner, it) {
   const w = [{ delete: base }]; for (let i = 0; i < n; i++) w.push({ delete: base + "/c/" + i });
   await fsCommit(token, w).catch(() => {});
 }
+// v61: حجز رفع وسيط القصّة (كالمحادثات): حدٌّ يوميّ مشترك، والقواعد ترفض وسيطاً بلا حجز أو أكبر منه، وما بقي ٤٨ ساعة يُحذف
+async function opStoryBegin(uid, payload, env) {
+  if (!codeRate(uid, "storyb", 40)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const mid = String((payload || {}).mid || ""), size = Math.floor(Number((payload || {}).size) || 0);
+  if (!/^[a-z0-9]{6,32}$/.test(mid)) throw new Error("bad media id");
+  if (!(size > 0 && size <= 16 * 1024 * 1024)) throw new Error("bad size");
+  const day = dayKey(Date.now()), q = await fsGet(token, "quota/" + uid).catch(() => null);
+  const used = q && fstr(q, "d") === day ? fsInt(q, "bytes") : 0;
+  if (used + size > MEDIA_DAY_MAX) throw new Error("media quota");
+  await fsCommit(token, [
+    { update: { name: DOC_ROOT + "/storyq/" + uid + "~" + mid, fields: { uid: { stringValue: uid }, mid: { stringValue: mid }, size: { integerValue: String(size) }, ts: { integerValue: String(Date.now()) } } } },
+    { update: { name: DOC_ROOT + "/quota/" + uid, fields: { d: { stringValue: day }, bytes: { integerValue: String(used + size) } } } },
+  ]);
+  return { ok: true };
+}
+async function storyqGc(env, max) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "storyq" }], where: { fieldFilter: { field: { fieldPath: "ts" }, op: "LESS_THAN", value: { integerValue: String(Date.now() - 2 * 86400000) } } }, limit: max || 5 } }) });
+  const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+  let n = 0;
+  for (const d of rows) {
+    const u = fstr(d, "uid"), mid = fstr(d, "mid");
+    try { if (segOk(u)) await storyDropMedia(token, u, { mid, n: 40 }); await fsCommit(token, [{ delete: d.name }]); n++; } catch (e) { console.log("storyqGc:", e && e.message); }
+  }
+  return { gc: n };
+}
 async function opStoryPost(uid, payload, env, claims) {
   if (!codeRate(uid, "story", 30)) throw new Error("rate_limited");
   const p = payload || {}, t = String(p.t || "");
@@ -3793,7 +3842,7 @@ export default {
       if (r.reminders) return;
       const slot = Math.floor(new Date(event.scheduledTime || Date.now()).getUTCMinutes() / 5) % 3;
       if (slot === 0) await cleanupDisappearing(env).catch(e => console.log("cleanup:", e && e.message));
-      else if (slot === 1) { await cleanupCalls(env).catch(e => console.log("calls cleanup:", e && e.message)); await mediaGc(env, 4).catch(e => console.log("media gc:", e && e.message)); await storyGc(env, 2).catch(e => console.log("story gc:", e && e.message)); }
+      else if (slot === 1) { await cleanupCalls(env).catch(e => console.log("calls cleanup:", e && e.message)); await mediaGc(env, 10).catch(e => console.log("media gc:", e && e.message)); await storyGc(env, 2).catch(e => console.log("story gc:", e && e.message)); await storyqGc(env, 10).catch(e => console.log("storyq gc:", e && e.message)); }
       else await purgeWork(env, 40).catch(e => console.log("purge:", e && e.message));   // حذف الحسابات: ما تبقّى من عائلاتٍ ومحادثات
     })());
   },
@@ -3958,6 +4007,7 @@ export default {
       if (op === "people.list") { const r = await opPeopleList(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "people.invite") { const r = await opPeopleInvite(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "media.begin") { const r = await opMediaBegin(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "story.begin") { const r = await opStoryBegin(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "people.peek") { const r = await opPeoplePeek(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "group.peek") { const r = await opGroupPeek(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "people.accept") { const r = await opPeopleAccept(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
