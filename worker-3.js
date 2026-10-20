@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v63-famlink2";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v64-famsuggest";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1110,8 +1110,14 @@ async function opFamLinkReq(uid, payload, env, claims, ctx) {
   if (!pd || fbool(pd, "deleted")) throw new Error("person not found");
   let t = null;
   if (p.code) t = await codeTarget(token, p.code);   // يحترم «إخفاء رمزي»
+  else if (p.byPhone) {   // v64 (C109): الرقم المحفوظ للشخص في الشجرة نفسها — لا رقمٌ يرسله العميل
+    t = await phoneOwner(token, personPhone(pd));
+    if (!t) return { found: false };
+  }
   else if (p.uid && segOk(String(p.uid))) {
-    if (!(await sharesContact(token, uid, String(p.uid)))) throw new Error("not a contact");
+    // جهة اتّصال، أو عضوٌ في العائلة نفسها (من شاشة الأعضاء)
+    const okRel = (await sharesContact(token, uid, String(p.uid))) || !!(await fsGet(token, "groups/" + gid + "/members/" + String(p.uid)).catch(() => null));
+    if (!okRel) throw new Error("not a contact");
     const acc = await fsGet(token, "accounts/" + p.uid).catch(() => null);
     t = { uid: String(p.uid), name: fstr(acc, "displayName") || fstr(acc, "gname") || null };
   }
@@ -1136,6 +1142,49 @@ async function opFamLinkReq(uid, payload, env, claims, ctx) {
   await sigTo(token, [t.uid], "famreq");
   stat("fam:linkreq");
   return { sent: true, name: t.name || null };
+}
+// v64 (C109): المرحلة ٤ — اقتراح الربط بالأرقام الموثَّقة. يُطابَق رقم الشخص المحفوظ في الشجرة (contacts.phone)
+//   مع phones/{رقم} لحسابٍ موثَّق الرقم ويقبل الإيجاد (findable) — بالقواعد نفسها لـ find.phone. للمحرّرين فقط.
+function personPhone(pd) {
+  try { const c = pd && pd.fields && pd.fields.contacts && pd.fields.contacts.mapValue && pd.fields.contacts.mapValue.fields; const v = c && c.phone; return cleanPhone(v && (v.stringValue || v.integerValue)); } catch (e) { return null; }
+}
+async function phoneOwner(token, ph) {
+  if (!ph) return null;
+  const d = await fsGet(token, "phones/" + ph).catch(() => null);
+  const u = fstr(d, "uid"); if (!u) return null;
+  const acc = await fsGet(token, "accounts/" + u).catch(() => null);
+  if (!acc || !accFindable(acc) || fbool(acc, "phoneVerified") !== true || fstr(acc, "phone") !== ph) return null;
+  return { uid: u, name: fstr(acc, "displayName") || fstr(acc, "gname") || null };
+}
+async function opFamSuggest(uid, payload, env) {
+  if (!codeRate(uid, "famsug", 12)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const p = payload || {}, gid = String(p.groupId || ""), only = p.personId ? String(p.personId) : null;
+  if (!segOk(gid) || (only && !segOk(only))) throw new Error("bad id");
+  await requireEditor(token, gid, uid);
+  const [g, ms, ps] = await Promise.all([fsGet(token, "groups/" + gid), fsList(token, "groups/" + gid + "/members"),
+    only ? fsGet(token, "groups/" + gid + "/persons/" + only).then(d => d ? [d] : []) : fsList(token, "groups/" + gid + "/persons")]);
+  if (!g || fbool(g, "deleted")) throw new Error("family not found");
+  const banned = new Set(fsArr(g, "banned")), linkedP = new Set(), linkedU = new Set();
+  for (const m of ms) { const pid = fstr(m, "personId"); if (pid) { linkedP.add(pid); linkedU.add(m.name.split("/").pop()); } }
+  const cand = [];
+  for (const d of ps) {
+    if (fbool(d, "deleted") || (d.fields && d.fields.alive && d.fields.alive.booleanValue === false)) continue;
+    const pid = d.name.split("/").pop(); if (linkedP.has(pid)) continue;
+    const ph = personPhone(d); if (ph) cand.push({ pid, ph, pname: fstr(d, "local_name") || "" });
+    if (cand.length >= 120) break;
+  }
+  const seen = new Set(), out = [];
+  const hits = await Promise.all(cand.map(c => phoneOwner(token, c.ph).catch(() => null)));
+  for (let i = 0; i < cand.length; i++) {
+    const t = hits[i]; if (!t || t.uid === uid || linkedU.has(t.uid) || banned.has(t.uid) || seen.has(t.uid)) continue;
+    if (await blockedBy(token, t.uid, uid).catch(() => false)) continue;
+    seen.add(t.uid);
+    const rq = await fsGet(token, "famreq/" + famReqId(gid, cand[i].pid, t.uid)).catch(() => null);
+    out.push({ personId: cand[i].pid, personName: cand[i].pname, uid: t.uid, name: t.name, pending: !!(rq && Date.now() - fsInt(rq, "ts") < FAMREQ_TTL) });
+  }
+  stat("fam:suggest");
+  return { sugg: out };
 }
 async function opFamReqs(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -4145,6 +4194,7 @@ export default {
       if (op === "admin.reportClose") { const r = await opAdminReportClose(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "admin.stats") { const r = await opAdminStats(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "people.remove") { const r = await opPeopleRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "fam.suggest") { const r = await opFamSuggest(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "fam.linkReq") { const r = await opFamLinkReq(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "fam.reqs") { const r = await opFamReqs(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "fam.linkRespond") { const r = await opFamLinkRespond(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
