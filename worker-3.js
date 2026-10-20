@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v64-famsuggest";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v65-acks";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2186,6 +2186,39 @@ function nestFields(path, value) {
 }
 /* v35: الاستطلاع المجهول مجهولٌ فعلاً — الصوت يُخزَّن تحت مفتاحٍ مشتقّ (HMAC بسرّ الخادم) لا يُعرف منه صاحبه،
    وصوتٌ واحد لكلّ عضو كما كان. الجهاز يعرف مفتاحه هو فقط (chat.pollKeys) ليُظهر اختياره. */
+/* v65 (C111): إقرار الجهاز بلا رمز دخول — التطبيق الأصليّ يستلم الإشعار والتطبيق مغلق فلا يملك رمز Firebase.
+   الخادم يوقّع في الإشعار نفسه (HMAC بسرّ الخادم) ما يُسمح بإقراره: «رنّت المكالمة» أو «وصلت الرسالة»؛ فلا يُقرّ أحدٌ عن غيره. */
+let ackHmac = null;
+async function ackSig(env, s) {
+  if (!ackHmac) ackHmac = await crypto.subtle.importKey("raw", new TextEncoder().encode((JSON.parse(env.SA_JSON).private_key || "") + "|ack"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", ackHmac, new TextEncoder().encode(s)));
+  let b = ""; for (let i = 0; i < 16; i++) b += sig[i].toString(16).padStart(2, "0");
+  return b;
+}
+async function deviceAck(request, env) {
+  let b = {}; try { b = await request.json(); } catch (e) {}
+  const k = String(b.k || ""), to = String(b.to || ""), sg = String(b.s || "");
+  if (!segOk(to) || !/^[0-9a-f]{32}$/.test(sg)) return json({ ok: false }, 400);
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  if (k === "r") {   // المكالمة رنّت على جهازه
+    const call = String(b.call || "");
+    if (!/^[A-Za-z0-9_-]{6,40}$/.test(call) || sg !== await ackSig(env, "r|" + call + "|" + to)) return json({ ok: false }, 403);
+    const c = await rtdbGet(token, "calls/" + call).catch(() => null);
+    if (c && c.to === to && c.state === "ringing" && !c.rung) await rtdbPatch(token, { ["calls/" + call + "/rung"]: Date.now() });
+    stat("ack:ring");
+    return json({ ok: true });
+  }
+  if (k === "d") {   // الرسالة وصلت جهازه
+    const cid = String(b.cid || ""), ts = Math.floor(Number(b.ts || 0));
+    if (!segOk(cid) || !(ts > 0) || sg !== await ackSig(env, "d|" + cid + "|" + to + "|" + ts)) return json({ ok: false }, 403);
+    const c = await fsGet(token, "chats/" + cid).catch(() => null);
+    const cur = Number((((c && c.fields && c.fields.delivered && c.fields.delivered.mapValue && c.fields.delivered.mapValue.fields) || {})[to] || {}).integerValue || 0);
+    if (c && ts > cur) await opChatMark(to, { marks: [{ cid, d: ts }] }, env);
+    stat("ack:deliv");
+    return json({ ok: true });
+  }
+  return json({ ok: false }, 400);
+}
 let pollHmac = null;
 async function anonKey(env, uid, cid, id) {
   if (!pollHmac) {
@@ -2378,8 +2411,9 @@ async function pushTo(token, uids, data) {
   let sent = 0;
   for (const u of uids.slice(0, 12)) {
     const devs = await devsOf(token, u);
+    const du = typeof data === "function" ? await data(u) : data;   // v65: بيانات خاصّة بكلّ مستلم (توقيع الإقرار)
     for (const d of devs.slice(0, DEV_MAX)) {
-      const r = await fcmSend(token, fstr(d, "token"), data);
+      const r = await fcmSend(token, fstr(d, "token"), du);
       if (r === "ok") { sent++; stat("push"); }
       else if (r === "gone") await fsCommit(token, [{ delete: d.name }]).catch(() => {});
     }
@@ -2404,8 +2438,10 @@ async function notifyChat(token, c, cid, uid, msg) {
   const base = { t: "msg", cid, from: uid, mid: msg.id, title: group ? (fstr(c, "name") || "سوا") : senderName, body: group ? senderName + ": " + body : body, ts: msg.ts };
   let sent = 0;
   const ment = targets.filter(u => mentions.indexOf(u) >= 0), rest = targets.filter(u => mentions.indexOf(u) < 0);
-  if (ment.length) sent += await pushTo(token, ment, strData(Object.assign({}, base, { mention: "1", title: senderName + " أشار إليك" + (group ? " في " + (fstr(c, "name") || "") : "") })));
-  if (rest.length) sent += await pushTo(token, rest.slice(0, 12 - ment.length), strData(base));
+  const env0 = notifyChat.env;
+  const signed = (o) => env0 ? async (u) => strData(Object.assign({}, o, { to: u, dk: await ackSig(env0, "d|" + cid + "|" + u + "|" + msg.ts) })) : strData(o);
+  if (ment.length) sent += await pushTo(token, ment, signed(Object.assign({}, base, { mention: "1", title: senderName + " أشار إليك" + (group ? " في " + (fstr(c, "name") || "") : "") })));
+  if (rest.length) sent += await pushTo(token, rest.slice(0, 12 - ment.length), signed(base));
   return sent;
 }
 // الكتم يُنسخ إلى المحادثة نفسها (mutedBy) فلا يقرأ الإرسال إعدادات كلّ عضو
@@ -3223,8 +3259,9 @@ async function opCallRing(uid, payload, env, claims, ctx) {
   if (!call || call.from !== uid || call.to !== to || call.state !== "ringing") return { queued: true };
   const name = memberIdFields(claims).name.stringValue || "سوا";
   const video = payload.type === "video";
+  const rk = await ackSig(env, "r|" + callId + "|" + to);   // v65: الجهاز يُقرّ «رنّت» ⇒ المتّصل يرى «يرنّ…»
   const data = (n) => strData({ t: "call", call: callId, from: uid, cid: dmId(uid, to), type: video ? "video" : "audio",
-    title: name, body: (video ? "📹 مكالمة فيديو واردة" : "📞 مكالمة صوتيّة واردة") + (n ? " · " + "●".repeat(n) : ""), ts: Date.now(), ring: String(n) });
+    title: name, body: (video ? "📹 مكالمة فيديو واردة" : "📞 مكالمة صوتيّة واردة") + (n ? " · " + "●".repeat(n) : ""), ts: Date.now(), ring: String(n), to: to, rk: rk });
   // C71: رنينٌ متكرّر كتطبيقات المكالمات — إشعارٌ كلّ ٨ ثوانٍ (بالوسم نفسه مع renotify ⇒ صوتٌ واهتزازٌ من جديد) ما دامت المكالمة ترنّ، حتى ~٢٤ ث
   const job = (async () => {
     let sent = await pushTo(token, [to], data(0));
@@ -4011,9 +4048,11 @@ export default {
     })());
   },
   async fetch(request, env, ctx) {
+    notifyChat.env = env;   // v65: توقيع إقرار «وصلت» في إشعارات الرسائل
     try { const u0 = new URL(request.url); if (isAuthProxyPath(u0.pathname)) return await authProxy(request, u0); } catch (e) { return new Response("auth proxy error", { status: 502 }); }
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
     try { if (new URL(request.url).pathname === "/wa/webhook") return await waWebhook(request, env, ctx); } catch (e) { return new Response("webhook error", { status: 500 }); }
+    try { if (request.method === "POST" && new URL(request.url).pathname === "/ack") return await deviceAck(request, env); } catch (e) { return json({ ok: false, error: String(e && e.message || e) }, 500); }
     let statOp = null;
     try {
       const auth = request.headers.get("Authorization") || "";
