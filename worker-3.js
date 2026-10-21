@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v65-acks";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v66-unban";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1067,6 +1067,22 @@ async function opMemberUnban(uid, payload, env) {
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/groups/" + gid }, updateMask: { fieldPaths: [] }, updateTransforms: [{ fieldPath: "banned", removeAllFromArray: { values: [{ stringValue: target }] } }] }]);
   return { groupId: gid, uid: target, unbanned: true };
 }
+// v66 (C114): قائمة المُزالين للمالك — كان من أُزيل مرّةً لا يعود بأيّ رابطٍ جديد («تعذّر الانضمام») ولا زرّ لرفع المنع
+async function opMemberBanned(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const gid = payload && payload.groupId;
+  if (!segOk(gid)) throw new Error("groupId required");
+  await requireOwner(token, gid, uid);
+  const g = await fsGet(token, "groups/" + gid);
+  const ids = fsArr(g, "banned").slice(-50);
+  const nm = (((g && g.fields && g.fields.bannedNames && g.fields.bannedNames.mapValue) || {}).fields) || {};
+  const out = await Promise.all(ids.map(async (u) => {
+    let name = nm[u] && nm[u].stringValue || null;
+    if (!name) { const a = await fsGet(token, "accounts/" + u).catch(() => null); name = fstr(a, "displayName") || fstr(a, "gname") || null; }
+    return { uid: u, name };
+  }));
+  return { banned: out };
+}
 // v62 (C106): ربط شخصٍ في الشجرة بحساب سوا — المرحلة ١: «هذا أنا» على الخادم (groups/{g}/members/{uid}.personId)
 //   العضو يربط نفسه بشخص (أو يفكّ الربط بـ personId:null) · المالك يفكّ ربط غيره إن كان خطأً (target).
 //   شخصٌ واحد لكلّ حساب، وحسابٌ واحد لكلّ شخص في الشجرة نفسها.
@@ -1266,7 +1282,9 @@ async function opMemberRemove(uid, payload, env) {
     { delete: DOC_ROOT + "/groups/" + gid + "/members/" + target },
     { delete: DOC_ROOT + "/accounts/" + target + "/groups/" + gid },
     // v39: يُمنع من العودة برابط دعوةٍ ما زال صالحاً (يزول المنع بدعوةٍ من المالك عبر member.unban أو بحذف الدعوات)
-    { update: { name: DOC_ROOT + "/groups/" + gid }, updateMask: { fieldPaths: [] }, updateTransforms: [{ fieldPath: "banned", appendMissingElements: { values: [{ stringValue: target }] } }] },
+    { update: { name: DOC_ROOT + "/groups/" + gid, fields: { bannedNames: { mapValue: { fields: { [target]: { stringValue: String(fstr(m, "name") || "").slice(0, 60) } } } } } },
+      updateMask: { fieldPaths: [fp("bannedNames", target)] },   // v66: اسمه في قائمة «المُزالون» عند المالك
+      updateTransforms: [{ fieldPath: "banned", appendMissingElements: { values: [{ stringValue: target }] } }] },
   ]);
   try { await famChatSync(token, gid); } catch (e) {}
   return { groupId: gid, uid: target, removed: true };
@@ -4240,6 +4258,7 @@ export default {
       if (op === "fam.claim") { const r = await opFamClaim(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "member.hello") { const r = await opMemberHello(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "member.setRole") { const r = await opMemberSetRole(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "member.banned") { const r = await opMemberBanned(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "member.unban") { const r = await opMemberUnban(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "member.remove") { const r = await opMemberRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "group.settings") { const r = await opGroupSettings(uid, body.payload, env); return json({ ok: true, ...r }); }
