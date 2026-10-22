@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v66-unban";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v67-ios";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2387,7 +2387,7 @@ async function opPushTest(uid, payload, env, ctx) {
       method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
       body: JSON.stringify({ message: { token: dev, data: strData({ t: "test", title: "سوا — إشعار تجريبيّ ✓", body: "وصل الإشعار إلى هذا الجهاز. الرسائل والمكالمات ستصلك والتطبيق مغلق.", ts: now }),
         android: { priority: "HIGH", ttl: "120s" },
-        webpush: { headers: { Urgency: "high", TTL: "120" } } } }) });
+        webpush: { headers: { Urgency: "high", TTL: "120" } }, apns: apnsOf({ t: "test", title: "سوا — إشعار تجريبيّ ✓", body: "وصل الإشعار إلى هذا الجهاز." }) } }) });
     let err = "";
     if (!res.ok) { const txt = await res.text(); err = (txt.match(/"message":\s*"([^"]{1,160})"/) || [])[1] || ("HTTP " + res.status); if (/UNREGISTERED|registration-token-not-registered|NOT_FOUND/.test(txt)) { await fsCommit(token, [{ delete: d.name }]).catch(() => {}); err = "gone"; } }
     results.push({ ua: fstr(d, "ua").slice(0, 60), ts: fsInt(d, "ts"), ok: res.ok, err, tail: dev.slice(-8) });   // v54: ليعرف الهاتف «هذا أنا»
@@ -2402,13 +2402,26 @@ async function opPushUnregister(uid, payload, env) {
   await fsCommit(token, [{ delete: DOC_ROOT + "/accounts/" + uid + "/devices/" + (await tokenId(t)) }]).catch(() => {});
   return { ok: true };
 }
+// v67 (C123): تطبيق iOS — APNs لا يُظهر رسائل البيانات الصامتة والتطبيق مغلق، فنرفق تنبيهاً مرئيّاً (يتجاهله أندرويد والمتصفّح).
+//   collapse-id: رنّات المكالمة المتكرّرة تحلّ محلّ بعضها بدل تكديس إشعارات · thread-id: يجمع إشعارات المحادثة الواحدة
+function apnsOf(d) {
+  const call = d.t === "call", ttl = call ? 45 : d.t === "test" ? 120 : 86400;
+  const alert = { title: String(d.title || "سوا").slice(0, 120), body: String(d.body || "").slice(0, 400) };
+  const aps = { alert, sound: "default", "thread-id": String(d.cid || d.t || "sawa").slice(0, 60) };
+  if (call) aps["interruption-level"] = "time-sensitive";
+  const headers = { "apns-priority": "10", "apns-push-type": "alert", "apns-expiration": String(Math.floor(Date.now() / 1000) + ttl) };
+  const cid = call ? "c" + (d.call || "") : d.t === "missed" ? "c" + (d.call || "") : "";
+  if (cid) headers["apns-collapse-id"] = cid.slice(0, 64);
+  return { headers, payload: { aps } };
+}
 async function fcmSend(token, devToken, data) {
   const res = await fetch("https://fcm.googleapis.com/v1/projects/" + PROJECT_ID + "/messages:send", {
     method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
     body: JSON.stringify({ message: { token: devToken, data: data,
       // C72: تطبيق أندرويد الأصليّ — رسالة بيانات بأولويّة عالية توقظ الهاتف (للمتصفّح يُتجاهل هذا الجزء)
       android: { priority: "HIGH", ttl: data.t === "call" ? "45s" : data.t === "test" ? "120s" : "86400s" },
-      webpush: { headers: { Urgency: data.t === "call" || data.t === "test" ? "high" : "normal", TTL: data.t === "call" ? "45" : data.t === "test" ? "120" : "86400" } } } }) });
+      webpush: { headers: { Urgency: data.t === "call" || data.t === "test" ? "high" : "normal", TTL: data.t === "call" ? "45" : data.t === "test" ? "120" : "86400" } },
+      apns: apnsOf(data) } }) });
   if (res.ok) return "ok";
   const txt = await res.text();
   // v56: INVALID_ARGUMENT لا يعني رمزاً ميّتاً إلّا إن كان عن الرمز نفسه (كانت أخطاء الحمولة تحذف أجهزة سليمة)
