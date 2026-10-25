@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v68-lang";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v69-qa";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -4077,6 +4077,39 @@ async function opReportCreate(uid, payload, env, claims) {
   stat("report");
   return { id };
 }
+/* ---------- C131) تقييم جودة المكالمات ----------
+   qa.rate: المختبِر (أو المدير) يقيّم المكالمة بعد انتهائها مع قياساتها ⇒ qa/{id} = { by, byName, ts, d(JSON) } — للخادم وحده.
+   admin.qa: آخر التقييمات للمدير (ADMIN_EMAIL) ليقارن المحرّكات والنسخ بالأرقام لا بالانطباع. */
+function qaNum(v, lo, hi) { const n = Number(v); return isFinite(n) ? Math.max(lo, Math.min(hi, Math.round(n * 10) / 10)) : null; }
+function qaStatClean(x) { if (!x || typeof x !== "object") return null; return { med: qaNum(x.med, 0, 1e5), p90: qaNum(x.p90, 0, 1e5), max: qaNum(x.max, 0, 1e5), n: qaNum(x.n, 0, 1e4) }; }
+async function opQaRate(uid, payload, env, claims) {
+  if (!codeRate(uid, "qa", 40)) throw new Error("rate_limited");
+  const p = payload || {}, stars = Math.round(Number(p.stars));
+  if (!(stars >= 1 && stars <= 5)) throw new Error("bad stars");
+  const str = (v, n) => String(v == null ? "" : v).replace(/[\u0000-\u001f]/g, " ").slice(0, n);
+  const TAGS = ["echo", "noise", "cut", "delay", "low", "drop"];
+  const d = { stars, tags: (Array.isArray(p.tags) ? p.tags : []).filter(t => TAGS.indexOf(t) >= 0).slice(0, 6), note: str(p.note, 200),
+    kind: str(p.kind, 16), engine: p.engine === "native" ? "native" : "web", secs: qaNum(p.secs, 0, 36000), out: str(p.out, 6), route: str(p.route, 10),
+    relay: str(p.relay, 40), proto: str(p.proto, 6), colo: str(p.colo, 6), n: qaNum(p.n, 1, 50), reason: str(p.reason, 16), ver: str(p.ver, 12),
+    plat: str(p.plat, 40), model: str(p.model, 40), lang: p.lang === "en" ? "en" : "ar", rtt: qaStatClean(p.rtt), jb: qaStatClean(p.jb), loss: qaStatClean(p.loss) };
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const id = "q" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), now = Date.now();
+  const me = memberIdFields(claims);
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/qa/" + id, fields: { by: { stringValue: uid }, byName: me.name, ts: { integerValue: String(now) }, d: { stringValue: JSON.stringify(d) } } } }]);
+  stat("qa:" + d.engine);
+  return { id };
+}
+async function opAdminQa(uid, payload, env, claims) {
+  if (!isAdmin(env, claims)) return { admin: false };
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const lim = Math.max(1, Math.min(500, Number((payload && payload.limit) || 300)));
+  const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "qa" }], orderBy: [{ field: { fieldPath: "ts" }, direction: "DESCENDING" }], limit: lim } }) });
+  const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+  const items = rows.map(doc => { const v = fsToJs({ mapValue: { fields: doc.fields || {} } }) || {}; let d = {}; try { d = JSON.parse(v.d || "{}"); } catch (e) {}
+    return Object.assign(d, { id: doc.name.split("/").pop(), by: v.by, byName: v.byName, ts: v.ts }); });
+  return { admin: true, items };
+}
 async function opAdminReports(uid, payload, env, claims) {
   if (!isAdmin(env, claims)) return { admin: false };
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -4313,6 +4346,8 @@ export default {
       if (op === "report.create") { const r = await opReportCreate(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "admin.reports") { const r = await opAdminReports(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "admin.reportClose") { const r = await opAdminReportClose(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "qa.rate") { const r = await opQaRate(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "admin.qa") { const r = await opAdminQa(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "admin.stats") { const r = await opAdminStats(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "people.remove") { const r = await opPeopleRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "fam.suggest") { const r = await opFamSuggest(uid, body.payload, env); return json({ ok: true, ...r }); }
