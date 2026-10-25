@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v67-ios";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v68-lang";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2338,7 +2338,8 @@ async function opPushRegister(uid, payload, env) {
     await fsCommit(token, [{ delete: DOC_ROOT + "/accounts/" + payload.prevUid + "/devices/" + id }]).catch(() => {});
   }
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid + "/devices/" + id, fields: {
-    token: { stringValue: t }, ua: { stringValue: String(payload.ua || "").slice(0, 160) }, ts: { integerValue: String(Date.now()) } } } }]);
+    token: { stringValue: t }, ua: { stringValue: String(payload.ua || "").slice(0, 160) }, ts: { integerValue: String(Date.now()) },
+    lang: { stringValue: payload.lang === "en" ? "en" : "ar" } } } }]);   // v68: لغة إشعارات هذا الجهاز = لغة التطبيق
   // C60: تنظيف — الأجهزة الأقدم من ٦٠ يوماً أو الزائدة عن الحدّ تُحذف (الرموز القديمة تموت غالباً، والمستخدم العاديّ له جهازٌ أو جهازان)
   try {
     const devs = await devsOf(token, uid), now = Date.now();
@@ -2374,20 +2375,21 @@ async function opPushTest(uid, payload, env, ctx) {
     ctx.waitUntil((async () => {
       await new Promise((r) => setTimeout(r, ms));
       const callTest = payload.kind === "call";   // v55: اختبار «مكالمة» حقيقيّ الشكل (t=call) — يرنّ كما ترنّ المكالمة
-      for (const d of devs.slice(0, DEV_MAX)) await fcmSend(token, fstr(d, "token"), strData(callTest
+      for (const d of devs.slice(0, DEV_MAX)) await fcmSend(token, fstr(d, "token"), (x => x)(strData(callTest
         ? { t: "call", call: "test_" + Date.now().toString(36), from: uid, type: "audio", title: "سوا — اختبار مكالمة", body: "📞 مكالمة تجريبيّة", ts: Date.now(), ring: "0" }
-        : { t: "test", title: "سوا — إشعار في الخلفيّة ✓", body: "وصل والتطبيق مغلق — الإشعارات والمكالمات ستصلك.", ts: Date.now() })).catch(() => {});
+        : { t: "test", title: "سوا — إشعار في الخلفيّة ✓", body: "وصل والتطبيق مغلق — الإشعارات والمكالمات ستصلك.", ts: Date.now() })), fstr(d, "lang")).catch(() => {});
       stat("push:test-bg");
     })());
     return { devices: devs.length, queued: true, delay: ms };
   }
   for (const d of devs.slice(0, DEV_MAX)) {
-    const dev = fstr(d, "token");
+    const dev = fstr(d, "token"), en = fstr(d, "lang") === "en";
+    const tdata = langData({ t: "test", title: "سوا — إشعار تجريبيّ ✓", body: "وصل الإشعار إلى هذا الجهاز. الرسائل والمكالمات ستصلك والتطبيق مغلق.", ts: now }, en);
     const res = await fetch("https://fcm.googleapis.com/v1/projects/" + PROJECT_ID + "/messages:send", {
       method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: { token: dev, data: strData({ t: "test", title: "سوا — إشعار تجريبيّ ✓", body: "وصل الإشعار إلى هذا الجهاز. الرسائل والمكالمات ستصلك والتطبيق مغلق.", ts: now }),
+      body: JSON.stringify({ message: { token: dev, data: strData(tdata),
         android: { priority: "HIGH", ttl: "120s" },
-        webpush: { headers: { Urgency: "high", TTL: "120" } }, apns: apnsOf({ t: "test", title: "سوا — إشعار تجريبيّ ✓", body: "وصل الإشعار إلى هذا الجهاز." }) } }) });
+        webpush: { headers: { Urgency: "high", TTL: "120" } }, apns: apnsOf(tdata) } }) });
     let err = "";
     if (!res.ok) { const txt = await res.text(); err = (txt.match(/"message":\s*"([^"]{1,160})"/) || [])[1] || ("HTTP " + res.status); if (/UNREGISTERED|registration-token-not-registered|NOT_FOUND/.test(txt)) { await fsCommit(token, [{ delete: d.name }]).catch(() => {}); err = "gone"; } }
     results.push({ ua: fstr(d, "ua").slice(0, 60), ts: fsInt(d, "ts"), ok: res.ok, err, tail: dev.slice(-8) });   // v54: ليعرف الهاتف «هذا أنا»
@@ -2404,6 +2406,54 @@ async function opPushUnregister(uid, payload, env) {
 }
 // v67 (C123): تطبيق iOS — APNs لا يُظهر رسائل البيانات الصامتة والتطبيق مغلق، فنرفق تنبيهاً مرئيّاً (يتجاهله أندرويد والمتصفّح).
 //   collapse-id: رنّات المكالمة المتكرّرة تحلّ محلّ بعضها بدل تكديس إشعارات · thread-id: يجمع إشعارات المحادثة الواحدة
+// v68: إشعاراتٌ بالإنجليزيّة لمن اختار الإنجليزيّة في التطبيق — النصوص الثابتة تُترجم والأسماء ونصّ الرسالة تبقى كما هي
+const EN_RULES = [
+  [/^سوا — إشعار تجريبيّ ✓$/, "Sawa — test notification ✓"],
+  [/^وصل الإشعار إلى هذا الجهاز\..*$/, "This device received the notification. Messages and calls will reach you even when the app is closed."],
+  [/^وصل الإشعار إلى هذا الجهاز\.$/, "This device received the notification."],
+  [/^سوا — إشعار في الخلفيّة ✓$/, "Sawa — background notification ✓"],
+  [/^وصل والتطبيق مغلق.*$/, "Received while the app was closed — notifications and calls will reach you."],
+  [/^سوا — اختبار مكالمة$/, "Sawa — call test"], [/^📞 مكالمة تجريبيّة$/, "📞 Test call"],
+  [/^🔒 رسالة مشفّرة$/, "🔒 Encrypted message"], [/^📷 صورة$/, "📷 Photo"], [/^🎥 فيديو$/, "🎥 Video"], [/^🎤 رسالة صوتيّة$/, "🎤 Voice message"],
+  [/^📎 ملفّ$/, "📎 File"], [/^📊 استطلاع$/, "📊 Poll"], [/^🧾 فاتورة$/, "🧾 Bill"], [/^💝 تبرّعات$/, "💝 Fundraiser"], [/^✅ مهامّ$/, "✅ Tasks"],
+  [/^👤 جهة اتّصال$/, "👤 Contact"], [/^📍 موقع$/, "📍 Location"],
+  [/^(.*): 🔒 رسالة مشفّرة$/, "$1: 🔒 Encrypted message"], [/^(.*): 📷 صورة$/, "$1: 📷 Photo"], [/^(.*): 🎥 فيديو$/, "$1: 🎥 Video"], [/^(.*): 🎤 رسالة صوتيّة$/, "$1: 🎤 Voice message"], [/^(.*): 📎 ملفّ$/, "$1: 📎 File"],
+  [/^(.*) أشار إليك في (.*)$/, "$1 mentioned you in $2"], [/^(.*) أشار إليك$/, "$1 mentioned you"],
+  [/^📹 مكالمة فيديو واردة(.*)$/, "📹 Incoming video call$1"], [/^📞 مكالمة صوتيّة واردة(.*)$/, "📞 Incoming voice call$1"],
+  [/^📹 مكالمة فيديو فائتة$/, "📹 Missed video call"], [/^📞 مكالمة فائتة$/, "📞 Missed call"],
+  [/^(📹 |📞 )(.*) يدعوك لمكالمة جماعيّة$/, "$1$2 invites you to a group call"],
+  [/^🎙 (.*) بدأ دردشة صوتيّة — انضمّ متى شئت$/, "🎙 $1 started a voice chat — join anytime"],
+  [/^📅 (.*) دعاك إلى غرفة سوا$/, "📅 $1 invited you to a Sawa room"], [/^📅 (.*) دعاك لمكالمة$/, "📅 $1 invited you to a call"],
+  [/^مكالمة فيديو(.*) — افتح «المكالمات المجدولة»$/, "Video call$1 — open Scheduled calls"], [/^مكالمة صوتيّة(.*) — افتح «المكالمات المجدولة»$/, "Voice call$1 — open Scheduled calls"],
+  [/^⏰ تذكير: غرفة سوا(.*)$/, "⏰ Reminder: Sawa room$1"], [/^⏰ تذكير: مكالمة فيديو(.*)$/, "⏰ Reminder: video call$1"], [/^⏰ تذكير: مكالمة صوتيّة(.*)$/, "⏰ Reminder: voice call$1"],
+  [/^تبدأ بعد (.*) — اضغط للدخول$/, (m, x) => "Starts in " + enMins(x) + " — tap to join"],
+  [/^تبدأ بعد (.*) — من «المكالمات المجدولة» اضغط «ابدأ الآن»$/, (m, x) => "Starts in " + enMins(x) + " — tap Start now in Scheduled calls"],
+  [/^حان الموعد — اضغط للدخول$/, "It's time — tap to join"], [/^حان الموعد — افتح «المكالمات المجدولة» وانضمّ$/, "It's time — open Scheduled calls and join"],
+  [/^طلب تواصل في سوا$/, "Contact request on Sawa"], [/^(.*) يريد التواصل معك$/, "$1 wants to connect with you"],
+  [/^قبل طلب التواصل — يمكنكما المراسلة الآن ✓$/, "Accepted your request — you can chat now ✓"],
+  [/^تأكيد رقم في سوا$/, "Confirm a number on Sawa"], [/^(.*) يطلب منك تأكيد أنّ رقمه (.*)$/, "$1 asks you to confirm their number is $2"],
+  [/^تأكّد رقمك ✓$/, "Your number is confirmed ✓"], [/^أكّد اثنان من معارفك رقمك (.*) — صار بإمكان معارفك إيجادك به$/, "Two contacts confirmed your number $1 — people you know can now find you by it"],
+  [/^طلب ربط في شجرة العائلة$/, "Family tree link request"], [/^(.*) يقول إنك «(.*)» في شجرة «(.*)» — هل هذا أنت؟$/, "$1 says you're “$2” in the “$3” tree — is this you?"],
+  [/^تمّ الربط ✓$/, "Linked ✓"], [/^(.*) أكّد أنّه «(.*)» في «(.*)»$/, "$1 confirmed they're “$2” in “$3”"],
+  [/^قريبك/, "Your relative"], [/^مستخدم سوا/, "A Sawa user"], [/^غرفة سوا$/, "Sawa room"], [/^سوا$/, "Sawa"],
+];
+function enMins(x) { const n = x === "دقيقة" ? 1 : x === "دقيقتين" ? 2 : parseInt(x, 10) || 0; return n === 1 ? "1 minute" : n + " minutes"; }
+function enText(v) {
+  let s = String(v == null ? "" : v);
+  for (const [re, to] of EN_RULES) { if (re.test(s)) { s = s.replace(re, to); } }
+  return s;
+}
+function langData(d, en) {
+  if (!en || !d) return d;
+  const o = Object.assign({}, d);
+  if (o.title != null) o.title = enText(o.title);
+  if (o.body != null && o.t !== "msg") o.body = enText(o.body);
+  else if (o.body != null) o.body = enMsgBody(o.body);
+  o.lang = "en";
+  return o;
+}
+// نصّ الرسالة نفسه لا يُترجم — فقط وصف المرفقات («📷 صورة»…) ورسالة التشفير
+function enMsgBody(b) { return enText(b); }
 function apnsOf(d) {
   const call = d.t === "call", ttl = call ? 45 : d.t === "test" ? 120 : 86400;
   const alert = { title: String(d.title || "سوا").slice(0, 120), body: String(d.body || "").slice(0, 400) };
@@ -2414,7 +2464,8 @@ function apnsOf(d) {
   if (cid) headers["apns-collapse-id"] = cid.slice(0, 64);
   return { headers, payload: { aps } };
 }
-async function fcmSend(token, devToken, data) {
+async function fcmSend(token, devToken, data, lang) {
+  if (lang === "en") data = langData(data, true);   // v68
   const res = await fetch("https://fcm.googleapis.com/v1/projects/" + PROJECT_ID + "/messages:send", {
     method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
     body: JSON.stringify({ message: { token: devToken, data: data,
@@ -2444,7 +2495,7 @@ async function pushTo(token, uids, data) {
     const devs = await devsOf(token, u);
     const du = typeof data === "function" ? await data(u) : data;   // v65: بيانات خاصّة بكلّ مستلم (توقيع الإقرار)
     for (const d of devs.slice(0, DEV_MAX)) {
-      const r = await fcmSend(token, fstr(d, "token"), du);
+      const r = await fcmSend(token, fstr(d, "token"), du, fstr(d, "lang"));
       if (r === "ok") { sent++; stat("push"); }
       else if (r === "gone") await fsCommit(token, [{ delete: d.name }]).catch(() => {});
     }
