@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v71-moments2";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v72-moments3";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2419,6 +2419,8 @@ const EN_RULES = [
   [/^📎 ملفّ$/, "📎 File"], [/^📊 استطلاع$/, "📊 Poll"], [/^🧾 فاتورة$/, "🧾 Bill"], [/^💝 تبرّعات$/, "💝 Fundraiser"], [/^✅ مهامّ$/, "✅ Tasks"],
   [/^👤 جهة اتّصال$/, "👤 Contact"], [/^📍 موقع$/, "📍 Location"],
   [/^(.*): 🔒 رسالة مشفّرة$/, "$1: 🔒 Encrypted message"], [/^(.*): 📷 صورة$/, "$1: 📷 Photo"], [/^(.*): 🎥 فيديو$/, "$1: 🎥 Video"], [/^(.*): 🎤 رسالة صوتيّة$/, "$1: 🎤 Voice message"], [/^(.*): 📎 ملفّ$/, "$1: 📎 File"],
+  [/^(.*) أشار إليك في لحظة$/, "$1 mentioned you in a moment"], [/^(.*) أشار إليك في تعليق$/, "$1 mentioned you in a comment"],   // C135
+  [/^(.*) ردّ على تعليقك$/, "$1 replied to your comment"], [/^(.*) أعجبه تعليقك$/, "$1 liked your comment"],
   [/^(.*) أشار إليك في (.*)$/, "$1 mentioned you in $2"], [/^(.*) أشار إليك$/, "$1 mentioned you"],
   [/^📹 مكالمة فيديو واردة(.*)$/, "📹 Incoming video call$1"], [/^📞 مكالمة صوتيّة واردة(.*)$/, "📞 Incoming voice call$1"],
   [/^📹 مكالمة فيديو فائتة$/, "📹 Missed video call"], [/^📞 مكالمة فائتة$/, "📞 Missed call"],
@@ -3717,7 +3719,7 @@ async function momGet(token, pid) { const d = await fsGet(token, "moments/" + pi
 function momCanSee(doc, uid) { return !!doc && fsArr(doc, "aud").indexOf(uid) >= 0; }
 async function momPrefs(token, uid) {
   const d = await fsGet(token, "mset/" + uid).catch(() => null);
-  return { close: fsArr(d, "close"), hide: fsArr(d, "hide"), mute: fsArr(d, "mute") };
+  return { close: fsArr(d, "close"), hide: fsArr(d, "hide"), mute: fsArr(d, "mute"), seen: fsInt(d, "seen") };
 }
 // C133b: إزالة أشخاصٍ من جمهور كلّ لحظاتي السابقة (حين أُخفي عنهم لحظاتي أو أحظرهم) — الجمهور يُحسب عند النشر فيجب تنظيفه بعده
 async function momStrip(token, uid, uids) {
@@ -3738,8 +3740,8 @@ async function opMomentPrefs(uid, payload, env) {
   const p = payload || {}, cur = await momPrefs(token, uid);
   const clean = (a) => [...new Set((Array.isArray(a) ? a : []).map(String).filter(u => segOk(u) && u !== uid))].slice(0, 1000);
   if (!Array.isArray(p.close) && !Array.isArray(p.hide) && !Array.isArray(p.mute)) return cur;
-  const next = { close: Array.isArray(p.close) ? clean(p.close) : cur.close, hide: Array.isArray(p.hide) ? clean(p.hide) : cur.hide, mute: Array.isArray(p.mute) ? clean(p.mute) : cur.mute };
-  await fsCommit(token, [{ update: { name: DOC_ROOT + "/mset/" + uid, fields: { close: toFsValue(next.close), hide: toFsValue(next.hide), mute: toFsValue(next.mute), ts: { integerValue: String(Date.now()) } } } }]);
+  const next = { seen: cur.seen, close: Array.isArray(p.close) ? clean(p.close) : cur.close, hide: Array.isArray(p.hide) ? clean(p.hide) : cur.hide, mute: Array.isArray(p.mute) ? clean(p.mute) : cur.mute };
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/mset/" + uid, fields: { close: toFsValue(next.close), hide: toFsValue(next.hide), mute: toFsValue(next.mute), ts: { integerValue: String(Date.now()) } } }, updateMask: { fieldPaths: ["close", "hide", "mute", "ts"] } }]);   // C135: يبقى seen
   // «لا تُظهر لحظاتي لـ» يشمل اللحظات السابقة أيضاً
   const added = next.hide.filter(u => cur.hide.indexOf(u) < 0);
   if (added.length) next.stripped = await momStrip(token, uid, added).catch(() => 0);
@@ -3787,7 +3789,7 @@ async function momAudience(token, uid, a, hideExtra) {
   list = list.filter(u => !blk.has(u));
   return { aud: [uid].concat(list), label, n: list.length };
 }
-async function opMomentPost(uid, payload, env, claims) {
+async function opMomentPost(uid, payload, env, claims, ctx) {
   if (!codeRate(uid, "mom", 30)) throw new Error("rate_limited");
   const p = payload || {}, pid = String(p.pid || "");
   if (!momPidOk(pid)) throw new Error("bad id");
@@ -3820,15 +3822,22 @@ async function opMomentPost(uid, payload, env, claims) {
   if (!text.trim() && !media.length && !poll && !loc) throw new Error("empty");
   const [au, name] = await Promise.all([momAudience(token, uid, p.aud, p.hide), myName(token, uid, claims)]);
   const now = Date.now();
+  const { men, menN } = momMen(p.men, au.aud, uid);   // C135
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/moments/" + pid, fields: {
     by: { stringValue: uid }, name: { stringValue: String(name || "").slice(0, 80) }, aud: toFsValue(au.aud), mode: { stringValue: au.label },
     text: { stringValue: text }, media: toFsValue(media), loc: loc ? toFsValue(loc) : { nullValue: null }, poll: poll ? toFsValue(poll) : { nullValue: null },
-    votes: { mapValue: { fields: {} } }, likes: { arrayValue: { values: [] } }, cc: { integerValue: "0" }, ts: { integerValue: String(now) } } },
+    votes: { mapValue: { fields: {} } }, likes: { arrayValue: { values: [] } }, cc: { integerValue: "0" }, ts: { integerValue: String(now) },
+    men: toFsValue(men), menN: toFsValue(menN) } },
     currentDocument: { exists: false } }]);
   const del = media.map(m => ({ delete: DOC_ROOT + "/momentq/" + pid + "~" + m.mid }));
   if (del.length) await fsCommit(token, del).catch(() => {});
   stat("moment:post");
-  return { pid, aud: au.n, mode: au.label };
+  if (men.length) {
+    const rcp = {}; men.forEach(u => { rcp[u] = "mention"; });
+    const fake = { name: DOC_ROOT + "/moments/" + pid, fields: { aud: toFsValue(au.aud), text: { stringValue: text }, by: { stringValue: uid } } };
+    await momNotes(token, env, ctx, fake, uid, claims, rcp, { text: text || "📷" }).catch(e => console.log("mention:", e && e.message));
+  }
+  return { pid, aud: au.n, mode: au.label, men: men.length };
 }
 async function momDropMedia(token, pid, it) {
   if (!it || !momMidOk(String(it.mid || ""))) return;
@@ -3849,58 +3858,181 @@ async function opMomentDelete(uid, payload, env, claims) {
   await fsCommit(token, [{ delete: DOC_ROOT + "/moments/" + pid }]);
   return { deleted: true };
 }
-async function momNotify(token, env, ctx, doc, uid, claims, kind, extra) {
-  const owner = fstr(doc, "by");
-  if (!owner || owner === uid) return;
-  const blk = await blockedSet(token, [owner], uid); if (blk.has(owner)) return;
-  const me = (await myName(token, uid, claims)) || "مستخدم سوا";
-  const title = kind === "like" ? me + " أعجبته لحظتك" : me + " علّق على لحظتك";
-  const body = kind === "like" ? "❤️ " + (fstr(doc, "text") || "").slice(0, 80) : String(extra || "").slice(0, 120);
-  const job = pushTo(token, [owner], strData({ t: "moment", pid: doc.name.split("/").pop(), from: uid, title, body, ts: Date.now() })).catch(e => console.log("push:", e && e.message));
+// C135: الإشعارات داخل التطبيق (mnote/{uid}/n/{nid}) + إشعار الهاتف — لصاحب اللحظة · لصاحب التعليق المردود عليه · لمن ذُكروا بـ@
+//   nid = "n" + (9e12 − الوقت) بأساس ٣٦ ⇒ ترتيب المعرّفات = الأحدث أوّلاً (بلا فهرس) · k: like | comment | reply | mention | mentionc | creact
+const MOM_RX = ["❤️", "😂", "😮", "😢", "👏", "🤲"];
+function momRid() { let n = (9e12 - Date.now()).toString(36); while (n.length < 9) n = "0" + n; return n.slice(-9) + Math.random().toString(36).slice(2, 6).padEnd(4, "0"); }
+function momCmidOk(c) { return typeof c === "string" && /^c[0-9a-z]{6,20}$/.test(c); }
+// الإشارات: [{u, n}] أو معرّفات ⇒ من في جمهور اللحظة فقط (لا يُشار إلى من لا يراها) · ≤ ٢٠
+function momMen(raw, aud, uid) {
+  const out = [], names = {};
+  for (const x of (Array.isArray(raw) ? raw : []).slice(0, 40)) {
+    const u = String(x && typeof x === "object" ? x.u : x || ""), n = x && typeof x === "object" ? String(x.n || "").replace(/\s+/g, " ").trim().slice(0, 60) : "";
+    if (!segOk(u) || u === uid || aud.indexOf(u) < 0 || out.indexOf(u) >= 0) continue;
+    out.push(u); if (n) names[u] = n;
+    if (out.length >= 20) break;
+  }
+  return { men: out, menN: names };
+}
+const MOM_NOTE_TXT = {
+  like: (me) => me + " أعجبته لحظتك", comment: (me) => me + " علّق على لحظتك", reply: (me) => me + " ردّ على تعليقك",
+  mention: (me) => me + " أشار إليك في لحظة", mentionc: (me) => me + " أشار إليك في تعليق", creact: (me) => me + " أعجبه تعليقك",
+};
+// rcp: { uid: kind } — يُستبعد الفاعل ومن ليس في الجمهور ومن بيني وبينه حظر · الإعجاب بالتعليق: داخل التطبيق فقط (بلا إشعار هاتف)
+async function momNotes(token, env, ctx, doc, uid, claims, rcp, extra) {
+  const aud = fsArr(doc, "aud"), pid = doc.name.split("/").pop();
+  let to = Object.keys(rcp || {}).filter(u => u && u !== uid && aud.indexOf(u) >= 0);
+  if (!to.length) return 0;
+  const mine = (await rtdbGet(token, "blk/" + uid).catch(() => null)) || {};
+  to = to.filter(u => mine[u] !== true);
+  const blk = to.length ? await blockedSet(token, to, uid) : new Set();
+  to = to.filter(u => !blk.has(u));
+  if (!to.length) return 0;
+  const me = String((await myName(token, uid, claims)) || "مستخدم سوا").slice(0, 80), now = Date.now();
+  const snip = String((extra && extra.text) || fstr(doc, "text") || "").replace(/\s+/g, " ").slice(0, 140);
+  const writes = to.map(u => {
+    const f = { k: { stringValue: rcp[u] }, pid: { stringValue: pid }, from: { stringValue: uid }, name: { stringValue: me }, text: { stringValue: snip }, ts: { integerValue: String(now) } };
+    if (extra && extra.cm) f.cm = { stringValue: extra.cm };
+    if (extra && extra.e) f.e = { stringValue: extra.e };
+    return { update: { name: DOC_ROOT + "/mnote/" + u + "/n/n" + momRid(), fields: f } };
+  });
+  await fsCommit(token, writes).catch(e => console.log("mnote:", e && e.message));
+  const jobs = to.filter(u => rcp[u] !== "creact").map(u => {
+    const k = rcp[u], title = MOM_NOTE_TXT[k](me);
+    const body = k === "like" ? ((extra && extra.e) || "❤️") + " " + snip.slice(0, 80) : snip.slice(0, 120);
+    const d = { t: "moment", pid, from: uid, k, title, body, ts: now }; if (extra && extra.cm) d.cm = extra.cm;
+    return pushTo(token, [u], strData(d)).catch(e => console.log("push:", e && e.message));
+  });
+  const job = Promise.all(jobs);
   if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
+  return to.length;
 }
 async function opMomentLike(uid, payload, env, claims, ctx) {
   if (!codeRate(uid, "moml", 300)) throw new Error("rate_limited");
   const pid = String((payload && payload.pid) || ""), on = !!(payload && payload.on);
+  const e = MOM_RX.indexOf(String((payload && payload.e) || "")) >= 0 ? String(payload.e) : "❤️";
   if (!momPidOk(pid)) throw new Error("bad id");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const doc = await momGet(token, pid);
   if (!momCanSee(doc, uid)) throw new Error("not found");
-  const had = fsArr(doc, "likes").indexOf(uid) >= 0;
-  if (had === on) return { on };
-  await fsCommit(token, [{ update: { name: DOC_ROOT + "/moments/" + pid }, updateMask: { fieldPaths: [] },
-    updateTransforms: [{ fieldPath: "likes", [on ? "appendMissingElements" : "removeAllFromArray"]: { values: [{ stringValue: uid }] } }], currentDocument: { exists: true } }]);
-  if (on) await momNotify(token, env, ctx, doc, uid, claims, "like");
-  return { on };
+  const had = fsArr(doc, "likes").indexOf(uid) >= 0, rx = momMap(doc, "rx") || {};
+  if (had === on && (!on || rx[uid] === e)) return { on, e };
+  const w = { update: { name: DOC_ROOT + "/moments/" + pid, fields: on ? { rx: { mapValue: { fields: { [uid]: { stringValue: e } } } } } : {} },
+    updateMask: { fieldPaths: [fp("rx", uid)] }, currentDocument: { exists: true } };
+  if (had !== on) w.updateTransforms = [{ fieldPath: "likes", [on ? "appendMissingElements" : "removeAllFromArray"]: { values: [{ stringValue: uid }] } }];
+  await fsCommit(token, [w]);
+  if (on && !had) await momNotes(token, env, ctx, doc, uid, claims, { [fstr(doc, "by")]: "like" }, { e });
+  return { on, e };
 }
 async function opMomentComment(uid, payload, env, claims, ctx) {
   if (!codeRate(uid, "momc", 120)) throw new Error("rate_limited");
-  const pid = String((payload && payload.pid) || ""), text = String((payload && payload.text) || "").replace(/\r/g, "").trim().slice(0, MOM_CMT);
+  const p = payload || {}, pid = String(p.pid || ""), text = String(p.text || "").replace(/\r/g, "").trim().slice(0, MOM_CMT);
   if (!momPidOk(pid)) throw new Error("bad id");
   if (!text) throw new Error("empty");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const doc = await momGet(token, pid);
   if (!momCanSee(doc, uid)) throw new Error("not found");
+  // الردّ: سلسلةٌ بمستوى واحد — الردّ على ردٍّ يُعلَّق تحت التعليق الأصل ويُبلَّغ صاحب الردّ
+  let re = null, reBy = null, reName = "";
+  if (p.re) {
+    const r0 = String(p.re);
+    if (!momCmidOk(r0)) throw new Error("bad id: re");
+    const pc = await fsGet(token, "moments/" + pid + "/cm/" + r0).catch(() => null);
+    if (!pc || !pc.fields) throw new Error("comment gone");
+    re = fstr(pc, "re") || r0; reBy = fstr(pc, "by"); reName = fstr(pc, "name");
+  }
+  const { men, menN } = momMen(p.men, fsArr(doc, "aud"), uid);
   const now = Date.now(), cmid = "c" + now.toString(36) + Math.random().toString(36).slice(2, 6);
-  const name = await myName(token, uid, claims);
+  const name = String((await myName(token, uid, claims)) || "").slice(0, 80);
+  const f = { by: { stringValue: uid }, name: { stringValue: name }, text: { stringValue: text }, ts: { integerValue: String(now) }, likes: { arrayValue: { values: [] } } };
+  if (re) { f.re = { stringValue: re }; f.reBy = { stringValue: reBy || "" }; f.reName = { stringValue: String(reName || "").slice(0, 80) }; }
+  if (men.length) { f.men = toFsValue(men); f.menN = toFsValue(menN); }
   await fsCommit(token, [
-    { update: { name: DOC_ROOT + "/moments/" + pid + "/cm/" + cmid, fields: { by: { stringValue: uid }, name: { stringValue: String(name || "").slice(0, 80) }, text: { stringValue: text }, ts: { integerValue: String(now) } } } },
-    { update: { name: DOC_ROOT + "/moments/" + pid }, updateMask: { fieldPaths: [] }, updateTransforms: [{ fieldPath: "cc", increment: { integerValue: "1" } }], currentDocument: { exists: true } },
+    { update: { name: DOC_ROOT + "/moments/" + pid + "/cm/" + cmid, fields: f } },
+    { update: { name: DOC_ROOT + "/moments/" + pid, fields: { lastC: toFsValue({ id: cmid, by: uid, name, text: text.slice(0, 160), ts: now }) } }, updateMask: { fieldPaths: ["lastC"] },
+      updateTransforms: [{ fieldPath: "cc", increment: { integerValue: "1" } }], currentDocument: { exists: true } },
   ]);
-  await momNotify(token, env, ctx, doc, uid, claims, "comment", text);
-  return { cmid, ts: now };
+  const rcp = {}; rcp[fstr(doc, "by")] = "comment";
+  if (reBy) rcp[reBy] = "reply";
+  men.forEach(u => { rcp[u] = "mentionc"; });
+  await momNotes(token, env, ctx, doc, uid, claims, rcp, { text, cm: cmid });
+  return { cmid, ts: now, re };
+}
+async function momLastC(token, pid) {
+  const cms = await fsList(token, "moments/" + pid + "/cm").catch(() => []);
+  let best = null;
+  for (const d of cms) { const ts = fsInt(d, "ts"); if (!best || ts > best.ts) best = { id: d.name.split("/").pop(), by: fstr(d, "by"), name: fstr(d, "name"), text: fstr(d, "text").slice(0, 160), ts }; }
+  return { best, n: cms.length };
 }
 async function opMomentUncomment(uid, payload, env, claims) {
   const pid = String((payload && payload.pid) || ""), cmid = String((payload && payload.cmid) || "");
-  if (!momPidOk(pid) || !/^c[0-9a-z]{6,20}$/.test(cmid)) throw new Error("bad id");
+  if (!momPidOk(pid) || !momCmidOk(cmid)) throw new Error("bad id");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const doc = await momGet(token, pid);
   const cm = await fsGet(token, "moments/" + pid + "/cm/" + cmid).catch(() => null);
   if (!doc || !cm || !cm.fields) return { deleted: false };
   if (fstr(cm, "by") !== uid && fstr(doc, "by") !== uid && !isAdmin(env, claims)) throw new Error("not yours");
-  await fsCommit(token, [{ delete: cm.name },
-    { update: { name: DOC_ROOT + "/moments/" + pid }, updateMask: { fieldPaths: [] }, updateTransforms: [{ fieldPath: "cc", increment: { integerValue: "-1" } }], currentDocument: { exists: true } }]);
-  return { deleted: true };
+  // حذف تعليقٍ أصل يحذف ردوده معه
+  const del = [cm.name];
+  if (!fstr(cm, "re")) {
+    const all = await fsList(token, "moments/" + pid + "/cm").catch(() => []);
+    all.forEach(d => { if (fstr(d, "re") === cmid) del.push(d.name); });
+  }
+  for (let i = 0; i < del.length; i += 100) await fsCommit(token, del.slice(i, i + 100).map(n => ({ delete: n })));
+  const { best, n } = await momLastC(token, pid);
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/moments/" + pid, fields: { cc: { integerValue: String(n) }, lastC: best ? toFsValue(best) : { nullValue: null } } },
+    updateMask: { fieldPaths: ["cc", "lastC"] }, currentDocument: { exists: true } }]).catch(() => {});
+  return { deleted: true, n: del.length };
+}
+// الإعجاب بتعليق (يراه صاحبه في إشعارات اللحظات — بلا إشعار هاتف)
+async function opMomentCReact(uid, payload, env, claims, ctx) {
+  if (!codeRate(uid, "momr", 300)) throw new Error("rate_limited");
+  const pid = String((payload && payload.pid) || ""), cmid = String((payload && payload.cmid) || ""), on = !!(payload && payload.on);
+  if (!momPidOk(pid) || !momCmidOk(cmid)) throw new Error("bad id");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const doc = await momGet(token, pid);
+  if (!momCanSee(doc, uid)) throw new Error("not found");
+  const cm = await fsGet(token, "moments/" + pid + "/cm/" + cmid).catch(() => null);
+  if (!cm || !cm.fields) throw new Error("comment gone");
+  const had = fsArr(cm, "likes").indexOf(uid) >= 0;
+  if (had === on) return { on };
+  await fsCommit(token, [{ update: { name: cm.name }, updateMask: { fieldPaths: [] },
+    updateTransforms: [{ fieldPath: "likes", [on ? "appendMissingElements" : "removeAllFromArray"]: { values: [{ stringValue: uid }] } }], currentDocument: { exists: true } }]);
+  if (on) await momNotes(token, env, ctx, doc, uid, claims, { [fstr(cm, "by")]: "creact" }, { text: fstr(cm, "text"), cm: cmid });
+  return { on };
+}
+// تعديل نصّ لحظتي (والإشارات) — يُبلَّغ من أُضيفت الإشارة إليه فقط
+async function opMomentEdit(uid, payload, env, claims, ctx) {
+  if (!codeRate(uid, "mome", 60)) throw new Error("rate_limited");
+  const p = payload || {}, pid = String(p.pid || "");
+  if (!momPidOk(pid)) throw new Error("bad id");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const doc = await momGet(token, pid);
+  if (!doc) throw new Error("not found");
+  if (fstr(doc, "by") !== uid) throw new Error("not yours");
+  const text = String(p.text || "").replace(/\r/g, "").slice(0, MOM_TEXT);
+  if (!text.trim() && !(momMap(doc, "media") || []).length && !momMap(doc, "poll") && !momMap(doc, "loc")) throw new Error("empty");
+  const { men, menN } = momMen(p.men, fsArr(doc, "aud"), uid);
+  const old = fsArr(doc, "men"), now = Date.now();
+  await fsCommit(token, [{ update: { name: doc.name, fields: { text: { stringValue: text }, men: toFsValue(men), menN: toFsValue(menN), edited: { integerValue: String(now) } } },
+    updateMask: { fieldPaths: ["text", "men", "menN", "edited"] }, currentDocument: { exists: true } }]);
+  const rcp = {}; men.filter(u => old.indexOf(u) < 0).forEach(u => { rcp[u] = "mention"; });
+  if (Object.keys(rcp).length) await momNotes(token, env, ctx, doc, uid, claims, rcp, { text });
+  return { edited: now, men: men.length };
+}
+// فتحتُ الإشعارات ⇒ وقت آخر اطّلاع (يُزامَن على كلّ أجهزتي) + تنظيف ما تجاوز ٣٠ يوماً
+async function opMomentSeen(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const ts = Math.min(Date.now(), Math.floor(Number(payload && payload.ts) || Date.now()));
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/mset/" + uid, fields: { seen: { integerValue: String(ts) } } }, updateMask: { fieldPaths: ["seen"] } }]);
+  let gc = 0;
+  try {
+    const res = await fetch(FS_BASE + "/mnote/" + uid + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "n" }], orderBy: [{ field: { fieldPath: "__name__" }, direction: "DESCENDING" }], limit: 60 } }) });
+    const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document).filter(d => fsInt(d, "ts") < Date.now() - 30 * 86400000);
+    if (rows.length) { await fsCommit(token, rows.map(d => ({ delete: d.name }))); gc = rows.length; }
+  } catch (e) { console.log("mnote gc:", e && e.message); }
+  return { seen: ts, gc };
 }
 async function opMomentVote(uid, payload, env) {
   if (!codeRate(uid, "momv", 120)) throw new Error("rate_limited");
@@ -4578,12 +4710,15 @@ export default {
       if (op === "admin.reports") { const r = await opAdminReports(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "admin.reportClose") { const r = await opAdminReportClose(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "moment.begin") { const r = await opMomentBegin(uid, body.payload, env); return json({ ok: true, ...r }); }
-      if (op === "moment.post") { const r = await opMomentPost(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "moment.post") { const r = await opMomentPost(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "moment.delete") { const r = await opMomentDelete(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "moment.like") { const r = await opMomentLike(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "moment.comment") { const r = await opMomentComment(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "moment.uncomment") { const r = await opMomentUncomment(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "moment.vote") { const r = await opMomentVote(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "moment.creact") { const r = await opMomentCReact(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }   // C135
+      if (op === "moment.edit") { const r = await opMomentEdit(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "moment.seen") { const r = await opMomentSeen(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "moment.prefs") { const r = await opMomentPrefs(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "qa.rate") { const r = await opQaRate(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "admin.qa") { const r = await opAdminQa(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
