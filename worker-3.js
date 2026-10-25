@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v70-moments";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v71-moments2";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1952,6 +1952,7 @@ async function opChatPrefs(uid, payload, env) {
   const bl = Array.isArray(data.blocked) ? data.blocked.filter(x => segOk(String(x))).slice(0, 500) : [];
   if ((set && "blocked" in set) || bl.length) {
     try { await rtdbPatch(token, { ["blk/" + uid]: bl.length ? Object.fromEntries(bl.map(x => [x, true])) : null }); } catch (e) { console.log("blk:", e && e.message); }
+    if (set && "blocked" in set && bl.length) { try { await momStrip(token, uid, bl); } catch (e) { console.log("momStrip:", e && e.message); } }   // C133b: المحظور لا يرى لحظاتي السابقة
   }
   return { prefs: data };
 }
@@ -3716,15 +3717,32 @@ async function momGet(token, pid) { const d = await fsGet(token, "moments/" + pi
 function momCanSee(doc, uid) { return !!doc && fsArr(doc, "aud").indexOf(uid) >= 0; }
 async function momPrefs(token, uid) {
   const d = await fsGet(token, "mset/" + uid).catch(() => null);
-  return { close: fsArr(d, "close"), hide: fsArr(d, "hide") };
+  return { close: fsArr(d, "close"), hide: fsArr(d, "hide"), mute: fsArr(d, "mute") };
+}
+// C133b: إزالة أشخاصٍ من جمهور كلّ لحظاتي السابقة (حين أُخفي عنهم لحظاتي أو أحظرهم) — الجمهور يُحسب عند النشر فيجب تنظيفه بعده
+async function momStrip(token, uid, uids) {
+  uids = (uids || []).filter(u => segOk(String(u)) && u !== uid);
+  if (!uids.length) return 0;
+  const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "moments" }], where: { fieldFilter: { field: { fieldPath: "by" }, op: "EQUAL", value: { stringValue: uid } } }, limit: 300 } }) });
+  const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+  const hit = rows.filter(d => fsArr(d, "aud").some(u => uids.indexOf(u) >= 0));
+  for (let i = 0; i < hit.length; i += 100) {
+    await fsCommit(token, hit.slice(i, i + 100).map(d => ({ update: { name: d.name }, updateMask: { fieldPaths: [] },
+      updateTransforms: [{ fieldPath: "aud", removeAllFromArray: { values: uids.map(u => ({ stringValue: u })) } }] }))).catch(e => console.log("momStrip:", e && e.message));
+  }
+  return hit.length;
 }
 async function opMomentPrefs(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const p = payload || {}, cur = await momPrefs(token, uid);
   const clean = (a) => [...new Set((Array.isArray(a) ? a : []).map(String).filter(u => segOk(u) && u !== uid))].slice(0, 1000);
-  if (!Array.isArray(p.close) && !Array.isArray(p.hide)) return cur;
-  const next = { close: Array.isArray(p.close) ? clean(p.close) : cur.close, hide: Array.isArray(p.hide) ? clean(p.hide) : cur.hide };
-  await fsCommit(token, [{ update: { name: DOC_ROOT + "/mset/" + uid, fields: { close: toFsValue(next.close), hide: toFsValue(next.hide), ts: { integerValue: String(Date.now()) } } } }]);
+  if (!Array.isArray(p.close) && !Array.isArray(p.hide) && !Array.isArray(p.mute)) return cur;
+  const next = { close: Array.isArray(p.close) ? clean(p.close) : cur.close, hide: Array.isArray(p.hide) ? clean(p.hide) : cur.hide, mute: Array.isArray(p.mute) ? clean(p.mute) : cur.mute };
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/mset/" + uid, fields: { close: toFsValue(next.close), hide: toFsValue(next.hide), mute: toFsValue(next.mute), ts: { integerValue: String(Date.now()) } } } }]);
+  // «لا تُظهر لحظاتي لـ» يشمل اللحظات السابقة أيضاً
+  const added = next.hide.filter(u => cur.hide.indexOf(u) < 0);
+  if (added.length) next.stripped = await momStrip(token, uid, added).catch(() => 0);
   return next;
 }
 async function opMomentBegin(uid, payload, env) {
@@ -3762,6 +3780,9 @@ async function momAudience(token, uid, a, hideExtra) {
   } else { list = Object.keys(contacts); label = "contacts"; }
   const hide = new Set(prefs.hide.concat(Array.isArray(hideExtra) ? hideExtra.map(String) : []));
   list = [...new Set(list)].filter(u => u !== uid && segOk(u) && !hide.has(u)).slice(0, 1500);
+  // الحظر بالاتّجاهين: من حظرني (blk/{هو}/{أنا}) ومن حظرتُه (blk/{أنا})
+  const mine = (await rtdbGet(token, "blk/" + uid).catch(() => null)) || {};
+  list = list.filter(u => mine[u] !== true);
   const blk = list.length ? await blockedSet(token, list, uid) : new Set();
   list = list.filter(u => !blk.has(u));
   return { aud: [uid].concat(list), label, n: list.length };
