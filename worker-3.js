@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v73-moments4";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v74-moments5";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -3805,6 +3805,8 @@ async function opMomentPost(uid, payload, env, claims, ctx) {
     if (!md || fstr(md, "by") !== uid || !fbool(md, "done")) throw new Error("media not uploaded");
     const it = { mid, t, mime: fstr(md, "mime").slice(0, 100), size: fsInt(md, "size"), n: fsInt(md, "n") };
     if (m.thumb && typeof m.thumb === "string" && m.thumb.length <= 8000 && /^data:image\/(jpeg|png|webp);base64,/.test(m.thumb)) it.thumb = m.thumb;
+    // C137: غلاف الفيديو الواضح (≤ ١٢٠ ألف حرف ≈ ٩٠ كيلوبايت) — فيديو واحد في اللحظة فيبقى المستند صغيراً
+    if (t === "video" && m.poster && typeof m.poster === "string" && m.poster.length <= 120000 && /^data:image\/jpeg;base64,/.test(m.poster)) it.poster = m.poster;
     if (Number(m.w) > 0 && Number(m.h) > 0) { it.w = Math.round(Number(m.w)); it.h = Math.round(Number(m.h)); }
     if (t === "video") it.dur = Math.max(1, Math.min(31, Math.round(Number(m.dur) || 15)));
     media.push(it);
