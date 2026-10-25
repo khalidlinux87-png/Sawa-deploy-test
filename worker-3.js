@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v72-moments3";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v73-moments4";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2420,7 +2420,7 @@ const EN_RULES = [
   [/^👤 جهة اتّصال$/, "👤 Contact"], [/^📍 موقع$/, "📍 Location"],
   [/^(.*): 🔒 رسالة مشفّرة$/, "$1: 🔒 Encrypted message"], [/^(.*): 📷 صورة$/, "$1: 📷 Photo"], [/^(.*): 🎥 فيديو$/, "$1: 🎥 Video"], [/^(.*): 🎤 رسالة صوتيّة$/, "$1: 🎤 Voice message"], [/^(.*): 📎 ملفّ$/, "$1: 📎 File"],
   [/^(.*) أشار إليك في لحظة$/, "$1 mentioned you in a moment"], [/^(.*) أشار إليك في تعليق$/, "$1 mentioned you in a comment"],   // C135
-  [/^(.*) ردّ على تعليقك$/, "$1 replied to your comment"], [/^(.*) أعجبه تعليقك$/, "$1 liked your comment"],
+  [/^(.*) ردّ على تعليقك$/, "$1 replied to your comment"], [/^(.*) تفاعل مع لحظتك$/, "$1 reacted to your moment"], [/^(.*) أعجبه تعليقك$/, "$1 liked your comment"],
   [/^(.*) أشار إليك في (.*)$/, "$1 mentioned you in $2"], [/^(.*) أشار إليك$/, "$1 mentioned you"],
   [/^📹 مكالمة فيديو واردة(.*)$/, "📹 Incoming video call$1"], [/^📞 مكالمة صوتيّة واردة(.*)$/, "📞 Incoming voice call$1"],
   [/^📹 مكالمة فيديو فائتة$/, "📹 Missed video call"], [/^📞 مكالمة فائتة$/, "📞 Missed call"],
@@ -3860,7 +3860,7 @@ async function opMomentDelete(uid, payload, env, claims) {
 }
 // C135: الإشعارات داخل التطبيق (mnote/{uid}/n/{nid}) + إشعار الهاتف — لصاحب اللحظة · لصاحب التعليق المردود عليه · لمن ذُكروا بـ@
 //   nid = "n" + (9e12 − الوقت) بأساس ٣٦ ⇒ ترتيب المعرّفات = الأحدث أوّلاً (بلا فهرس) · k: like | comment | reply | mention | mentionc | creact
-const MOM_RX = ["❤️", "😂", "😮", "😢", "👏", "🤲"];
+const MOM_RX = ["❤️", "😍", "😂", "😊", "😮", "😢", "😭", "😡", "👏", "🤲"];   // C136
 function momRid() { let n = (9e12 - Date.now()).toString(36); while (n.length < 9) n = "0" + n; return n.slice(-9) + Math.random().toString(36).slice(2, 6).padEnd(4, "0"); }
 function momCmidOk(c) { return typeof c === "string" && /^c[0-9a-z]{6,20}$/.test(c); }
 // الإشارات: [{u, n}] أو معرّفات ⇒ من في جمهور اللحظة فقط (لا يُشار إلى من لا يراها) · ≤ ٢٠
@@ -3898,7 +3898,7 @@ async function momNotes(token, env, ctx, doc, uid, claims, rcp, extra) {
   });
   await fsCommit(token, writes).catch(e => console.log("mnote:", e && e.message));
   const jobs = to.filter(u => rcp[u] !== "creact").map(u => {
-    const k = rcp[u], title = MOM_NOTE_TXT[k](me);
+    const k = rcp[u], title = k === "like" && extra && extra.e && extra.e !== "❤️" ? me + " تفاعل مع لحظتك" : MOM_NOTE_TXT[k](me);
     const body = k === "like" ? ((extra && extra.e) || "❤️") + " " + snip.slice(0, 80) : snip.slice(0, 120);
     const d = { t: "moment", pid, from: uid, k, title, body, ts: now }; if (extra && extra.cm) d.cm = extra.cm;
     return pushTo(token, [u], strData(d)).catch(e => console.log("push:", e && e.message));
@@ -3988,18 +3988,45 @@ async function opMomentUncomment(uid, payload, env, claims) {
 async function opMomentCReact(uid, payload, env, claims, ctx) {
   if (!codeRate(uid, "momr", 300)) throw new Error("rate_limited");
   const pid = String((payload && payload.pid) || ""), cmid = String((payload && payload.cmid) || ""), on = !!(payload && payload.on);
+  const e = MOM_RX.indexOf(String((payload && payload.e) || "")) >= 0 ? String(payload.e) : "❤️";   // C136: تفاعلٌ على التعليق
   if (!momPidOk(pid) || !momCmidOk(cmid)) throw new Error("bad id");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const doc = await momGet(token, pid);
   if (!momCanSee(doc, uid)) throw new Error("not found");
   const cm = await fsGet(token, "moments/" + pid + "/cm/" + cmid).catch(() => null);
   if (!cm || !cm.fields) throw new Error("comment gone");
-  const had = fsArr(cm, "likes").indexOf(uid) >= 0;
-  if (had === on) return { on };
-  await fsCommit(token, [{ update: { name: cm.name }, updateMask: { fieldPaths: [] },
-    updateTransforms: [{ fieldPath: "likes", [on ? "appendMissingElements" : "removeAllFromArray"]: { values: [{ stringValue: uid }] } }], currentDocument: { exists: true } }]);
-  if (on) await momNotes(token, env, ctx, doc, uid, claims, { [fstr(cm, "by")]: "creact" }, { text: fstr(cm, "text"), cm: cmid });
-  return { on };
+  const had = fsArr(cm, "likes").indexOf(uid) >= 0, rx = momMap(cm, "rx") || {};
+  if (had === on && (!on || rx[uid] === e)) return { on, e };
+  const w = { update: { name: cm.name, fields: on ? { rx: { mapValue: { fields: { [uid]: { stringValue: e } } } } } : {} },
+    updateMask: { fieldPaths: [fp("rx", uid)] }, currentDocument: { exists: true } };
+  if (had !== on) w.updateTransforms = [{ fieldPath: "likes", [on ? "appendMissingElements" : "removeAllFromArray"]: { values: [{ stringValue: uid }] } }];
+  await fsCommit(token, [w]);
+  if (on && !had) await momNotes(token, env, ctx, doc, uid, claims, { [fstr(cm, "by")]: "creact" }, { text: fstr(cm, "text"), cm: cmid, e });
+  return { on, e };
+}
+// C136: تعديل تعليقي أو ردّي (والإشارات) — يُبلَّغ من أُضيفت الإشارة إليه فقط
+async function opMomentCEdit(uid, payload, env, claims, ctx) {
+  if (!codeRate(uid, "momce", 60)) throw new Error("rate_limited");
+  const p = payload || {}, pid = String(p.pid || ""), cmid = String(p.cmid || "");
+  if (!momPidOk(pid) || !momCmidOk(cmid)) throw new Error("bad id");
+  const text = String(p.text || "").replace(/\r/g, "").trim().slice(0, MOM_CMT);
+  if (!text) throw new Error("empty");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const doc = await momGet(token, pid);
+  if (!momCanSee(doc, uid)) throw new Error("not found");
+  const cm = await fsGet(token, "moments/" + pid + "/cm/" + cmid).catch(() => null);
+  if (!cm || !cm.fields) throw new Error("comment gone");
+  if (fstr(cm, "by") !== uid) throw new Error("not yours");
+  const { men, menN } = momMen(p.men, fsArr(doc, "aud"), uid);
+  const old = fsArr(cm, "men"), now = Date.now();
+  const w = [{ update: { name: cm.name, fields: { text: { stringValue: text }, men: toFsValue(men), menN: toFsValue(menN), edited: { integerValue: String(now) } } },
+    updateMask: { fieldPaths: ["text", "men", "menN", "edited"] }, currentDocument: { exists: true } }];
+  const lc = momMap(doc, "lastC");
+  if (lc && lc.id === cmid) w.push({ update: { name: doc.name, fields: { lastC: toFsValue(Object.assign({}, lc, { text: text.slice(0, 160) })) } }, updateMask: { fieldPaths: ["lastC"] }, currentDocument: { exists: true } });
+  await fsCommit(token, w);
+  const rcp = {}; men.filter(u => old.indexOf(u) < 0).forEach(u => { rcp[u] = "mentionc"; });
+  if (Object.keys(rcp).length) await momNotes(token, env, ctx, doc, uid, claims, rcp, { text, cm: cmid });
+  return { edited: now };
 }
 // تعديل نصّ لحظتي (والإشارات) — يُبلَّغ من أُضيفت الإشارة إليه فقط
 async function opMomentEdit(uid, payload, env, claims, ctx) {
@@ -4717,6 +4744,7 @@ export default {
       if (op === "moment.uncomment") { const r = await opMomentUncomment(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "moment.vote") { const r = await opMomentVote(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "moment.creact") { const r = await opMomentCReact(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }   // C135
+      if (op === "moment.cedit") { const r = await opMomentCEdit(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }   // C136
       if (op === "moment.edit") { const r = await opMomentEdit(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "moment.seen") { const r = await opMomentSeen(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "moment.prefs") { const r = await opMomentPrefs(uid, body.payload, env); return json({ ok: true, ...r }); }
