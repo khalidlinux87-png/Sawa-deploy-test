@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v76-reports";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v77-callkit";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2348,7 +2348,10 @@ async function opPushRegister(uid, payload, env) {
   }
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid + "/devices/" + id, fields: {
     token: { stringValue: t }, ua: { stringValue: String(payload.ua || "").slice(0, 160) }, ts: { integerValue: String(Date.now()) },
-    lang: { stringValue: payload.lang === "en" ? "en" : "ar" } } } }]);   // v68: لغة إشعارات هذا الجهاز = لغة التطبيق
+    lang: { stringValue: payload.lang === "en" ? "en" : "ar" },   // v68: لغة إشعارات هذا الجهاز = لغة التطبيق
+    // C151: رمز VoIP للآيفون (CallKit) وبيئته
+    voip: { stringValue: /^[0-9a-f]{40,200}$/i.test(String(payload.voip || "")) ? String(payload.voip) : "" },
+    voipEnv: { stringValue: payload.voipEnv === "development" ? "development" : "production" } } } }]);
   // C60: تنظيف — الأجهزة الأقدم من ٦٠ يوماً أو الزائدة عن الحدّ تُحذف (الرموز القديمة تموت غالباً، والمستخدم العاديّ له جهازٌ أو جهازان)
   try {
     const devs = await devsOf(token, uid), now = Date.now();
@@ -2501,12 +2504,79 @@ async function devsOf(token, uid) {
   return devs;
 }
 // يُرسل لأجهزة مستخدمين (حتّى ١٢ مستخدماً لكلّ حدث — حدّ ٥٠ طلباً فرعيّاً)، ويحذف الرموز الميّتة
+/* ---------- C151: إشعارات VoIP للآيفون (شاشة المكالمة الواردة من النظام — CallKit) ----------
+   FCM لا يرسل VoIP ⇒ الخادم يرسل مباشرةً إلى Apple بمفتاح APNs (‎.p8‎) — سرّ الـWorker ‏APNS_P8 (محتوى الملفّ كاملاً)،
+   ومعه APNS_KEY_ID و APNS_TEAM_ID (أو القيم الافتراضيّة أدناه). الموضوع: com.sawaaap.app.voip · البيئة من تسجيل الجهاز (production/development).
+   ينجح ⇒ لا يُرسَل إشعار FCM لذلك الجهاز (لا تكرار) · يفشل ⇒ يُكمَل بإشعار FCM كما كان. */
+let PUSH_ENV = null;
+const APNS_TOPIC = "com.sawaaap.app.voip";
+let apnsJwt = { t: 0, v: null, key: null };
+function b64url(buf) { let s = ""; const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf); for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
+async function apnsToken(env) {
+  if (!env || !env.APNS_P8) return null;
+  if (apnsJwt.v && Date.now() - apnsJwt.t < 40 * 60000) return apnsJwt.v;
+  if (!apnsJwt.key) {
+    const pem = String(env.APNS_P8).replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
+    const der = Uint8Array.from(atob(pem), c => c.charCodeAt(0));
+    apnsJwt.key = await crypto.subtle.importKey("pkcs8", der, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+  }
+  const kid = env.APNS_KEY_ID || "54D2KDJT6K", iss = env.APNS_TEAM_ID || "QD9SY2YYKY", now = Math.floor(Date.now() / 1000);
+  const enc = (o) => b64url(new TextEncoder().encode(JSON.stringify(o)));
+  const head = enc({ alg: "ES256", kid }), body = enc({ iss, iat: now });
+  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, apnsJwt.key, new TextEncoder().encode(head + "." + body));
+  apnsJwt.v = head + "." + body + "." + b64url(sig); apnsJwt.t = Date.now();
+  return apnsJwt.v;
+}
+// ⇒ "ok" | "gone" (الرمز ميّت) | نصّ الخطأ
+async function apnsVoip(env, devToken, envName, payload) {
+  const jwt = await apnsToken(env);
+  if (!jwt) return "no-key";
+  const host = envName === "development" ? "https://api.sandbox.push.apple.com" : "https://api.push.apple.com";
+  try {
+    const r = await fetch(host + "/3/device/" + devToken, { method: "POST", headers: {
+      authorization: "bearer " + jwt, "apns-topic": APNS_TOPIC, "apns-push-type": "voip", "apns-priority": "10", "apns-expiration": "0", "content-type": "application/json" },
+      body: JSON.stringify(payload) });
+    if (r.status === 200) { stat("voip"); return "ok"; }
+    const t = await r.text().catch(() => "");
+    if (r.status === 410 || /BadDeviceToken|Unregistered|DeviceTokenNotForTopic/.test(t)) return "gone";
+    if (r.status === 403 && /ExpiredProviderToken|InvalidProviderToken/.test(t)) apnsJwt = { t: 0, v: null, key: null };
+    return "apns " + r.status + " " + t.slice(0, 160);
+  } catch (e) { return "fetch " + String(e && e.message || e).slice(0, 160); }
+}
+const voipOk = new Map();   // callId|device ⇒ أُرسل VoIP بنجاح (تكرار الرنين لا يُرسل FCM لهذا الجهاز)
+// إن كان الجهاز آيفون برمز VoIP: «call» ⇒ VoIP مرّةً واحدة · «missed» ⇒ VoIP إلغاء (تُغلق شاشة النظام) ثمّ FCM «فائتة» كالعادة. يُرجع true إن أغنى عن FCM.
+async function voipFor(dev, du) {
+  const vt = fstr(dev, "voip"); if (!vt || !PUSH_ENV || !PUSH_ENV.APNS_P8 || !du) return false;
+  const key = String(du.call || "") + "|" + dev.name;
+  if (du.t === "call" && du.call) {
+    if (voipOk.has(key)) return true;
+    const r = await apnsVoip(PUSH_ENV, vt, fstr(dev, "voipEnv") || "production", { call: du.call, title: du.title || "Sawa", type: du.type || "audio", to: du.to || "", rk: du.rk || "", uf: du.uf || "", gid: du.gid || "", ts: du.ts || "" });
+    if (r === "ok") { voipOk.set(key, Date.now()); if (voipOk.size > 500) { const old = Date.now() - 600000; for (const [k, v] of voipOk) if (v < old) voipOk.delete(k); } return true; }
+    if (r !== "no-key") console.log("voip:", r);
+    return false;
+  }
+  if (du.t === "missed" && du.call) { await apnsVoip(PUSH_ENV, vt, fstr(dev, "voipEnv") || "production", { call: du.call, cancel: "1", title: du.title || "" }); voipOk.delete(key); }
+  return false;
+}
+// المدير: اختبار VoIP على أجهزتي (يُظهر ردّ Apple كما هو — يكشف المفتاح أو البيئة أو اتّصال الخادم)
+async function opVoipTest(uid, payload, env, claims) {
+  if (!isAdmin(env, claims)) return { admin: false };
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const devs = await devsOf(token, uid), out = [];
+  for (const d of devs) {
+    const vt = fstr(d, "voip"); if (!vt) continue;
+    const r = await apnsVoip(env, vt, fstr(d, "voipEnv") || "production", { call: "test_" + Date.now().toString(36), title: "سوا — اختبار المكالمة", type: "audio", cancelAfter: "8" });
+    out.push({ env: fstr(d, "voipEnv") || "production", result: r });
+  }
+  return { admin: true, key: !!env.APNS_P8, devices: out };
+}
 async function pushTo(token, uids, data) {
   let sent = 0;
   for (const u of uids.slice(0, 12)) {
     const devs = await devsOf(token, u);
     const du = typeof data === "function" ? await data(u) : data;   // v65: بيانات خاصّة بكلّ مستلم (توقيع الإقرار)
     for (const d of devs.slice(0, DEV_MAX)) {
+      if (await voipFor(d, du).catch(() => false)) { sent++; continue; }   // C151
       const r = await fcmSend(token, fstr(d, "token"), du, fstr(d, "lang"));
       if (r === "ok") { sent++; stat("push"); }
       else if (r === "gone") await fsCommit(token, [{ delete: d.name }]).catch(() => {});
@@ -4588,6 +4658,7 @@ export default {
     })());
   },
   async fetch(request, env, ctx) {
+    PUSH_ENV = env;   // C151
     notifyChat.env = env;   // v65: توقيع إقرار «وصلت» في إشعارات الرسائل
     try { const u0 = new URL(request.url); if (isAuthProxyPath(u0.pathname)) return await authProxy(request, u0); } catch (e) { return new Response("auth proxy error", { status: 502 }); }
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
@@ -4769,6 +4840,7 @@ export default {
       if (op === "code.privacy") { const r = await opCodePrivacy(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "account.delete") { const r = await opAccountDelete(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "report.create") { const r = await opReportCreate(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "voip.test") { const r = await opVoipTest(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C151
       if (op === "admin.reports") { const r = await opAdminReports(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "admin.reportClose") { const r = await opAdminReportClose(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "moment.begin") { const r = await opMomentBegin(uid, body.payload, env); return json({ ok: true, ...r }); }
