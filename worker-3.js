@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v77-callkit";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v78-avatar";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2214,6 +2214,18 @@ async function ackSig(env, s) {
   let b = ""; for (let i = 0; i < 16; i++) b += sig[i].toString(16).padStart(2, "0");
   return b;
 }
+/* C152: صورة حساب المرسِل لإشعار أندرويد (كإشعارات انستجرام) — بلا رمز دخول (الإشعار يصل والتطبيق مغلق)،
+   لكن برابطٍ موقَّع (ak = HMAC "av|uid") لا يصدر إلّا داخل إشعارٍ من ذلك المرسِل ⇒ لا تعداد للصور. */
+async function avatarImg(request, env) {
+  const q = new URL(request.url).searchParams, u = String(q.get("u") || ""), sg = String(q.get("s") || "");
+  if (!segOk(u) || !/^[0-9a-f]{32}$/.test(sg) || sg !== await ackSig(env, "av|" + u)) return new Response("", { status: 403 });
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const doc = await fsGet(token, "avatars/" + u).catch(() => null);
+  const m = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(fstr(doc, "d") || "");
+  if (!m) return new Response("", { status: 404, headers: { "Cache-Control": "public, max-age=600" } });
+  const bin = Uint8Array.from(atob(m[2]), c => c.charCodeAt(0));
+  return new Response(bin, { headers: { "Content-Type": m[1], "Cache-Control": "public, max-age=3600", "X-Content-Type-Options": "nosniff" } });
+}
 async function deviceAck(request, env) {
   let b = {}; try { b = await request.json(); } catch (e) {}
   const k = String(b.k || ""), to = String(b.to || ""), sg = String(b.s || "");
@@ -2449,6 +2461,10 @@ const EN_RULES = [
   [/^تأكّد رقمك ✓$/, "Your number is confirmed ✓"], [/^أكّد اثنان من معارفك رقمك (.*) — صار بإمكان معارفك إيجادك به$/, "Two contacts confirmed your number $1 — people you know can now find you by it"],
   [/^طلب ربط في شجرة العائلة$/, "Family tree link request"], [/^(.*) يقول إنك «(.*)» في شجرة «(.*)» — هل هذا أنت؟$/, "$1 says you're “$2” in the “$3” tree — is this you?"],
   [/^تمّ الربط ✓$/, "Linked ✓"], [/^(.*) أكّد أنّه «(.*)» في «(.*)»$/, "$1 confirmed they're “$2” in “$3”"],
+  [/^علّق على لحظتك: (.*)$/, "Commented on your moment: $1"], [/^ردّ على تعليقك: (.*)$/, "Replied to your comment: $1"],   // C152
+  [/^أشار إليك في لحظة: (.*)$/, "Mentioned you in a moment: $1"], [/^أشار إليك في تعليق: (.*)$/, "Mentioned you in a comment: $1"],
+  [/^علّق على لحظتك$/, "Commented on your moment"], [/^ردّ على تعليقك$/, "Replied to your comment"], [/^أشار إليك في لحظة$/, "Mentioned you in a moment"], [/^أشار إليك في تعليق$/, "Mentioned you in a comment"],
+  [/^(\S+) أعجبته لحظتك · (.*)$/, "$1 liked your moment · $2"], [/^(\S+) تفاعل مع لحظتك · (.*)$/, "$1 reacted to your moment · $2"],
   [/^(.*) أعجبته لحظتك$/, "$1 liked your moment"], [/^(.*) علّق على لحظتك$/, "$1 commented on your moment"],
   [/^قريبك/, "Your relative"], [/^مستخدم سوا/, "A Sawa user"], [/^غرفة سوا$/, "Sawa room"], [/^سوا$/, "Sawa"],
 ];
@@ -2599,7 +2615,7 @@ async function notifyChat(token, c, cid, uid, msg) {
   if (!targets.length || type === "saved") return 0;
   const group = type === "group" || type === "family";
   const body = msg.enc ? "🔒 رسالة مشفّرة" : msg.type === "text" || msg.type === "sticker" ? (msg.text || "") : ({ image: "📷 صورة", video: "🎥 فيديو", voice: "🎤 رسالة صوتيّة", file: "📎 ملفّ", poll: "📊 استطلاع", bill: "🧾 فاتورة", fund: "💝 تبرّعات", tasks: "✅ مهامّ", contact: "👤 جهة اتّصال", location: "📍 موقع" }[msg.type] || "رسالة");
-  const base = { t: "msg", cid, from: uid, mid: msg.id, title: group ? (fstr(c, "name") || "سوا") : senderName, body: group ? senderName + ": " + body : body, ts: msg.ts };
+  const base = { t: "msg", cid, from: uid, ak: notifyChat.env ? await ackSig(notifyChat.env, "av|" + uid) : undefined, mid: msg.id, title: group ? (fstr(c, "name") || "سوا") : senderName, body: group ? senderName + ": " + body : body, ts: msg.ts };
   let sent = 0;
   const ment = targets.filter(u => mentions.indexOf(u) >= 0), rest = targets.filter(u => mentions.indexOf(u) < 0);
   const env0 = notifyChat.env;
@@ -3954,6 +3970,7 @@ function momMen(raw, aud, uid) {
   }
   return { men: out, menN: names };
 }
+const MOM_NOTE_ACT = { comment: "علّق على لحظتك", reply: "ردّ على تعليقك", mention: "أشار إليك في لحظة", mentionc: "أشار إليك في تعليق", creact: "أعجبه تعليقك", like: "أعجبته لحظتك" };   // C152
 const MOM_NOTE_TXT = {
   like: (me) => me + " أعجبته لحظتك", comment: (me) => me + " علّق على لحظتك", reply: (me) => me + " ردّ على تعليقك",
   mention: (me) => me + " أشار إليك في لحظة", mentionc: (me) => me + " أشار إليك في تعليق", creact: (me) => me + " أعجبه تعليقك",
@@ -3977,10 +3994,12 @@ async function momNotes(token, env, ctx, doc, uid, claims, rcp, extra) {
     return { update: { name: DOC_ROOT + "/mnote/" + u + "/n/n" + momRid(), fields: f } };
   });
   await fsCommit(token, writes).catch(e => console.log("mnote:", e && e.message));
+  const ak = await ackSig(env, "av|" + uid);
   const jobs = to.filter(u => rcp[u] !== "creact").map(u => {
-    const k = rcp[u], title = k === "like" && extra && extra.e && extra.e !== "❤️" ? me + " تفاعل مع لحظتك" : MOM_NOTE_TXT[k](me);
-    const body = k === "like" ? ((extra && extra.e) || "❤️") + " " + snip.slice(0, 80) : snip.slice(0, 120);
-    const d = { t: "moment", pid, from: uid, k, title, body, ts: now }; if (extra && extra.cm) d.cm = extra.cm;
+    // C152: كإشعارات انستجرام — العنوان اسم الفاعل (وصورته بجانبه) والنصّ ما فعله
+    const k = rcp[u], title = me, e = (extra && extra.e) || "❤️";
+    const body = k === "like" ? e + (e === "❤️" ? " أعجبته لحظتك" : " تفاعل مع لحظتك") + (snip ? " · " + snip.slice(0, 70) : "") : MOM_NOTE_ACT[k] + (snip ? ": " + snip.slice(0, 110) : "");
+    const d = { t: "moment", pid, from: uid, ak, k, title, body, ts: now }; if (extra && extra.cm) d.cm = extra.cm;
     return pushTo(token, [u], strData(d)).catch(e => console.log("push:", e && e.message));
   });
   const job = Promise.all(jobs);
@@ -4664,6 +4683,7 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
     try { if (new URL(request.url).pathname === "/wa/webhook") return await waWebhook(request, env, ctx); } catch (e) { return new Response("webhook error", { status: 500 }); }
     try { if (request.method === "POST" && new URL(request.url).pathname === "/ack") return await deviceAck(request, env); } catch (e) { return json({ ok: false, error: String(e && e.message || e) }, 500); }
+    try { if (request.method === "GET" && new URL(request.url).pathname === "/av") return await avatarImg(request, env); } catch (e) { return new Response("", { status: 500 }); }   // C152
     let statOp = null;
     try {
       const auth = request.headers.get("Authorization") || "";
