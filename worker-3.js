@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v74-moments5";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v75-decline";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2225,6 +2225,14 @@ async function deviceAck(request, env) {
     const c = await rtdbGet(token, "calls/" + call).catch(() => null);
     if (c && c.to === to && c.state === "ringing" && !c.rung) await rtdbPatch(token, { ["calls/" + call + "/rung"]: Date.now() });
     stat("ack:ring");
+    return json({ ok: true });
+  }
+  if (k === "x") {   // C142: «رفض» من إشعار الهاتف والتطبيق مغلق — كان المتّصل يبقى «يرنّ…» حتّى تنتهي المهلة
+    const call = String(b.call || "");
+    if (!/^[A-Za-z0-9_-]{6,40}$/.test(call) || sg !== await ackSig(env, "r|" + call + "|" + to)) return json({ ok: false }, 403);
+    const c = await rtdbGet(token, "calls/" + call).catch(() => null);
+    if (c && c.to === to && c.state === "ringing" && !c.acc) await rtdbPatch(token, { ["calls/" + call + "/state"]: "declined" });
+    stat("ack:decline");
     return json({ ok: true });
   }
   if (k === "d") {   // الرسالة وصلت جهازه
