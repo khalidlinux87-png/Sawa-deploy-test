@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v78-avatar";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v79-newmoment";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2461,6 +2461,7 @@ const EN_RULES = [
   [/^تأكّد رقمك ✓$/, "Your number is confirmed ✓"], [/^أكّد اثنان من معارفك رقمك (.*) — صار بإمكان معارفك إيجادك به$/, "Two contacts confirmed your number $1 — people you know can now find you by it"],
   [/^طلب ربط في شجرة العائلة$/, "Family tree link request"], [/^(.*) يقول إنك «(.*)» في شجرة «(.*)» — هل هذا أنت؟$/, "$1 says you're “$2” in the “$3” tree — is this you?"],
   [/^تمّ الربط ✓$/, "Linked ✓"], [/^(.*) أكّد أنّه «(.*)» في «(.*)»$/, "$1 confirmed they're “$2” in “$3”"],
+  [/^لحظة جديدة(.*)$/, "New moment$1"], [/^أوّل لحظة منذ فترة طويلة(.*)$/, "First moment in a long time$1"],   // C153
   [/^علّق على لحظتك: (.*)$/, "Commented on your moment: $1"], [/^ردّ على تعليقك: (.*)$/, "Replied to your comment: $1"],   // C152
   [/^أشار إليك في لحظة: (.*)$/, "Mentioned you in a moment: $1"], [/^أشار إليك في تعليق: (.*)$/, "Mentioned you in a comment: $1"],
   [/^علّق على لحظتك$/, "Commented on your moment"], [/^ردّ على تعليقك$/, "Replied to your comment"], [/^أشار إليك في لحظة$/, "Mentioned you in a moment"], [/^أشار إليك في تعليق$/, "Mentioned you in a comment"],
@@ -3813,7 +3814,7 @@ async function momGet(token, pid) { const d = await fsGet(token, "moments/" + pi
 function momCanSee(doc, uid) { return !!doc && fsArr(doc, "aud").indexOf(uid) >= 0; }
 async function momPrefs(token, uid) {
   const d = await fsGet(token, "mset/" + uid).catch(() => null);
-  return { close: fsArr(d, "close"), hide: fsArr(d, "hide"), mute: fsArr(d, "mute"), seen: fsInt(d, "seen") };
+  return { close: fsArr(d, "close"), hide: fsArr(d, "hide"), mute: fsArr(d, "mute"), seen: fsInt(d, "seen"), np: fsInt(d, "np") };
 }
 // C133b: إزالة أشخاصٍ من جمهور كلّ لحظاتي السابقة (حين أُخفي عنهم لحظاتي أو أحظرهم) — الجمهور يُحسب عند النشر فيجب تنظيفه بعده
 async function momStrip(token, uid, uids) {
@@ -3881,7 +3882,7 @@ async function momAudience(token, uid, a, hideExtra) {
   list = list.filter(u => mine[u] !== true);
   const blk = list.length ? await blockedSet(token, list, uid) : new Set();
   list = list.filter(u => !blk.has(u));
-  return { aud: [uid].concat(list), label, n: list.length };
+  return { aud: [uid].concat(list), label, n: list.length, prefs };
 }
 async function opMomentPost(uid, payload, env, claims, ctx) {
   if (!codeRate(uid, "mom", 30)) throw new Error("rate_limited");
@@ -3933,7 +3934,39 @@ async function opMomentPost(uid, payload, env, claims, ctx) {
     const fake = { name: DOC_ROOT + "/moments/" + pid, fields: { aud: toFsValue(au.aud), text: { stringValue: text }, by: { stringValue: uid } } };
     await momNotes(token, env, ctx, fake, uid, claims, rcp, { text: text || "📷" }).catch(e => console.log("mention:", e && e.message));
   }
+  // C153: «لحظة جديدة» لمن في الجمهور (كإشعار القصص في انستجرام)
+  const np = momNewPush(token, env, uid, pid, String(name || "مستخدم سوا").slice(0, 80), au, men, media).catch(e => console.log("newpush:", e && e.message));
+  if (ctx && ctx.waitUntil) ctx.waitUntil(np); else await np;
   return { pid, aud: au.n, mode: au.label, men: men.length };
+}
+/* C153: إشعار «لحظة جديدة» — العنوان اسم الناشر (وصورته) والنصّ «لحظة جديدة 📷».
+   مرّةً كلّ ٤ ساعات على الأكثر لكلّ ناشر (mset/{uid}.np) · حتّى ١٠ مستلمين (حدّ الطلبات الفرعيّة): المقرّبون أوّلاً ثمّ عشوائيّاً ·
+   يُستثنى من أُشير إليه (وصله إشعار الإشارة) ومن كتم لحظاتي (mset/{هو}.mute) · أوّل لحظة بعد ١٤ يوماً ⇒ «أوّل لحظة منذ فترة طويلة». */
+const MOM_NEW_GAP = 4 * 3600000, MOM_NEW_MAX = 10;
+async function momNewPush(token, env, uid, pid, me, au, men, media) {
+  const now = Date.now(), last = (au.prefs && au.prefs.np) || 0;
+  if (last && now - last < MOM_NEW_GAP) return 0;
+  let to = au.aud.filter(u => u !== uid && men.indexOf(u) < 0);
+  if (!to.length) return 0;
+  const close = new Set((au.prefs && au.prefs.close) || []);
+  const rest = to.filter(u => !close.has(u));
+  for (let i = rest.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const t = rest[i]; rest[i] = rest[j]; rest[j] = t; }
+  to = to.filter(u => close.has(u)).concat(rest).slice(0, MOM_NEW_MAX * 2);
+  try {   // من كتم لحظاتي لا يصله شيء
+    const res = await fetch(FS_BASE + ":batchGet", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ documents: to.map(u => DOC_ROOT + "/mset/" + u), mask: { fieldPaths: ["mute"] } }) });
+    const muted = new Set();
+    for (const r of (await res.json()) || []) if (r.found && fsArr(r.found, "mute").indexOf(uid) >= 0) muted.add(r.found.name.split("/").pop());
+    to = to.filter(u => !muted.has(u));
+  } catch (e) { }
+  to = to.slice(0, MOM_NEW_MAX);
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/mset/" + uid, fields: { np: { integerValue: String(now) } } }, updateMask: { fieldPaths: ["np"] } }]).catch(() => {});
+  if (!to.length) return 0;
+  const icon = media.some(m => m.t === "video") ? " 🎥" : media.length ? " 📷" : "";
+  const body = (last && now - last > 14 * 86400000 ? "أوّل لحظة منذ فترة طويلة" : "لحظة جديدة") + icon;
+  const d = strData({ t: "moment", k: "new", pid, from: uid, ak: await ackSig(env, "av|" + uid), title: me, body, ts: now });
+  stat("moment:newpush");
+  return pushTo(token, to, d);
 }
 async function momDropMedia(token, pid, it) {
   if (!it || !momMidOk(String(it.mid || ""))) return;
