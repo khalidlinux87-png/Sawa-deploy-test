@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v75-decline";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v76-reports";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -4466,6 +4466,24 @@ async function opReportCreate(uid, payload, env, claims) {
     if (e2eOf(c) && Array.isArray(payload.e2eSample)) sample = payload.e2eSample.slice(-20).map(x => ({ by: segOk(String((x && x.by) || "")) ? x.by : null,
       type: "text", text: String((x && x.text) || "").slice(0, 300), ts: Number((x && x.ts) || 0) || 0, e2e: true }));
   }
+  // C150: الإبلاغ عن لحظة أو تعليق — يُرفق نصّها، ويُسجَّل المبلِّغ عليها؛ ٣ مبلِّغين مختلفين ⇒ تُحجب عن الجميع (held) حتّى يراجعها المدير
+  let pid = null, cmid = null;
+  if (payload.moment && typeof payload.moment === "object") {
+    pid = String(payload.moment.pid || ""); cmid = payload.moment.cmid ? String(payload.moment.cmid) : null;
+    if (!momPidOk(pid) || (cmid && !momCmidOk(cmid))) throw new Error("bad id");
+    const md = await momGet(token, pid);
+    if (!momCanSee(md, uid)) throw new Error("not found");
+    let tgtDoc = md, path = "moments/" + pid;
+    if (cmid) { tgtDoc = await fsGet(token, path + "/cm/" + cmid).catch(() => null); if (!tgtDoc || !tgtDoc.fields) throw new Error("comment gone"); path += "/cm/" + cmid; }
+    type = cmid ? "moment-comment" : "moment"; target = fstr(tgtDoc, "by") || target;
+    sample = [{ by: target, type: type, text: fstr(tgtDoc, "text").slice(0, 600), media: cmid ? 0 : (momMap(md, "media") || []).length, ts: fsInt(tgtDoc, "ts"), pid, cmid }];
+    const reps = fsArr(tgtDoc, "reps");
+    if (reps.indexOf(uid) < 0) {
+      const held = reps.length + 1 >= 3;
+      await fsCommit(token, [{ update: { name: DOC_ROOT + "/" + path, fields: held ? { held: { booleanValue: true } } : {} }, updateMask: { fieldPaths: held ? ["held"] : [] },
+        updateTransforms: [{ fieldPath: "reps", appendMissingElements: { values: [{ stringValue: uid }] } }], currentDocument: { exists: true } }]).catch(e => console.log("reps:", e && e.message));
+    }
+  }
   if (target && !segOk(String(target))) throw new Error("bad target");
   if (!cid && !target) throw new Error("nothing to report");
   const id = "r" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), now = Date.now();
@@ -4473,6 +4491,7 @@ async function opReportCreate(uid, payload, env, claims) {
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/reports/" + id, fields: {
     by: { stringValue: uid }, byName: me.name, target: target ? { stringValue: target } : { nullValue: null }, cid: cid ? { stringValue: cid } : { nullValue: null },
     type: type ? { stringValue: type } : { nullValue: null }, reason: { stringValue: reason }, note: { stringValue: note },
+    pid: pid ? { stringValue: pid } : { nullValue: null }, cmid: cmid ? { stringValue: cmid } : { nullValue: null },
     sample: { stringValue: JSON.stringify(sample) }, ts: { integerValue: String(now) }, status: { stringValue: "open" } } } }]);
   stat("report");
   return { id };
@@ -4515,7 +4534,7 @@ async function opAdminReports(uid, payload, env, claims) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const docs = await fsQueryEq(token, "reports", { status: "open" }, 30).catch(() => []);
   const items = docs.map(d => { const v = fsToJs({ mapValue: { fields: d.fields || {} } }) || {}; let sample = []; try { sample = JSON.parse(v.sample || "[]"); } catch (e) {}
-    return { id: d.name.split("/").pop(), by: v.by, byName: v.byName, target: v.target, cid: v.cid, type: v.type, reason: v.reason, note: v.note, ts: v.ts, sample }; })
+    return { id: d.name.split("/").pop(), by: v.by, byName: v.byName, target: v.target, cid: v.cid, type: v.type, reason: v.reason, note: v.note, ts: v.ts, sample, pid: v.pid || null, cmid: v.cmid || null }; })
     .sort((a, b) => (b.ts || 0) - (a.ts || 0));
   return { admin: true, items };
 }
@@ -4524,6 +4543,12 @@ async function opAdminReportClose(uid, payload, env, claims) {
   const id = payload && payload.id;
   if (!segOk(String(id || ""))) throw new Error("id required");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  // C150: «لا مخالفة» ⇒ تُرفع الحجب عن اللحظة/التعليق ويُصفَّر عدّاد المبلِّغين
+  if (payload.release) {
+    const rp = await fsGet(token, "reports/" + id).catch(() => null), pid = rp && fstr(rp, "pid"), cmid = rp && fstr(rp, "cmid");
+    if (pid && momPidOk(pid)) await fsCommit(token, [{ update: { name: DOC_ROOT + "/moments/" + pid + (cmid ? "/cm/" + cmid : ""), fields: { held: { booleanValue: false }, reps: { arrayValue: { values: [] } } } },
+      updateMask: { fieldPaths: ["held", "reps"] }, currentDocument: { exists: true } }]).catch(() => {});
+  }
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/reports/" + id, fields: { status: { stringValue: "closed" }, closedTs: { integerValue: String(Date.now()) } } },
     updateMask: { fieldPaths: ["status", "closedTs"] }, currentDocument: { exists: true } }]);
   return { admin: true, closed: id };
