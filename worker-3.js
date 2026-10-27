@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v82-famphoto";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v83-tasks";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1540,7 +1540,7 @@ async function opChatOpen(uid, payload, env, claims) {
    - كلّ عضوٍ يربط جهازاً واحداً (devs). مفتاح الجهاز لا يتغيّر بعد تسجيله (keys إلحاقٌ فقط) ⇒ الرسائل القديمة تبقى قابلةً للفكّ.
    - الرسالة: { id, type, enc: { v, d: جهاز المرسل, iv, ct, k: { devId: مفتاح الرسالة مغلّفاً لذلك الجهاز } }, reply: { id, day }, extra: { mid, viewOnce } } */
 const E2E_DEV = /^[A-Za-z0-9]{16,24}$/, E2E_B64 = /^[A-Za-z0-9+/]+={0,2}$/;
-const E2E_TYPES = ["text", "sticker", "contact", "voice", "image", "video", "file", "location"];
+const E2E_TYPES = ["text", "sticker", "contact", "voice", "image", "video", "file", "location", "tasks"];   // C164: قائمة المهامّ في السرّيّة (العنوان والمهامّ داخل enc)
 function e2eOf(c) { const v = c && c.fields && c.fields.e2e; const e = v ? fsToJs(v) : null; return e && e.on ? e : null; }
 function e2ePubOk(k) {
   k = String(k || ""); if (k.length !== 88 || !E2E_B64.test(k)) return false;
@@ -2368,13 +2368,44 @@ async function opChatTask(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const { m, cid, day, id } = await toolMsg(token, payload, uid, "tasks");
   const taskId = String(payload.taskId || "");
-  if (!((m.extra && m.extra.tasks) || []).some(t => t.id === taskId)) throw new Error("task not found");
+  // C164: في السرّيّة لا يرى الخادم المهامّ (داخل enc) — معرّفٌ سليم فقط، والحالة وحدها (لا ملاحظات نصّيّة ظاهرة)
+  if (m.enc) {
+    if (!/^[A-Za-z0-9_-]{1,40}$/.test(taskId)) throw new Error("task not found");
+    if (payload.note != null) throw new Error("notes are not available in secret chats");
+  } else if (!((m.extra && m.extra.tasks) || []).some(t => t.id === taskId)) throw new Error("task not found");
   const cur = (m.tstate && m.tstate[taskId]) || {};
   const next = Object.assign({}, cur, { by: uid, ts: Date.now() });
   if (payload.status === "done" || payload.status === "pending") next.status = payload.status;
   if (payload.note != null) next.note = String(payload.note).slice(0, 300);
   await fsCommit(token, [setPath(cid, day, ["msgs", id, "tstate", taskId], next)]);
   return { ok: true };
+}
+
+// C164: تعديل قائمة المهامّ — منشئها أو مشرف المجموعة · تبقى حالة المهامّ التي بقيت · في السرّيّة: محتوى مشفّرٌ جديد للرسالة نفسها
+async function opChatTasksEdit(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const { c, m, cid, day, id } = await toolMsg(token, payload, uid, "tasks");
+  const admin = (fstr(c, "type") === "group" || fstr(c, "type") === "family") && fsArr(c, "admins").indexOf(uid) >= 0;
+  if (m.by !== uid && !admin) throw new Error("only the creator can edit");
+  const now = Date.now(), base = DOC_ROOT + "/chats/" + cid + "/days/" + day;
+  const e2e = e2eOf(c);
+  if (e2e || m.enc) {
+    if (!e2e) throw new Error("not a secret chat");
+    const enc = cleanEnc(payload.enc, uid, e2e);
+    await fsCommit(token, [{ update: { name: base, fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { enc: toFsValue(enc), edited: { integerValue: String(now) } } } } } } } } },
+      updateMask: { fieldPaths: [fp("msgs", id, "enc"), fp("msgs", id, "edited")] } }]);
+    return { edited: now };
+  }
+  const title = String(payload.title || "").replace(/\s+/g, " ").trim().slice(0, 200);
+  const tasks = (Array.isArray(payload.tasks) ? payload.tasks : []).slice(0, 50).map(t => ({
+    id: /^[A-Za-z0-9_-]{1,40}$/.test(String(t && t.id || "")) ? String(t.id) : "t" + Math.random().toString(36).slice(2, 10),
+    text: String(t && t.text || "").slice(0, 300), assigneeId: segOk(String(t && t.assigneeId || "")) ? String(t.assigneeId) : null,
+    assigneeName: String(t && t.assigneeName || "").slice(0, 80), dueAt: Number(t && t.dueAt) > 0 ? Number(t.dueAt) : null })).filter(t => t.text.trim());
+  if (!title || !tasks.length) throw new Error("title and one task required");
+  const extra = Object.assign({}, m.extra, { title, tasks, editedAt: now });
+  await fsCommit(token, [{ update: { name: base, fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { extra: toFsValue(capVal(extra)), edited: { integerValue: String(now) } } } } } } } } },
+    updateMask: { fieldPaths: [fp("msgs", id, "extra"), fp("msgs", id, "edited")] } }]);
+  return { edited: now };
 }
 
 /* ---------- 28) الإشعارات (C5): Firebase Cloud Messaging (HTTP v1) ----------
@@ -2396,6 +2427,7 @@ async function opPushRegister(uid, payload, env) {
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid + "/devices/" + id, fields: {
     token: { stringValue: t }, ua: { stringValue: String(payload.ua || "").slice(0, 160) }, ts: { integerValue: String(Date.now()) },
     lang: { stringValue: payload.lang === "en" ? "en" : "ar" },   // v68: لغة إشعارات هذا الجهاز = لغة التطبيق
+    noav: { booleanValue: payload.noav === true },   // C164: «صور المرسلين في الإشعارات» مطفأة على هذا الجهاز
     // C151: رمز VoIP للآيفون (CallKit) وبيئته
     voip: { stringValue: /^[0-9a-f]{40,200}$/i.test(String(payload.voip || "")) ? String(payload.voip) : "" },
     voipEnv: { stringValue: payload.voipEnv === "development" ? "development" : "production" } } } }]);
@@ -2629,7 +2661,10 @@ async function pushTo(token, uids, data) {
     const du = typeof data === "function" ? await data(u) : data;   // v65: بيانات خاصّة بكلّ مستلم (توقيع الإقرار)
     for (const d of devs.slice(0, DEV_MAX)) {
       if (await voipFor(d, du).catch(() => false)) { sent++; continue; }   // C151
-      const r = await fcmSend(token, fstr(d, "token"), du, fstr(d, "lang"));
+      // C164: الجهاز أطفأ صور المرسلين ⇒ بلا توقيع الصورة (يبقى شعار سوا)
+      const dd = du && du.ak && fbool(d, "noav") ? Object.assign({}, du, { ak: undefined }) : du;
+      if (dd !== du) delete dd.ak;
+      const r = await fcmSend(token, fstr(d, "token"), dd, fstr(d, "lang"));
       if (r === "ok") { sent++; stat("push"); }
       else if (r === "gone") await fsCommit(token, [{ delete: d.name }]).catch(() => {});
     }
@@ -4881,6 +4916,7 @@ export default {
       if (op === "chat.billPaid") { const r = await opChatBillPaid(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.fund") { const r = await opChatFund(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.task") { const r = await opChatTask(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "chat.tasksEdit") { const r = await opChatTasksEdit(uid, body.payload, env); return json({ ok: true, ...r }); }   // C164
       if (op === "chat.open") { const r = await opChatOpen(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "chat.send") { const r = await opChatSend(uid, body.payload, env, ctx); return json({ ok: true, ...r }); }
       if (op === "e2e.dm") { const r = await opE2eDm(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
