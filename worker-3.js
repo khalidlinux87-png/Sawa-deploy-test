@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v79-newmoment";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v80-groupphoto";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2095,12 +2095,22 @@ async function opGroupUpdate(uid, payload, env) {
     if (payload.name != null) { const n = String(payload.name).trim().slice(0, 80); if (!n) throw new Error("name required"); fields.name = { stringValue: n }; mask.push("name"); }
     if (payload.desc != null) { fields.desc = { stringValue: String(payload.desc).slice(0, 500) }; mask.push("desc"); }
   }
+  // C155: صورة المجموعة ⇒ avatars/{cid} (كصور الحسابات ≤ ٢٠ ألف حرف) + photoTs في المحادثة
+  let gphoto;
+  if (payload.photo != null) {
+    if (fbool(c, "infoAdminsOnly") && !isAdmin) throw new Error("only admins can do this");
+    gphoto = String(payload.photo);
+    if (gphoto && (!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(gphoto) || gphoto.length > 20000)) throw new Error("bad photo");
+    fields.photoTs = gphoto ? { integerValue: String(Date.now()) } : { nullValue: null }; mask.push("photoTs");
+  }
   for (const k of ["adminsOnly", "infoAdminsOnly"]) if (k in payload) {
     if (!isAdmin) throw new Error("only admins can do this");
     fields[k] = { booleanValue: !!payload[k] }; mask.push(k);
   }
   if (!mask.length) return { ok: true };
-  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields }, updateMask: { fieldPaths: mask } }]);
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields }, updateMask: { fieldPaths: mask } }].concat(gphoto === undefined ? [] :
+    [gphoto ? { update: { name: DOC_ROOT + "/avatars/" + cid, fields: { d: { stringValue: gphoto }, ts: { integerValue: String(Date.now()) } } } } : { delete: DOC_ROOT + "/avatars/" + cid }]));
+  if (gphoto !== undefined) await sysMsg(token, cid, uid, "photo", { on: !!gphoto });
   if (fields.name) await sysMsg(token, cid, uid, "renamed", { name: fields.name.stringValue });
   if (fields.desc) await sysMsg(token, cid, uid, "desc", {});
   if ("adminsOnly" in fields) await sysMsg(token, cid, uid, "adminsOnly", { on: fields.adminsOnly.booleanValue });
