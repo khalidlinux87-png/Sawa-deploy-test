@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v80-groupphoto";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v82-famphoto";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -324,12 +324,15 @@ async function opInviteCreate(uid, payload, env) {
   const now = new Date().toISOString();
   const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(); // أسبوع
   const g = await fsGet(token, "groups/" + groupId);
+  // C156: دعوةٌ باسم شخصٍ في الشجرة ⇒ يُحفظ معرّفه، فيُربط من يقبلها ويؤكّد «أنا هو» (لا يكفي اختيار اسمٍ بعد الانضمام)
+  const ipid = payload && payload.personId != null ? String(payload.personId) : "";
+  if (ipid && !segOk(ipid)) throw new Error("bad id");
   await fsCommit(token, [
     { update: { name: DOC_ROOT + "/invites/" + inviteToken,
       fields: { groupId: { stringValue: groupId }, createdBy: { stringValue: uid },
                 role: { stringValue: grant }, createdTs: { timestampValue: now },
                 expiresTs: { timestampValue: expires },
-                groupName: { stringValue: fstr(g, "name") || "عائلتي" } } } },
+                groupName: { stringValue: fstr(g, "name") || "عائلتي" }, ...(ipid ? { personId: { stringValue: ipid } } : {}) } } },
   ]);
   return { token: inviteToken, groupId: groupId, role: grant, expiresTs: expires };
 }
@@ -356,18 +359,26 @@ async function opInviteAccept(uid, payload, env, claims) {
   // عضوٌ سلفاً؟ لا نُنزِل دوره — نرفعه فقط إن كانت الدعوة أعلى
   const existing = await fsGet(token, "groups/" + groupId + "/members/" + uid);
   const cur = existing ? fstr(existing, "role") : null;
+  // C156: «أنا هو» في دعوةٍ باسم شخص ⇒ ربطٌ إن كان الشخص هو نفسه في الدعوة، موجوداً وغير مربوطٍ بغيري، وأنا غير مربوطٍ بآخر
+  let claimPid = null;
+  const want = payload && payload.claim ? String(payload.claim) : "";
+  if (want && want === fstr(invite, "personId") && segOk(want) && !(existing && fstr(existing, "personId"))) {
+    const [pd, ms] = await Promise.all([fsGet(token, "groups/" + groupId + "/persons/" + want).catch(() => null), fsList(token, "groups/" + groupId + "/members")]);
+    if (pd && !fbool(pd, "deleted") && !ms.some(d => fstr(d, "personId") === want && d.name.split("/").pop() !== uid)) claimPid = want;
+  }
+  const claimF = claimPid ? { personId: { stringValue: claimPid }, personTs: { integerValue: String(Date.now()) } } : {};
   if (cur && (ROLE_RANK[cur] || 0) >= ROLE_RANK[grant]) {
-    await fsCommit(token, [indexWrite(uid, groupId, gname, cur, now)]);
-    return { groupId: groupId, role: cur, name: gname, already: true };
+    await fsCommit(token, [indexWrite(uid, groupId, gname, cur, now)].concat(claimPid ? [{ update: { name: DOC_ROOT + "/groups/" + groupId + "/members/" + uid, fields: claimF }, updateMask: { fieldPaths: ["personId", "personTs"] } }] : []));
+    return { groupId: groupId, role: cur, name: gname, already: true, claimed: claimPid };
   }
   await fsCommit(token, [
     { update: { name: DOC_ROOT + "/groups/" + groupId + "/members/" + uid,
       fields: Object.assign({ role: { stringValue: grant }, joinedTs: { timestampValue: now },
-                invitedBy: { stringValue: invitedBy } }, memberIdFields(claims)) } },
+                invitedBy: { stringValue: invitedBy } }, memberIdFields(claims), claimF) } },
     indexWrite(uid, groupId, gname, grant, now),
   ]);
   try { await famChatSync(token, groupId); } catch (e) {}
-  return { groupId: groupId, role: grant, name: gname };
+  return { groupId: groupId, role: grant, name: gname, claimed: claimPid };
 }
 
 /* يتحقّق أنّ المستخدم محرِّر/مالك في العائلة */
@@ -1094,8 +1105,12 @@ async function opFamClaim(uid, payload, env) {
   if (!segOk(gid) || (pid !== null && !segOk(pid)) || !segOk(target)) throw new Error("bad id");
   const me = await fsGet(token, "groups/" + gid + "/members/" + uid);
   if (!me) throw new Error("not a member");
-  if (target !== uid) {   // فكّ ربط غيري: للمالك وحده، وإلى لا شيء فقط
-    if (fstr(me, "role") !== "owner" || pid !== null) throw new Error("only the owner can unlink others");
+  const myRole = fstr(me, "role");
+  // C156: التعريف من داخل العائلة — المشاهد لا يربط نفسه بشخصٍ في الشجرة (كان يكفي اختيار اسمٍ أو تشابهه)؛
+  //       يربطه محرّرٌ بطلب «هل هذا أنت؟» أو بدعوةٍ باسمه. فكّ ربط نفسه متاحٌ للجميع.
+  if (target === uid && pid !== null && myRole !== "owner" && myRole !== "editor") throw new Error("ask_family");
+  if (target !== uid) {   // فكّ ربط غيري: للمالك والمحرّر، وإلى لا شيء فقط (C156: كان للمالك وحده)
+    if ((myRole !== "owner" && myRole !== "editor") || pid !== null) throw new Error("only the owner can unlink others");
     const t0 = await fsGet(token, "groups/" + gid + "/members/" + target);
     if (!t0) throw new Error("not a member");
   }
@@ -1140,7 +1155,10 @@ async function opFamLinkReq(uid, payload, env, claims, ctx) {
   if (!t) return { found: false };
   if (t.uid === uid) throw new Error("use this is me");
   const ms = await fsList(token, "groups/" + gid + "/members");
-  if (ms.some(d => fstr(d, "personId") === pid)) throw new Error("person taken");
+  // C156: «تغيير الحساب المربوط» (غيّر قريبك حسابه أو رقمه) — الربط القديم يبقى حتّى يوافق صاحب الحساب الجديد
+  const holder = ms.find(d => fstr(d, "personId") === pid);
+  if (holder && holder.name.split("/").pop() === t.uid) throw new Error("already this account");
+  if (holder && !p.replace) throw new Error("person taken");
   const tm = ms.find(d => d.name.split("/").pop() === t.uid);
   if (tm && fstr(tm, "personId")) throw new Error("already linked");
   if (fsArr(g, "banned").indexOf(t.uid) >= 0) throw new Error("removed from this family");
@@ -1151,7 +1169,7 @@ async function opFamLinkReq(uid, payload, env, claims, ctx) {
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/famreq/" + famReqId(gid, pid, t.uid), fields: {
     gid: { stringValue: gid }, pid: { stringValue: pid }, uid: { stringValue: t.uid }, by: { stringValue: uid },
     byName: { stringValue: String(me || "").slice(0, 80) }, gname: { stringValue: gname.slice(0, 80) }, pname: { stringValue: pname.slice(0, 80) },
-    ts: { integerValue: String(now) } } } }]);
+    replace: { booleanValue: !!holder }, ts: { integerValue: String(now) } } } }]);
   const job = pushTo(token, [t.uid], strData({ t: "famreq", title: "طلب ربط في شجرة العائلة",
     body: (me || "قريبك") + " يقول إنك «" + pname + "» في شجرة «" + gname + "» — هل هذا أنت؟", ts: now })).catch(e => console.log("push:", e && e.message));
   if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
@@ -1224,11 +1242,12 @@ async function opFamLinkRespond(uid, payload, env, claims) {
   const pd = await fsGet(token, "groups/" + gid + "/persons/" + pid);
   if (!pd || fbool(pd, "deleted")) throw new Error("person not found");
   const ms = await fsList(token, "groups/" + gid + "/members");
-  if (ms.some(d => fstr(d, "personId") === pid && d.name.split("/").pop() !== uid)) throw new Error("person taken");
+  const old = ms.filter(d => fstr(d, "personId") === pid && d.name.split("/").pop() !== uid);
+  if (old.length && !fbool(rq, "replace")) throw new Error("person taken");
   const gname = fstr(g, "name") || "عائلتي", nowIso = new Date().toISOString();
   const mine = ms.find(d => d.name.split("/").pop() === uid);
   const role = mine ? fstr(mine, "role") : "viewer";
-  const w = [];
+  const w = old.map(d => ({ update: { name: d.name, fields: {} }, updateMask: { fieldPaths: ["personId", "personTs"] } }));   // C156: يُفكّ الحساب القديم
   if (!mine) {
     w.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid,
       fields: Object.assign({ role: { stringValue: "viewer" }, joinedTs: { timestampValue: nowIso }, invitedBy: { stringValue: fstr(rq, "by") },
@@ -2087,8 +2106,14 @@ async function opGroupUpdate(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const cid = payload && payload.cid;
   const c = await requireChatMember(token, cid, uid);
-  if (fstr(c, "type") !== "group") throw new Error("not a group");
-  const isAdmin = fsArr(c, "admins").indexOf(uid) >= 0;
+  // C159: محادثة العائلة — صورتها وحدها، لمالك العائلة ومحرّريها (الاسم والأعضاء يتبعان العائلة)
+  if (fstr(c, "type") === "family") {
+    if (payload.photo == null || Object.keys(payload).some(k => k !== "cid" && k !== "photo")) throw new Error("family chat follows the family");
+    const fm = await fsGet(token, "groups/" + fstr(c, "familyGroupId") + "/members/" + uid).catch(() => null);
+    const fr = fstr(fm, "role");
+    if (fr !== "owner" && fr !== "editor") throw new Error("only admins can do this");
+  } else if (fstr(c, "type") !== "group") throw new Error("not a group");
+  const isAdmin = fstr(c, "type") === "family" || fsArr(c, "admins").indexOf(uid) >= 0;
   const fields = {}, mask = [];
   if (payload.name != null || payload.desc != null) {
     if (fbool(c, "infoAdminsOnly") && !isAdmin) throw new Error("only admins can do this");
