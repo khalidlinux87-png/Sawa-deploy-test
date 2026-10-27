@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v84-metered";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v85-tasks";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -1740,6 +1740,10 @@ async function opChatSend(uid, payload, env, ctx) {
   // الإشعارات بعد الردّ (waitUntil) فلا ينتظرها المرسل
   const job = notifyChat(token, c, cid, uid, msg).catch(e => console.log("push:", e && e.message));
   if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
+  if (msg.type === "tasks" && !msg.enc) {   // C173: فهرس «مهامّي»/التذكير + «أُسند إليك»
+    const tj = (async () => { await fsCommit(token, [taskIdxWrite(c, cid, day, msg.id, msg)]); await taskAssignPush(token, c, cid, uid, msg, null); })().catch(e => console.log("tasks:", e && e.message));
+    if (ctx && ctx.waitUntil) ctx.waitUntil(tj); else await tj;
+  }
   return { ts, day, id: msg.id };
 }
 async function dayMsg(token, cid, day, id) {
@@ -1869,6 +1873,7 @@ async function opChatDelete(uid, payload, env) {
     fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { del: { booleanValue: true }, delBy: { stringValue: uid } } } } } } } } },
     updateMask: { fieldPaths: [fp("msgs", id, "del"), fp("msgs", id, "delBy"), fp("msgs", id, "text"), fp("msgs", id, "extra"), fp("msgs", id, "reply"), fp("msgs", id, "contact"), fp("msgs", id, "re"),
       fp("msgs", id, "votes"), fp("msgs", id, "paid"), fp("msgs", id, "contrib"), fp("msgs", id, "tstate"), fp("msgs", id, "mentions"), fp("msgs", id, "viewed"), fp("msgs", id, "fwd"), fp("msgs", id, "enc")] } }]);
+  if (m.type === "tasks") await fsCommit(token, [{ delete: DOC_ROOT + "/tasklists/" + cid + "~" + id }]).catch(() => {});   // C173
   const lastId = c.fields.last && c.fields.last.mapValue && c.fields.last.mapValue.fields && c.fields.last.mapValue.fields.id && c.fields.last.mapValue.fields.id.stringValue;
   if (lastId === id) await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { last: { mapValue: { fields: { del: { booleanValue: true }, text: { stringValue: "" } } } } } },
     updateMask: { fieldPaths: ["last.del", "last.text"] } }]);
@@ -2364,25 +2369,187 @@ async function opChatFund(uid, payload, env) {
   await fsCommit(token, [setPath(cid, day, ["msgs", id, "contrib", uid], { amount: prev + amount, ts: Date.now() })]);
   return { total: prev + amount };
 }
-async function opChatTask(uid, payload, env) {
+async function opChatTask(uid, payload, env, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
-  const { m, cid, day, id } = await toolMsg(token, payload, uid, "tasks");
+  const { c, m, cid, day, id } = await toolMsg(token, payload, uid, "tasks");
   const taskId = String(payload.taskId || "");
   // C164: في السرّيّة لا يرى الخادم المهامّ (داخل enc) — معرّفٌ سليم فقط، والحالة وحدها (لا ملاحظات نصّيّة ظاهرة)
+  let task = null;
   if (m.enc) {
     if (!/^[A-Za-z0-9_-]{1,40}$/.test(taskId)) throw new Error("task not found");
     if (payload.note != null) throw new Error("notes are not available in secret chats");
-  } else if (!((m.extra && m.extra.tasks) || []).some(t => t.id === taskId)) throw new Error("task not found");
+  } else if (!(task = ((m.extra && m.extra.tasks) || []).find(t => t.id === taskId))) throw new Error("task not found");
+  // C173: الصلاحيّات — منشئ القائمة والمشرف: كلّ شيء · المسؤول: حالته وتخلّيه · مهمّة «لأيّ عضو»: يتولّاها أو يُنجزها أيّ عضو
+  const admin = (fstr(c, "type") === "group" || fstr(c, "type") === "family") && fsArr(c, "admins").indexOf(uid) >= 0;
+  const boss = m.by === uid || admin;
   const cur = (m.tstate && m.tstate[taskId]) || {};
+  const effOf = (s) => task ? taskEff({ tstate: { [taskId]: s } }, task) : (s.owner || null);
+  const eff0 = effOf(cur);
   const next = Object.assign({}, cur, { by: uid, ts: Date.now() });
-  if (payload.status === "done" || payload.status === "pending") next.status = payload.status;
+  if (payload.owner !== undefined) {   // إعادة إسناد (المنشئ/المشرف) — "" = لأيّ عضو
+    if (!boss) throw new Error("only the creator can reassign");
+    const o = String(payload.owner || "");
+    if (o && (!segOk(o) || fsArr(c, "members").indexOf(o) < 0)) throw new Error("not a member");
+    next.owner = o;
+  }
+  if (payload.claim === true) { if (eff0 && eff0 !== uid) throw new Error("already assigned"); next.owner = uid; }
+  if (payload.claim === false) { if (eff0 !== uid && !boss) throw new Error("not yours"); next.owner = ""; }
+  if (payload.status === "done" || payload.status === "pending") {
+    if (!m.enc && eff0 && eff0 !== uid && !boss) throw new Error("only the assignee can change this task");
+    next.status = payload.status;
+    if (payload.status === "done") { next.doneBy = uid; next.doneAt = Date.now(); if (!eff0 && !m.enc && payload.owner === undefined) next.owner = uid; }
+    else { delete next.doneBy; delete next.doneAt; }
+  }
   if (payload.note != null) next.note = String(payload.note).slice(0, 300);
-  await fsCommit(token, [setPath(cid, day, ["msgs", id, "tstate", taskId], next)]);
-  return { ok: true };
+  const m2 = Object.assign({}, m, { tstate: Object.assign({}, m.tstate, { [taskId]: next }) });
+  await fsCommit(token, [setPath(cid, day, ["msgs", id, "tstate", taskId], next)].concat(m.enc ? [] : [taskIdxWrite(c, cid, day, id, m2)]));
+  // الإشعارات بعد الردّ
+  const job = (async () => {
+    const names = chatNames(c), who = names[uid] || "سوا", gname = fstr(c, "name") || "سوا";
+    const eff1 = effOf(next);
+    if (eff1 && eff1 !== uid && eff1 !== eff0 && next.status !== "done")
+      await taskPush(token, c, cid, [eff1], "📌 " + who + " أسند إليك مهمّة · " + gname, task ? task.text : "مهمّة مشفّرة 🔒");
+    if (payload.status === "done" && cur.status !== "done" && m.by && m.by !== uid) {
+      const all = !m.enc && ((m.extra && m.extra.tasks) || []).every(t => ((m2.tstate[t.id] || {}).status) === "done");
+      await taskPush(token, c, cid, [m.by], all ? "🎉 اكتملت قائمة «" + ((m.extra && m.extra.title) || "") + "»" : "✓ " + who + " أنجز مهمّة · " + gname, task ? task.text : "🔒");
+    }
+  })().catch(e => console.log("taskpush:", e && e.message));
+  if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
+  return { ok: true, state: next };
+}
+
+// C173: المهامّ — المسؤول الفعليّ (tstate.owner يغلب assigneeId؛ "" = لأيّ عضو) · فهرس tasklists لشاشة «مهامّي» والتذكير · الإشعارات
+const T_H = 3600000, T_S1 = 15 * T_H, T_S2 = 31 * T_H;   // الموعد يوم (منتصف ليل UTC): تذكير قبله بيوم ضحىً · «تأخّرت» صباح اليوم التالي
+function taskEff(m, t) { const s = (m.tstate && m.tstate[t.id]) || {}; return s.owner !== undefined && s.owner !== null ? (s.owner || null) : (t.assigneeId || null); }
+function taskRemStage(s, t) { const r = String((s && s.rem) || "").split(":"); return r[0] === String(t.dueAt) ? Number(r[1]) || 0 : 0; }
+function taskRemNext(m) {
+  let rq = 0; const ts = m.tstate || {};
+  for (const t of (m.extra && m.extra.tasks) || []) {
+    const s = ts[t.id] || {}; if (s.status === "done" || !(Number(t.dueAt) > 0) || !taskEff(m, t)) continue;
+    const st = taskRemStage(s, t), at = st < 1 ? t.dueAt - T_S1 : st < 2 ? t.dueAt + T_S2 : 0;
+    if (at && (!rq || at < rq)) rq = at;
+  }
+  return rq;
+}
+function taskIdxWrite(c, cid, day, id, m) {
+  const name = DOC_ROOT + "/tasklists/" + cid + "~" + id;
+  if (!m || m.del || m.enc || !(m.extra && Array.isArray(m.extra.tasks))) return { delete: name };
+  const ts = m.tstate || {};
+  const tasks = m.extra.tasks.slice(0, 50).map(t => { const s = ts[t.id] || {}; return { id: t.id, text: String(t.text || "").slice(0, 300), a: taskEff(m, t), due: Number(t.dueAt) > 0 ? Number(t.dueAt) : null,
+    st: s.status === "done" ? "done" : "pending", note: String(s.note || "").slice(0, 300), db: s.doneBy || null, da: s.doneAt || null }; });
+  if (!tasks.some(t => t.st !== "done")) return { delete: name };
+  const users = [...new Set([m.by].concat(tasks.map(t => t.a)).filter(Boolean))].slice(0, 60);
+  return { update: { name, fields: toFsValue({ cid, day, id, by: m.by || null, title: String((m.extra && m.extra.title) || "").slice(0, 200), users, tasks, ts: Number(m.ts) || Date.now(), rq: taskRemNext(m) }).mapValue.fields } };
+}
+function chatNames(c) { return fsToJs((c.fields || {}).names || { nullValue: null }) || {}; }
+async function taskPush(token, c, cid, uids, title, body) {
+  const members = fsArr(c, "members"), muted = fsArr(c, "mutedBy");
+  const to = [...new Set(uids)].filter(u => u && members.indexOf(u) >= 0 && muted.indexOf(u) < 0);
+  if (!to.length) return 0;
+  return pushTo(token, to, strData({ t: "task", cid, title, body: String(body || "").slice(0, 300), ts: Date.now() }));
+}
+// إشعار «أُسندت إليك» لمن صار مسؤولاً جديداً (لا المرسل نفسه)
+async function taskAssignPush(token, c, cid, uid, m, before) {
+  if (m.enc) return 0;
+  const names = chatNames(c), gname = fstr(c, "name") || "سوا", by = names[uid] || "سوا";
+  const per = {};
+  for (const t of (m.extra && m.extra.tasks) || []) {
+    const a = taskEff(m, t); if (!a || a === uid) continue;
+    if (before && before[t.id] === a) continue;
+    if (((m.tstate || {})[t.id] || {}).status === "done") continue;
+    (per[a] = per[a] || []).push(t.text);
+  }
+  let n = 0;
+  for (const u of Object.keys(per).slice(0, 12)) {
+    const l = per[u];
+    n += await taskPush(token, c, cid, [u], "📌 " + by + " أسند إليك " + (l.length > 1 ? l.length + " مهامّ" : "مهمّة") + " · " + gname, l.slice(0, 3).join(" · ") + (l.length > 3 ? " …" : ""));
+  }
+  return n;
+}
+function taskEffMap(m) { const o = {}; for (const t of (m.extra && m.extra.tasks) || []) o[t.id] = taskEff(m, t); return o; }
+
+// إضافة مهمّة سريعة من البطاقة — أيّ عضو (غير السرّيّة؛ في السرّيّة يضيف المنشئ/المشرف عبر التعديل المشفّر)
+async function opChatTaskAdd(uid, payload, env, ctx) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const { c, m, cid, day, id } = await toolMsg(token, payload, uid, "tasks");
+  if (m.enc || e2eOf(c)) throw new Error("use edit in secret chats");
+  const text = String(payload.text || "").replace(/\s+/g, " ").trim().slice(0, 300);
+  if (!text) throw new Error("empty task");
+  const tasks = ((m.extra && m.extra.tasks) || []).slice();
+  if (tasks.length >= 50) throw new Error("too many tasks");
+  const a = segOk(String(payload.assigneeId || "")) && fsArr(c, "members").indexOf(String(payload.assigneeId)) >= 0 ? String(payload.assigneeId) : null;
+  const names = chatNames(c);
+  const t = { id: "t" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), text, assigneeId: a, assigneeName: a ? String(names[a] || "").slice(0, 80) : "", dueAt: Number(payload.dueAt) > 0 ? Number(payload.dueAt) : null, addedBy: uid };
+  tasks.push(t);
+  const extra = Object.assign({}, m.extra, { tasks });
+  const m2 = Object.assign({}, m, { extra });
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day, fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { extra: toFsValue(capVal(extra)) } } } } } } } },
+    updateMask: { fieldPaths: [fp("msgs", id, "extra")] } }, taskIdxWrite(c, cid, day, id, m2)]);
+  const job = taskAssignPush(token, c, cid, uid, m2, taskEffMap(m)).catch(() => {});
+  if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
+  return { task: t };
+}
+
+// «مهامّي»: القوائم المفتوحة التي أنا منشئها أو مسؤولٌ فيها (غير السرّيّة) — استعلامٌ واحد + عضويّة بقراءةٍ واحدة
+async function opChatMyTasks(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "tasklists" }],
+      where: { fieldFilter: { field: { fieldPath: "users" }, op: "ARRAY_CONTAINS", value: { stringValue: uid } } }, limit: 80 } }) });
+  const data = await res.json();
+  if (!res.ok) throw new Error("firestore query: " + JSON.stringify(data).slice(0, 200));
+  const rows = (data || []).filter(r => r.document).map(r => fsToJs({ mapValue: { fields: r.document.fields || {} } }));
+  const cids = [...new Set(rows.map(r => r.cid).filter(x => segOk(String(x || ""))))];
+  const chats = {};
+  if (cids.length) {
+    const r2 = await fetch(FS_BASE + ":batchGet", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ documents: cids.map(x => DOC_ROOT + "/chats/" + x), mask: { fieldPaths: ["members", "deleted", "name", "type", "admins"] } }) });
+    for (const r of (await r2.json()) || []) if (r.found && !fbool(r.found, "deleted") && fsArr(r.found, "members").indexOf(uid) >= 0)
+      chats[r.found.name.split("/").pop()] = { name: fstr(r.found, "name") || "", type: fstr(r.found, "type") || "", admin: fsArr(r.found, "admins").indexOf(uid) >= 0 };
+  }
+  const lists = rows.filter(r => chats[r.cid]).map(r => ({ cid: r.cid, chat: chats[r.cid].name, admin: chats[r.cid].admin, day: r.day, id: r.id, by: r.by, title: r.title, ts: r.ts,
+    tasks: (r.tasks || []).map(t => ({ id: t.id, text: t.text, assigneeId: t.a || null, dueAt: t.due || null, status: t.st, note: t.note || "", doneBy: t.db || null, doneAt: t.da || null })) }));
+  return { lists };
+}
+
+// التذكير (من المجدوِل): قائمةٌ واحدة في كلّ تشغيل
+async function taskReminders(env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const now = Date.now();
+  const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "tasklists" }], where: { compositeFilter: { op: "AND", filters: [
+      { fieldFilter: { field: { fieldPath: "rq" }, op: "GREATER_THAN", value: { integerValue: "0" } } },
+      { fieldFilter: { field: { fieldPath: "rq" }, op: "LESS_THAN_OR_EQUAL", value: { integerValue: String(now) } } }] } }, limit: 2 } }) });
+  const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+  let sent = 0;
+  for (const d of rows.slice(0, 1)) {
+    const x = fsToJs({ mapValue: { fields: d.fields || {} } });
+    let c = null, m = null;
+    try { c = await fsGet(token, "chats/" + x.cid); m = await dayMsg(token, x.cid, x.day, x.id); } catch (e) {}
+    if (!c || !m || m.del) { await fsCommit(token, [{ delete: d.name }]).catch(() => {}); continue; }
+    const names = chatNames(c), gname = fstr(c, "name") || "سوا", ts = Object.assign({}, m.tstate), writes = [];
+    const soon = {}, late = {}, lateBy = [];
+    for (const t of (m.extra && m.extra.tasks) || []) {
+      const s = ts[t.id] || {}, a = taskEff(m, t);
+      if (s.status === "done" || !(Number(t.dueAt) > 0) || !a) continue;
+      const st = taskRemStage(s, t);
+      if (st < 2 && now >= t.dueAt + T_S2) { (late[a] = late[a] || []).push(t.text); lateBy.push((names[a] || "") + ": " + t.text); ts[t.id] = Object.assign({}, s, { rem: t.dueAt + ":2" }); }
+      else if (st < 1 && now >= t.dueAt - T_S1) { (soon[a] = soon[a] || []).push(t.text); ts[t.id] = Object.assign({}, s, { rem: t.dueAt + ":1" }); }
+      else continue;
+      writes.push(setPath(x.cid, x.day, ["msgs", x.id, "tstate", t.id, "rem"], ts[t.id].rem));
+    }
+    const m2 = Object.assign({}, m, { tstate: ts });
+    writes.push(taskIdxWrite(c, x.cid, x.day, x.id, m2));
+    await fsCommit(token, writes).catch(e => console.log("taskrem:", e && e.message));   // أوّلاً: لا تكرار
+    for (const u of Object.keys(soon).slice(0, 8)) sent += await taskPush(token, c, x.cid, [u], "⏰ موعد مهمّتك قريب · " + gname, soon[u].slice(0, 3).join(" · "));
+    for (const u of Object.keys(late).slice(0, 8)) sent += await taskPush(token, c, x.cid, [u], "⚠️ تأخّرت مهمّتك · " + gname, late[u].slice(0, 3).join(" · "));
+    if (lateBy.length && m.by && !late[m.by]) sent += await taskPush(token, c, x.cid, [m.by], "⚠️ تأخّرت مهامّ في «" + ((m.extra && m.extra.title) || "") + "»", lateBy.slice(0, 3).join(" · "));
+  }
+  return { reminders: rows.length, sent };
 }
 
 // C164: تعديل قائمة المهامّ — منشئها أو مشرف المجموعة · تبقى حالة المهامّ التي بقيت · في السرّيّة: محتوى مشفّرٌ جديد للرسالة نفسها
-async function opChatTasksEdit(uid, payload, env) {
+async function opChatTasksEdit(uid, payload, env, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const { c, m, cid, day, id } = await toolMsg(token, payload, uid, "tasks");
   const admin = (fstr(c, "type") === "group" || fstr(c, "type") === "family") && fsArr(c, "admins").indexOf(uid) >= 0;
@@ -2402,9 +2569,18 @@ async function opChatTasksEdit(uid, payload, env) {
     text: String(t && t.text || "").slice(0, 300), assigneeId: segOk(String(t && t.assigneeId || "")) ? String(t.assigneeId) : null,
     assigneeName: String(t && t.assigneeName || "").slice(0, 80), dueAt: Number(t && t.dueAt) > 0 ? Number(t.dueAt) : null })).filter(t => t.text.trim());
   if (!title || !tasks.length) throw new Error("title and one task required");
+  // C173: تبقى «أضافها» للمهامّ التي بقيت
+  const oldT = {}; for (const t of (m.extra && m.extra.tasks) || []) oldT[t.id] = t;
+  tasks.forEach(t => { if (oldT[t.id] && oldT[t.id].addedBy) t.addedBy = oldT[t.id].addedBy; });
   const extra = Object.assign({}, m.extra, { title, tasks, editedAt: now });
+  const m2 = Object.assign({}, m, { extra });
+  // C173: تغيير المسؤول في التعديل يُلغي التولّي/الإسناد السابق لتلك المهمّة
+  const tsw = [];
+  for (const t of tasks) { const o = oldT[t.id], s = (m.tstate || {})[t.id]; if (o && s && s.owner !== undefined && (o.assigneeId || null) !== (t.assigneeId || null)) { m2.tstate = Object.assign({}, m2.tstate, { [t.id]: Object.assign({}, s) }); delete m2.tstate[t.id].owner; tsw.push(fp("msgs", id, "tstate", t.id, "owner")); } }
   await fsCommit(token, [{ update: { name: base, fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { extra: toFsValue(capVal(extra)), edited: { integerValue: String(now) } } } } } } } } },
-    updateMask: { fieldPaths: [fp("msgs", id, "extra"), fp("msgs", id, "edited")] } }]);
+    updateMask: { fieldPaths: [fp("msgs", id, "extra"), fp("msgs", id, "edited")].concat(tsw) } }, taskIdxWrite(c, cid, day, id, m2)]);
+  const job = taskAssignPush(token, c, cid, uid, m2, taskEffMap(m)).catch(() => {});
+  if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
   return { edited: now };
 }
 
@@ -2681,11 +2857,12 @@ async function notifyChat(token, c, cid, uid, msg) {
   const senderName = names[uid] || "سوا";
   const mentions = msg.mentions || [];
   // المُشار إليهم أوّلاً (ويصلهم ولو كتموا المجموعة)، ثمّ الباقون غير المكتومين
-  const targets = members.filter(u => u !== uid && (mentions.indexOf(u) >= 0 || muted.indexOf(u) < 0))
+  const tAssigned = msg.type === "tasks" && !msg.enc ? ((msg.extra && msg.extra.tasks) || []).map(t => t.assigneeId).filter(Boolean) : [];   // C173
+  const targets = members.filter(u => u !== uid && tAssigned.indexOf(u) < 0 && (mentions.indexOf(u) >= 0 || muted.indexOf(u) < 0))
     .sort((a, b) => (mentions.indexOf(b) >= 0) - (mentions.indexOf(a) >= 0));
   if (!targets.length || type === "saved") return 0;
   const group = type === "group" || type === "family";
-  const body = msg.enc ? "🔒 رسالة مشفّرة" : msg.type === "text" || msg.type === "sticker" ? (msg.text || "") : ({ image: "📷 صورة", video: "🎥 فيديو", voice: "🎤 رسالة صوتيّة", file: "📎 ملفّ", poll: "📊 استطلاع", bill: "🧾 فاتورة", fund: "💝 تبرّعات", tasks: "✅ مهامّ", contact: "👤 جهة اتّصال", location: "📍 موقع" }[msg.type] || "رسالة");
+  const body = msg.enc ? "🔒 رسالة مشفّرة" : msg.type === "text" || msg.type === "sticker" ? (msg.text || "") : ({ image: "📷 صورة", video: "🎥 فيديو", voice: "🎤 رسالة صوتيّة", file: "📎 ملفّ", poll: "📊 استطلاع", bill: "🧾 فاتورة", fund: "💝 تبرّعات", tasks: "✅ " + ((msg.extra && msg.extra.title) || "مهامّ"), contact: "👤 جهة اتّصال", location: "📍 موقع" }[msg.type] || "رسالة");
   const base = { t: "msg", cid, from: uid, ak: notifyChat.env ? await ackSig(notifyChat.env, "av|" + uid) : undefined, mid: msg.id, title: group ? (fstr(c, "name") || "سوا") : senderName, body: group ? senderName + ": " + body : body, ts: msg.ts };
   let sent = 0;
   const ment = targets.filter(u => mentions.indexOf(u) >= 0), rest = targets.filter(u => mentions.indexOf(u) < 0);
@@ -4779,6 +4956,7 @@ export default {
       let r = { reminders: 0 };
       try { r = await schedReminders(env); } catch (e) { console.log("reminders:", e && e.message); }
       if (r.reminders) return;
+      try { const tr = await taskReminders(env); if (tr.reminders) return; } catch (e) { console.log("taskrem:", e && e.message); }   // C173
       const slot = Math.floor(new Date(event.scheduledTime || Date.now()).getUTCMinutes() / 5) % 3;
       if (slot === 0) await cleanupDisappearing(env).catch(e => console.log("cleanup:", e && e.message));
       else if (slot === 1) { await cleanupCalls(env).catch(e => console.log("calls cleanup:", e && e.message)); await mediaGc(env, 10).catch(e => console.log("media gc:", e && e.message)); await storyGc(env, 2).catch(e => console.log("story gc:", e && e.message)); await storyqGc(env, 10).catch(e => console.log("storyq gc:", e && e.message)); await momentqGc(env, 10).catch(e => console.log("momentq gc:", e && e.message)); }
@@ -4921,8 +5099,10 @@ export default {
       if (op === "chat.pollEdit") { const r = await opChatPollEdit(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.billPaid") { const r = await opChatBillPaid(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "chat.fund") { const r = await opChatFund(uid, body.payload, env); return json({ ok: true, ...r }); }
-      if (op === "chat.task") { const r = await opChatTask(uid, body.payload, env); return json({ ok: true, ...r }); }
-      if (op === "chat.tasksEdit") { const r = await opChatTasksEdit(uid, body.payload, env); return json({ ok: true, ...r }); }   // C164
+      if (op === "chat.task") { const r = await opChatTask(uid, body.payload, env, ctx); return json({ ok: true, ...r }); }
+      if (op === "chat.taskAdd") { const r = await opChatTaskAdd(uid, body.payload, env, ctx); return json({ ok: true, ...r }); }   // C173
+      if (op === "chat.myTasks") { const r = await opChatMyTasks(uid, body.payload, env); return json({ ok: true, ...r }); }   // C173
+      if (op === "chat.tasksEdit") { const r = await opChatTasksEdit(uid, body.payload, env, ctx); return json({ ok: true, ...r }); }   // C164
       if (op === "chat.open") { const r = await opChatOpen(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "chat.send") { const r = await opChatSend(uid, body.payload, env, ctx); return json({ ok: true, ...r }); }
       if (op === "e2e.dm") { const r = await opE2eDm(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
