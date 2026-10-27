@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v83-tasks";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v84-metered";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -3489,11 +3489,17 @@ async function opRtcIce(uid, payload, env, claims, request) {
       });
     } catch (e) { console.log("TURN_EXTRA:", String(e.message || e)); }
   }
-  if (env.TURN_PROVIDER === "metered") relays.sort((a, b) => (/^m/.test(b.id) ? 1 : 0) - (/^m/.test(a.id) ? 1 : 0));
+  // C165: Metered هو الوسيط الأساسيّ و Cloudflare احتياطٌ إن فشل (للمقارنة) · TURN_PROVIDER = "cloudflare" يعكس الترتيب
+  const primary = env.TURN_PROVIDER === "cloudflare" || !relays.some(r => /^m/.test(r.id)) ? "cf" : "m";
+  const isP = (r) => primary === "cf" ? r.id === "cf" : /^m/.test(r.id);
+  relays.sort((a, b) => (isP(b) ? 1 : 0) - (isP(a) ? 1 : 0));
   if (!relays.length) return Object.assign({ iceServers: stun, turn: false }, cfErr ? { cfErr } : {}, mErr ? { err: mErr } : {});
   stat("turn:" + relays[0].id.split(":")[0]);
   const all = []; relays.forEach(r => r.iceServers.forEach(x => all.push(x)));
-  return Object.assign({ turn: true, provider: relays[0].id === "cf" ? "cloudflare" : "metered", iceServers: stun.concat(all), relays }, cfErr ? { cfErr } : {});
+  // iceServers (للنسخ القديمة): الأساسيّ وحده إن وُجد، فلا يختار الهاتف غيره إلّا إن فشل
+  const prim = relays.filter(isP), base = prim.length ? prim : relays;
+  const bl = []; base.forEach(r => r.iceServers.forEach(x => bl.push(x)));
+  return Object.assign({ turn: true, provider: relays[0].id === "cf" ? "cloudflare" : "metered", primary: primary === "cf" ? "cf" : "m", iceServers: stun.concat(bl), relays }, cfErr ? { cfErr } : {});
 }
 const RING_REPEATS = 3, RING_GAP_MS = (typeof globalThis !== "undefined" && globalThis.__RING_GAP_MS) || 8000;
 async function opCallRing(uid, payload, env, claims, ctx) {
