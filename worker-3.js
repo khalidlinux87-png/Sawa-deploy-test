@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v86-relay";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v87-iosrtc";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -4904,7 +4904,7 @@ async function opQaRate(uid, payload, env, claims) {
   const str = (v, n) => String(v == null ? "" : v).replace(/[\u0000-\u001f]/g, " ").slice(0, n);
   const TAGS = ["echo", "noise", "cut", "delay", "low", "drop"];
   const d = { stars, tags: (Array.isArray(p.tags) ? p.tags : []).filter(t => TAGS.indexOf(t) >= 0).slice(0, 6), note: str(p.note, 200),
-    kind: str(p.kind, 16), engine: p.engine === "native" ? "native" : "web", secs: qaNum(p.secs, 0, 36000), out: str(p.out, 6), route: str(p.route, 10),
+    kind: str(p.kind, 16), engine: p.engine === "native" || p.engine === "native-ios" ? p.engine : "web", osr: str(p.osr, 40), secs: qaNum(p.secs, 0, 36000), out: str(p.out, 6), route: str(p.route, 10),
     relay: str(p.relay, 40), proto: str(p.proto, 6), colo: str(p.colo, 6), n: qaNum(p.n, 1, 50), reason: str(p.reason, 16), ver: str(p.ver, 12),
     plat: str(p.plat, 40), model: str(p.model, 40), lang: p.lang === "en" ? "en" : "ar", rtt: qaStatClean(p.rtt), jb: qaStatClean(p.jb), loss: qaStatClean(p.loss) };
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
