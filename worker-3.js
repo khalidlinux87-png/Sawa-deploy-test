@@ -1,3 +1,4 @@
+import { connect } from "cloudflare:sockets";   // C178: فحص وسطاء TURN بطلب STUN عبر TCP (مراقبة الخدمات)
 /* ============================================================
    worker.js — سوا · applyEdit (v2: التحقّق + الكتابة إلى Firestore)
    ------------------------------------------------------------
@@ -11,7 +12,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v87-iosrtc";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v88-sfu-health";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -3084,6 +3085,21 @@ async function opGcallStart(uid, payload, env, claims, ctx) {
   }
   return { gid, joined: false, type, title: node.title, by, approval: !!approval, cid };
 }
+// C178: المكالمة الجماعيّة تنتقل إلى خادم الوسائط (SFU) حين تكبر — العضو المنتخَب أنشأ غرفةً كبيرة (rooms/{code}/meta: host=هو · big · gcid)
+//       والخادم يتحقّق ثمّ يكتب gcalls/{gid}/room فينتقل إليها الجميع (ومن يأتي لاحقاً)
+async function opGcallRoom(uid, payload, env) {
+  const gid = String((payload && payload.gid) || ""), code = String((payload && payload.code) || "");
+  if (!segOk(gid) || !/^[A-HJ-NP-Z2-9]{8}$/.test(code)) throw new Error("bad ref");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const [g, meta] = await Promise.all([rtdbGet(token, "gcalls/" + gid), rtdbGet(token, "rooms/" + code + "/meta")]);
+  if (!g || !g.allow || g.allow[uid] !== true || !g.members || !g.members[uid]) throw new Error("not in this call");
+  if (g.room) return { room: g.room };
+  if (!meta || meta.host !== uid || meta.big !== true || meta.gcid !== gid) throw new Error("bad room");
+  if (!sfuOn(env)) throw new Error("not_configured");
+  await rtdbPatch(token, { ["gcalls/" + gid + "/room"]: code });
+  stat("gcall:sfu");
+  return { room: code };
+}
 async function opGcallAdd(uid, payload, env, claims, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const gid = String((payload && payload.gid) || "");
@@ -3624,6 +3640,88 @@ async function cloudflareIce(env, uid) {
   if (uid) { if (iceByUid.size > 5000) iceByUid.clear(); iceByUid.set(uid, { list, at: Date.now() }); }
   return list;
 }
+// C178: مراقبة الخدمات — كلّ خدمةٍ تُفحص وحدها: Firestore (الرسائل والبيانات) · RTDB (الإشارات) · وسطاء TURN (Metered بطلب STUN حقيقيّ عبر TCP،
+//       Cloudflare بإصدار بيانات الدخول) · خادم الوسائط SFU · الإشعارات (FCM). النتيجة في health/now مع آخر ٧٢ قياساً لكلّ خدمة،
+//       وإشعارٌ للمدير حين تتعطّل خدمة (بعد إعادة فحصٍ تؤكّد العطل) وحين تعود.
+const HEALTH_LABELS = { firestore: "الرسائل والبيانات (Firestore)", rtdb: "إشارات المكالمات (RTDB)", cfturn: "وسيط Cloudflare", sfu: "خادم الوسائط (SFU)", fcm: "الإشعارات (FCM)" };
+async function stunTcp(host, port) {
+  const t0 = Date.now();
+  const sock = connect({ hostname: host, port });
+  const w = sock.writable.getWriter(), r = sock.readable.getReader();
+  const req = new Uint8Array(20), dv = new DataView(req.buffer);
+  dv.setUint16(0, 0x0001); dv.setUint16(2, 0); dv.setUint32(4, 0x2112A442); crypto.getRandomValues(req.subarray(8));
+  try {
+    await w.write(req);
+    const res = await Promise.race([r.read(), new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 5000))]);
+    const v = res && res.value;
+    if (!v || v.length < 2) throw new Error("no reply");
+    if (((v[0] << 8) | v[1]) !== 0x0101) throw new Error("bad stun reply");
+    return Date.now() - t0;
+  } finally { try { await sock.close(); } catch (e) {} }
+}
+async function fcmProbe(token) {   // تحقّقٌ بلا إرسال (validate_only إلى موضوعٍ وهميّ)
+  const t0 = Date.now();
+  const res = await fetch("https://fcm.googleapis.com/v1/projects/" + PROJECT_ID + "/messages:send", {
+    method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ validate_only: true, message: { topic: "sawa-health", data: { t: "health" } } }) });
+  if (!res.ok) throw new Error("fcm " + res.status + " " + (await res.text()).slice(0, 80));
+  return Date.now() - t0;
+}
+async function healthRun(env, opts) {
+  opts = opts || {};
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const name = DOC_ROOT + "/health/now";
+  const prevDoc = await fsGet(token, "health/now").catch(() => null);
+  const prev = prevDoc ? { svc: JSON.parse(fstr(prevDoc, "svc") || "{}"), hist: JSON.parse(fstr(prevDoc, "hist") || "{}"), admin: fstr(prevDoc, "admin") } : { svc: {}, hist: {}, admin: "" };
+  const probes = {
+    firestore: async () => { await fsGet(token, "config/relay"); },
+    rtdb: async () => { await rtdbGet(token, "health"); },
+  };
+  if ((env.METERED_USER && env.METERED_PASS) || (env.METERED_KEY && env.METERED_APP)) {
+    const hosts = String(env.METERED_HOSTS || env.METERED_HOST || METERED_DEFAULT_HOSTS).split(/[\s,]+/).filter(h => /^[a-z0-9.-]{3,80}$/i.test(h)).slice(0, 3);
+    for (const h of hosts) probes["metered:" + h.split(".")[0]] = () => stunTcp(h, 80);
+  }
+  if (env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN) probes.cfturn = async () => { await cloudflareIce(env, null); };
+  if (sfuOn(env)) probes.sfu = async () => { const j = await sfuApi(env, "POST", "/sessions/new"); if (!j || !j.sessionId) throw new Error("no session"); };
+  probes.fcm = () => fcmProbe(token);
+  const run = async (fn) => { const t0 = Date.now(); try { const ms = await fn(); return { ok: true, ms: typeof ms === "number" ? ms : Date.now() - t0 }; } catch (e) { return { ok: false, ms: Date.now() - t0, err: String((e && e.message) || e).slice(0, 140) }; } };
+  const names = Object.keys(probes), out = {};
+  const first = await Promise.all(names.map(k => run(probes[k])));
+  for (let i = 0; i < names.length; i++) {
+    let r = first[i];
+    if (!r.ok) { await new Promise(res => setTimeout(res, 1500)); r = await run(probes[names[i]]); }   // إعادة فحصٍ قبل الحكم بالعطل
+    out[names[i]] = r;
+  }
+  const now = Date.now(), svc = {}, hist = {}, down = [], up = [];
+  for (const k of names) {
+    const p = prev.svc[k] || {}, r = out[k];
+    svc[k] = { ok: r.ok, ms: r.ms, err: r.err || null, since: (p.ok === r.ok && p.since) ? p.since : now, at: now };
+    hist[k] = ((prev.hist[k] || []).concat([[now, r.ok ? r.ms : -1]])).slice(-72);
+    if (p.ok !== false && !r.ok) down.push(k); else if (p.ok === false && r.ok) up.push(k);
+  }
+  await fsCommit(token, [{ update: { name, fields: { at: { integerValue: String(now) }, svc: { stringValue: JSON.stringify(svc) }, hist: { stringValue: JSON.stringify(hist) }, admin: { stringValue: opts.admin || prev.admin || "" } } } }]);
+  const admin = opts.admin || prev.admin;
+  const lbl = (k) => HEALTH_LABELS[k] || (k.indexOf("metered:") === 0 ? "وسيط Metered (" + k.slice(8) + ")" : k);
+  if (admin && !opts.manual && (down.length || up.length)) {
+    const body = (down.length ? "⛔ متعطّل: " + down.map(lbl).join("، ") + (out[down[0]].err ? " — " + out[down[0]].err : "") : "") + (up.length ? (down.length ? "\n" : "") + "✅ عاد: " + up.map(lbl).join("، ") : "");
+    await pushTo(token, [admin], strData({ t: "health", title: down.length ? "⚠️ سوا: خدمة متعطّلة" : "✅ سوا: عادت الخدمة", body, ts: now })).catch(() => {});
+  }
+  return { at: now, svc, hist };
+}
+async function opAdminHealth(uid, payload, env, claims) {
+  if (!isAdmin(env, claims)) return { admin: false };
+  if (payload && payload.run) { const r = await healthRun(env, { admin: uid, manual: true }); return Object.assign({ admin: true, labels: HEALTH_LABELS }, r); }
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const d = await fsGet(token, "health/now").catch(() => null);
+  if (!d || fstr(d, "admin") !== uid) {   // أوّل فتحٍ للشاشة يسجّل المدير لتصله التنبيهات
+    await fsCommit(token, [{ update: { name: DOC_ROOT + "/health/now", fields: { admin: { stringValue: uid } } }, updateMask: { fieldPaths: ["admin"] } }]).catch(() => {});
+  }
+  return { admin: true, labels: HEALTH_LABELS, at: d ? fsInt(d, "at") : 0, svc: d ? JSON.parse(fstr(d, "svc") || "{}") : {}, hist: d ? JSON.parse(fstr(d, "hist") || "{}") : {} };
+}
+
+// C178: مضيفو Metered الإقليميّون — العامّ (يوجّه للأقرب) + الشرق الأوسط + وسط أوروبا. التطبيق يقيس زمن كلّ واحدٍ من شبكة الهاتف
+//       ويستعمل أسرع اثنين (relayIce). المتغيّر METERED_HOSTS يغلب هذه القائمة. (الأقاليم في الخطط المدفوعة؛ ما يفشل قياسه لا يُستعمل)
+const METERED_DEFAULT_HOSTS = "global.relay.metered.ca,middle-east.relay.metered.ca,eu-central.relay.metered.ca";
 // C175: الوسيط الأساسيّ يبدّله المدير من هاتفه — config/relay.primary = "m" | "cf" | "" (تلقائيّ = TURN_PROVIDER في الـWorker)
 let RELAY_CFG = null, RELAY_AT = 0;
 async function relayPref(env) {
@@ -3662,7 +3760,7 @@ async function opRtcIce(uid, payload, env, claims, request) {
     catch (e) { cfErr = String((e && e.message) || e); console.log("cf turn:", cfErr); }
   }
   if (env.METERED_USER && env.METERED_PASS) {
-    const hosts = String(env.METERED_HOSTS || env.METERED_HOST || "global.relay.metered.ca").split(/[\s,]+/).filter(h => /^[a-z0-9.-]{3,80}$/i.test(h)).slice(0, 6);
+    const hosts = String(env.METERED_HOSTS || env.METERED_HOST || METERED_DEFAULT_HOSTS).split(/[\s,]+/).filter(h => /^[a-z0-9.-]{3,80}$/i.test(h)).slice(0, 6);
     for (const h of hosts) relays.push({ id: "m:" + h, label: "Metered " + (h.split(".")[0] === "global" ? "global" : h.split(".")[0]),
       iceServers: [{ urls: ["turn:" + h + ":80", "turn:" + h + ":80?transport=tcp", "turn:" + h + ":443", "turns:" + h + ":443?transport=tcp"], username: env.METERED_USER, credential: env.METERED_PASS }] });
   } else if (env.METERED_KEY && env.METERED_APP) {
@@ -4978,7 +5076,8 @@ export default {
       try { r = await schedReminders(env); } catch (e) { console.log("reminders:", e && e.message); }
       if (r.reminders) return;
       try { const tr = await taskReminders(env); if (tr.reminders) return; } catch (e) { console.log("taskrem:", e && e.message); }   // C173
-      const slot = Math.floor(new Date(event.scheduledTime || Date.now()).getUTCMinutes() / 5) % 3;
+      const slot = Math.floor(new Date(event.scheduledTime || Date.now()).getUTCMinutes() / 5) % 4;   // C178: الخانة ٣ لمراقبة الخدمات وحدها (حدّ الطلبات الفرعيّة)
+      if (slot === 3) { await healthRun(env).catch(e => console.log("health:", e && e.message)); return; }
       if (slot === 0) await cleanupDisappearing(env).catch(e => console.log("cleanup:", e && e.message));
       else if (slot === 1) { await cleanupCalls(env).catch(e => console.log("calls cleanup:", e && e.message)); await mediaGc(env, 10).catch(e => console.log("media gc:", e && e.message)); await storyGc(env, 2).catch(e => console.log("story gc:", e && e.message)); await storyqGc(env, 10).catch(e => console.log("storyq gc:", e && e.message)); await momentqGc(env, 10).catch(e => console.log("momentq gc:", e && e.message)); }
       else await purgeWork(env, 40).catch(e => console.log("purge:", e && e.message));   // حذف الحسابات: ما تبقّى من عائلاتٍ ومحادثات
@@ -5132,6 +5231,7 @@ export default {
       if (op === "rtc.ice") { const r = await opRtcIce(uid, body.payload, env, claims, request); return json({ ok: true, ...r }); }
       if (op === "call.ring") { const r = await opCallRing(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "gcall.start") { const r = await opGcallStart(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+      if (op === "gcall.room") { const r = await opGcallRoom(uid, body.payload, env); return json({ ok: true, ...r }); }   // C178
       if (op === "gcall.add") { const r = await opGcallAdd(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "sched.set") { const r = await opSchedSet(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "sched.join") { const r = await opSchedJoin(uid, body.payload, env); return json({ ok: true, ...r }); }
@@ -5187,6 +5287,7 @@ export default {
       if (op === "moment.seen") { const r = await opMomentSeen(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "moment.prefs") { const r = await opMomentPrefs(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "qa.rate") { const r = await opQaRate(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "admin.health") { const r = await opAdminHealth(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C178
       if (op === "admin.relay") { const r = await opAdminRelay(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C175
       if (op === "admin.qa") { const r = await opAdminQa(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "admin.stats") { const r = await opAdminStats(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
