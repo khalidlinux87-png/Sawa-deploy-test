@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: فحص وسطاء TURN 
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v91-quality";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v92-vup";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -3889,7 +3889,7 @@ async function opCallTel(uid, payload, env) {
   const num = (v, lo, hi) => { const x = Number(v); return Number.isFinite(x) ? Math.max(lo, Math.min(hi, Math.round(x))) : null; };
   const d = { k: str(p.k, 16), role: str(p.role, 10), eng: str(p.eng, 12), mode: str(p.mode, 6), plat: str(p.plat, 30), model: str(p.model, 40), ver: str(p.ver, 12), net: str(p.net, 16),
     ok: !!p.ok, setup: num(p.setup, 0, 120000), secs: num(p.secs, 0, 86400), reason: str(p.reason, 16), route: str(p.route, 8), proto: str(p.proto, 6), relay: str(p.relay, 32),
-    n: num(p.n, 0, 50), rst: num(p.rst, 0, 100), rtt: qaStatClean(p.rtt), jit: qaStatClean(p.jit), loss: qaStatClean(p.loss), jb: qaStatClean(p.jb), fps: qaStatClean(p.fps), h: qaStatClean(p.h) };
+    n: num(p.n, 0, 50), rst: num(p.rst, 0, 100), err: str(p.err, 40), up: p.up ? 1 : 0, ck: p.ck ? 1 : 0, vis: p.vis ? 1 : 0, rtt: qaStatClean(p.rtt), jit: qaStatClean(p.jit), loss: qaStatClean(p.loss), jb: qaStatClean(p.jb), fps: qaStatClean(p.fps), h: qaStatClean(p.h) };
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   await telWrite(token, cid, uid.slice(0, 10), uid, d);
   stat("tel:" + (d.ok ? (d.route || "ok") : "fail"));
