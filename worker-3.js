@@ -2,7 +2,7 @@ import { connect } from "cloudflare:sockets";   // C178: فحص وسطاء TURN 
 /* ============================================================
    worker.js — سوا · applyEdit (v2: التحقّق + الكتابة إلى Firestore)
    ------------------------------------------------------------
-   يعمل على Cloudflare Workers (مجاناً).
+   يعمل على Cloudflare Workers (الخطّة المدفوعة منذ C180 — WORKERS_FREE=1 يعيد حدود المجّانيّة).
    v2 يضيف: مفتاح خدمة → رمز وصول Google → الكتابة إلى Firestore.
    أوّل عمليّة: group.create (ينشئ العائلة وعضويّة المالك).
 
@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: فحص وسطاء TURN 
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v88-sfu-health";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v90-paid";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -2024,7 +2024,7 @@ async function cleanupDisappearing(env) {
       pending += ids.filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && m.exp >= now; }).length;
       if (!gone.length) continue;
       pending += gone.length;   // ما لم يُحذف في هذه الدورة يُحسب حتّى يُحذف
-      let budget = 5; const ready = [];
+      let budget = LIM(env).dis; const ready = [];
       for (const id of gone) {
         const m = fsToJs(msgs[id]), mid = m && m.extra && m.extra.mid;
         if (!mid) { ready.push(id); continue; }
@@ -2461,7 +2461,7 @@ async function taskAssignPush(token, c, cid, uid, m, before) {
     (per[a] = per[a] || []).push(t.text);
   }
   let n = 0;
-  for (const u of Object.keys(per).slice(0, 12)) {
+  for (const u of Object.keys(per).slice(0, LIM(notifyChat.env).task)) {
     const l = per[u];
     n += await taskPush(token, c, cid, [u], "📌 " + by + " أسند إليك " + (l.length > 1 ? l.length + " مهامّ" : "مهمّة") + " · " + gname, l.slice(0, 3).join(" · ") + (l.length > 3 ? " …" : ""));
   }
@@ -2520,10 +2520,10 @@ async function taskReminders(env) {
   const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
     body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "tasklists" }], where: { compositeFilter: { op: "AND", filters: [
       { fieldFilter: { field: { fieldPath: "rq" }, op: "GREATER_THAN", value: { integerValue: "0" } } },
-      { fieldFilter: { field: { fieldPath: "rq" }, op: "LESS_THAN_OR_EQUAL", value: { integerValue: String(now) } } }] } }, limit: 2 } }) });
+      { fieldFilter: { field: { fieldPath: "rq" }, op: "LESS_THAN_OR_EQUAL", value: { integerValue: String(now) } } }] } }, limit: LIM(env).rem + 1 } }) });
   const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
   let sent = 0;
-  for (const d of rows.slice(0, 1)) {
+  for (const d of rows.slice(0, LIM(env).rem)) {
     const x = fsToJs({ mapValue: { fields: d.fields || {} } });
     let c = null, m = null;
     try { c = await fsGet(token, "chats/" + x.cid); m = await dayMsg(token, x.cid, x.day, x.id); } catch (e) {}
@@ -2758,6 +2758,12 @@ async function fcmSend(token, devToken, data, lang) {
 }
 // C60: أجهزة المستخدم مرتّبةً بالأحدث تسجيلاً (ts) — حتى لا يحجب رمزٌ ميّت قديم رمزاً حيّاً جديداً
 const DEV_MAX = 5, DEV_TTL = 60 * 86400000;
+// C180: الخطّة المدفوعة في Cloudflare Workers (١٠٠٠ طلبٍ فرعيّ لكلّ تشغيل بدل ٥٠) ⇒ حدودٌ أوسع. WORKERS_FREE=1 يعيد حدود المجّانيّة.
+function LIM(env) {
+  const free = String((env && env.WORKERS_FREE) || (PUSH_ENV && PUSH_ENV.WORKERS_FREE) || "") === "1";
+  return free ? { free, push: 12, ring: 10, contacts: 4, mom: 10, task: 12, rem: 1, remBatch: 12, purge: 40, media: 10, story: 2, q: 10, dis: 5 }
+              : { free, push: 200, ring: 60, contacts: 7, mom: 60, task: 100, rem: 10, remBatch: 100, purge: 400, media: 60, story: 10, q: 60, dis: 40 };
+}
 function devTs(d) { return Number(((d.fields || {}).ts || {}).integerValue || 0); }
 async function devsOf(token, uid) {
   const devs = await fsList(token, "accounts/" + uid + "/devices");
@@ -2833,7 +2839,9 @@ async function opVoipTest(uid, payload, env, claims) {
 }
 async function pushTo(token, uids, data) {
   let sent = 0;
-  for (const u of uids.slice(0, 12)) {
+  const L = LIM(PUSH_ENV), list = [...new Set(uids)].slice(0, L.push);
+  // C180: بالتوازي (٨ مستلمين معاً) — المجموعات الكبيرة كانت تصل لأوّل ١٢ فقط وبالتتابع
+  const one = async (u) => {
     const devs = await devsOf(token, u);
     const du = typeof data === "function" ? await data(u) : data;   // v65: بيانات خاصّة بكلّ مستلم (توقيع الإقرار)
     for (const d of devs.slice(0, DEV_MAX)) {
@@ -2845,7 +2853,8 @@ async function pushTo(token, uids, data) {
       if (r === "ok") { sent++; stat("push"); }
       else if (r === "gone") await fsCommit(token, [{ delete: d.name }]).catch(() => {});
     }
-  }
+  };
+  for (let i = 0; i < list.length; i += 8) await Promise.all(list.slice(i, i + 8).map(u => one(u).catch(e => console.log("push to:", e && e.message))));
   return sent;
 }
 // v56: «from» مفتاحٌ محجوز في FCM (ومعه message_type و google.*/gcm.*) — وجوده يجعل FCM يرفض الرسالة كلّها (INVALID_ARGUMENT):
@@ -2870,7 +2879,7 @@ async function notifyChat(token, c, cid, uid, msg) {
   const env0 = notifyChat.env;
   const signed = (o) => env0 ? async (u) => strData(Object.assign({}, o, { to: u, dk: await ackSig(env0, "d|" + cid + "|" + u + "|" + msg.ts) })) : strData(o);
   if (ment.length) sent += await pushTo(token, ment, signed(Object.assign({}, base, { mention: "1", title: senderName + " أشار إليك" + (group ? " في " + (fstr(c, "name") || "") : "") })));
-  if (rest.length) sent += await pushTo(token, rest.slice(0, 12 - ment.length), signed(base));
+  if (rest.length) sent += await pushTo(token, rest.slice(0, Math.max(0, LIM(env0).push - ment.length)), signed(base));   // C180
   return sent;
 }
 // الكتم يُنسخ إلى المحادثة نفسها (mutedBy) فلا يقرأ الإرسال إعدادات كلّ عضو
@@ -2952,7 +2961,7 @@ async function opSfuPush(uid, payload, env) {
 }
 async function opSfuPull(uid, payload, env) {
   const g = await sfuGuard(uid, payload, env, true);
-  const want = (payload.tracks || []).slice(0, 40).map(t => ({ sessionId: String(t.sessionId), trackName: String(t.trackName) }));
+  const want = (payload.tracks || []).slice(0, 40).map(t => ({ sessionId: String(t.sessionId), trackName: String(t.trackName), sc: t.sc === true, rid: t.rid === "h" ? "h" : "f" }));
   if (!want.length || want.some(t => !SFU_SID_RE.test(t.sessionId) || !SFU_TRK_RE.test(t.trackName) || t.sessionId === g.sid)) throw new Error("bad_tracks");
   // كلّ جلسةٍ مسحوبة لعضوٍ في الغرفة نفسها، وصاحبها ما زال عضواً
   const members = await rtdbGet(g.token, "rooms/" + g.room + "/members").catch(() => null) || {};
@@ -2962,7 +2971,9 @@ async function opSfuPull(uid, payload, env) {
     const o = await sfuOwn(g.token, sid);
     if (o && o.room === g.room && members[o.u]) ok.push(sid); else rejected.push(sid);
   }
-  const tracks = want.filter(t => ok.indexOf(t.sessionId) >= 0).map(t => ({ location: "remote", sessionId: t.sessionId, trackName: t.trackName }));
+  // C179: Simulcast — الناشر يرسل طبقتين (f كاملة · h نصف الدقّة) والخادم يختار لكلّ مشاهدٍ ما تحتمله شبكته (asciibetical: f ثمّ h)
+  const tracks = want.filter(t => ok.indexOf(t.sessionId) >= 0).map(t => Object.assign({ location: "remote", sessionId: t.sessionId, trackName: t.trackName },
+    t.sc ? { simulcast: { preferredRid: t.rid, priorityOrdering: "asciibetical", ridNotAvailable: "asciibetical" } } : {}));
   const out = want.filter(t => ok.indexOf(t.sessionId) < 0).map(t => ({ sessionId: t.sessionId, trackName: t.trackName, error: "not_in_room" }));
   if (!tracks.length) return { tracks: out, renegotiate: false };
   const j = await sfuApi(env, "POST", "/sessions/" + g.sid + "/tracks/new", { tracks });
@@ -3049,7 +3060,7 @@ async function opGcallStart(uid, payload, env, claims, ctx) {
     ring = to.filter(u => quiet.indexOf(u) < 0);
     // الإشعار لا يصل لمن حظرك (الرنين داخل التطبيق يُسقطه جهازه أيضاً) — يُفحص لمن سيصلهم إشعار فقط
     const pushable = [];
-    for (const u of ring.slice(0, 4)) if (!(await blockedBy(token, u, uid))) pushable.push(u);
+    for (const u of ring.slice(0, LIM(env).contacts)) if (!(await blockedBy(token, u, uid))) pushable.push(u);
     payload.__push = pushable;
     title = typeof payload.title === "string" ? payload.title.slice(0, 80) : "";
   } else throw new Error("bad call");
@@ -3068,7 +3079,7 @@ async function opGcallStart(uid, payload, env, claims, ctx) {
   await rtdbPatch(token, upd);
   if (vc) {   // v37: لا رنين — رسالة نظامٍ في المحادثة وإشعارٌ عاديّ (لغير الكاتمين) يفتح المحادثة وفيها شريط «انضمام»
     try { await sysMsg(token, cid, uid, "vc_on", {}); } catch (e) {}
-    const soft = allow.filter(u => u !== uid && muted.indexOf(u) < 0).slice(0, 10);
+    const soft = allow.filter(u => u !== uid && muted.indexOf(u) < 0).slice(0, LIM(env).ring);
     if (soft.length) {
       const job = pushTo(token, soft, strData({ t: "msg", cid, from: uid, mid: "vc" + gid, title: node.title || "سوا", body: "🎙 " + me + " بدأ دردشة صوتيّة — انضمّ متى شئت", ts: now }));
       if (ctx && ctx.waitUntil) ctx.waitUntil(job.catch(() => {})); else await job.catch(() => {});
@@ -3077,7 +3088,7 @@ async function opGcallStart(uid, payload, env, claims, ctx) {
   }
   // إشعار رنين لمن لم يكتموا (≤ ١٠ — حدّ الطلبات الفرعيّة)
   // ≤ ١٠ للمجموعة، ≤ ٤ لجهات الاتّصال (حدّ ٥٠ طلباً فرعيّاً لكلّ طلب في خطّة Workers المجّانيّة)
-  const targets = payload.__push || ring.filter(u => muted.indexOf(u) < 0).slice(0, 10);
+  const targets = payload.__push || ring.filter(u => muted.indexOf(u) < 0).slice(0, LIM(env).ring);   // C180
   if (targets.length) {
     const body = (type === "video" ? "📹 " : "📞 ") + (cid || isSched ? me + " بدأ مكالمة جماعيّة" : me + " يدعوك لمكالمة جماعيّة");
     const job = pushTo(token, targets, strData({ t: "call", call: gid, gid, from: uid, fromName: me, cid: cid || "", type, title: node.title || me, body, ts: now }));
@@ -3106,7 +3117,7 @@ async function opGcallAdd(uid, payload, env, claims, ctx) {
   if (!/^[gs][a-z0-9]{6,40}$/.test(gid)) throw new Error("bad id: gid");
   const g = await rtdbGet(token, "gcalls/" + gid);
   if (!g || !g.allow || !g.allow[uid]) throw new Error("not in this call");
-  const to = [...new Set(((payload && payload.to) || []).map(String))].filter(u => u !== uid).slice(0, 4);
+  const to = [...new Set(((payload && payload.to) || []).map(String))].filter(u => u !== uid).slice(0, LIM(env).contacts);
   if (!to.length || to.some(u => !segOk(u))) throw new Error("bad call");
   let chatMembers = [];
   if (g.cid) { const c = await chatDoc(token, g.cid); chatMembers = c ? fsArr(c, "members") : []; }
@@ -3253,14 +3264,14 @@ async function schedReminders(env) {
   const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
     body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "scheds" }], where: { compositeFilter: { op: "AND", filters: [
       { fieldFilter: { field: { fieldPath: "rq" }, op: "GREATER_THAN", value: { integerValue: "0" } } },
-      { fieldFilter: { field: { fieldPath: "rq" }, op: "LESS_THAN_OR_EQUAL", value: { integerValue: String(now + 150000) } } }] } }, limit: 3 } }) });
+      { fieldFilter: { field: { fieldPath: "rq" }, op: "LESS_THAN_OR_EQUAL", value: { integerValue: String(now + 150000) } } }] } }, limit: LIM(env).rem + 2 } }) });
   const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
   let sent = 0;
-  for (const d of rows.slice(0, 1)) {   // واحدٌ لكلّ تشغيل (حدّ الطلبات الفرعيّة) — الباقي في التشغيل التالي
+  for (const d of rows.slice(0, LIM(env).rem)) {   // C180: ١٠ لكلّ تشغيل (المجّانيّة: واحد)
     // C84: الغرف المنشورة برابط قد يكثر مدعوّوها ⇒ دفعات من ١٢ في كلّ تشغيل (rqOff)
-    const allU = fsArr(d, "users"), off = fsInt(d, "rqOff") || 0, batch = allU.slice(off, off + 12), more = off + 12 < allU.length;
+    const RB = LIM(env).remBatch, allU = fsArr(d, "users"), off = fsInt(d, "rqOff") || 0, batch = allU.slice(off, off + RB), more = off + RB < allU.length;
     // أوّلاً: علّمه مُرسَلاً (لا تكرار لو تعثّر الإرسال)
-    await fsCommit(token, [{ update: { name: d.name, fields: more ? { rqOff: { integerValue: String(off + 12) } } : { rq: { integerValue: "0" }, rqOff: { integerValue: "0" } } }, updateMask: { fieldPaths: more ? ["rqOff"] : ["rq", "rqOff"] } }]);
+    await fsCommit(token, [{ update: { name: d.name, fields: more ? { rqOff: { integerValue: String(off + RB) } } : { rq: { integerValue: "0" }, rqOff: { integerValue: "0" } } }, updateMask: { fieldPaths: more ? ["rqOff"] : ["rq", "rqOff"] } }]);
     const at = fsInt(d, "at");
     if (at < now - 10 * 60000) continue;   // فات موعده
     const mins = Math.max(1, Math.round((at - now) / 60000));
@@ -3673,6 +3684,7 @@ async function healthRun(env, opts) {
   const name = DOC_ROOT + "/health/now";
   const prevDoc = await fsGet(token, "health/now").catch(() => null);
   const prev = prevDoc ? { svc: JSON.parse(fstr(prevDoc, "svc") || "{}"), hist: JSON.parse(fstr(prevDoc, "hist") || "{}"), admin: fstr(prevDoc, "admin") } : { svc: {}, hist: {}, admin: "" };
+  if (!opts.manual && prevDoc && Date.now() - fsInt(prevDoc, "at") < 270000) return { at: fsInt(prevDoc, "at"), svc: prev.svc, hist: prev.hist, skipped: true };   // C180: كلّ ٥ دقائق مهما تكرّر المجدوِل
   const probes = {
     firestore: async () => { await fsGet(token, "config/relay"); },
     rtdb: async () => { await rtdbGet(token, "health"); },
@@ -3722,6 +3734,32 @@ async function opAdminHealth(uid, payload, env, claims) {
 // C178: مضيفو Metered الإقليميّون — العامّ (يوجّه للأقرب) + الشرق الأوسط + وسط أوروبا. التطبيق يقيس زمن كلّ واحدٍ من شبكة الهاتف
 //       ويستعمل أسرع اثنين (relayIce). المتغيّر METERED_HOSTS يغلب هذه القائمة. (الأقاليم في الخطط المدفوعة؛ ما يفشل قياسه لا يُستعمل)
 const METERED_DEFAULT_HOSTS = "global.relay.metered.ca,middle-east.relay.metered.ca,eu-central.relay.metered.ca";
+// C179: Metered — بيانات دخولٍ مؤقّتة لكلّ مستخدم عبر TURN REST API (تنتهي بعد ٧٢ ساعة، تُجدَّد حين يبقى أقلّ من ٢٤ ساعة).
+//       الجديدة تحتاج حتّى دقيقتين لتنتشر على خوادم Metered ⇒ تبقى القديمة مستعملةً حتّى تنتشر الجديدة. turncred/{uid} للخادم وحده.
+const MCRED_TTL = 72 * 3600, MCRED_RENEW = 24 * 3600 * 1000, MCRED_PROP = 150 * 1000;
+const MCRED_MEM = new Map();
+async function meteredCred(env, uid) {
+  const now = Date.now(), mem = MCRED_MEM.get(uid);
+  if (mem && mem.exp - now > MCRED_RENEW && now - mem.at > MCRED_PROP) return mem;
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const d = await fsGet(token, "turncred/" + uid).catch(() => null);
+  let c = d && fstr(d, "c") ? JSON.parse(fstr(d, "c")) : null, n = d && fstr(d, "n") ? JSON.parse(fstr(d, "n")) : null, dirty = false;
+  if (n && now - n.at > MCRED_PROP) { c = n; n = null; dirty = true; }
+  if (c && c.exp <= now + 10 * 60000) { c = null; dirty = true; }
+  if (!n && (!c || c.exp - now < MCRED_RENEW)) {
+    const res = await fetch("https://" + String(env.METERED_APP).trim() + ".metered.live/api/v1/turn/credential?secretKey=" + encodeURIComponent(String(env.METERED_SECRET).trim()), {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expiryInSeconds: MCRED_TTL, label: "sawa-" + uid.slice(0, 40) }) });
+    let b = null; try { b = await res.json(); } catch (e) {}
+    if (!res.ok || !b || !b.username || !b.password) throw new Error("metered credential " + res.status);
+    n = { u: b.username, p: b.password, exp: now + MCRED_TTL * 1000, at: now }; dirty = true;
+    stat("turn:mnew");
+  }
+  if (dirty) await fsCommit(token, [{ update: { name: DOC_ROOT + "/turncred/" + uid, fields: { c: { stringValue: c ? JSON.stringify(c) : "" }, n: { stringValue: n ? JSON.stringify(n) : "" }, ts: { integerValue: String(now) } } } }]).catch(() => {});
+  const use = c && c.exp - now > 10 * 60000 ? c : Object.assign({ fresh: now - n.at < MCRED_PROP }, n);   // القديمة ما دامت صالحة حتّى تنتشر الجديدة
+  if (use === c && !n) MCRED_MEM.set(uid, c);
+  if (MCRED_MEM.size > 5000) MCRED_MEM.clear();
+  return use;
+}
 // C175: الوسيط الأساسيّ يبدّله المدير من هاتفه — config/relay.primary = "m" | "cf" | "" (تلقائيّ = TURN_PROVIDER في الـWorker)
 let RELAY_CFG = null, RELAY_AT = 0;
 async function relayPref(env) {
@@ -3759,10 +3797,15 @@ async function opRtcIce(uid, payload, env, claims, request) {
     try { relays.push({ id: "cf", label: "Cloudflare", iceServers: await cloudflareIce(env, uid) }); }
     catch (e) { cfErr = String((e && e.message) || e); console.log("cf turn:", cfErr); }
   }
-  if (env.METERED_USER && env.METERED_PASS) {
+  // C179: بيانات دخولٍ مؤقّتة لكلّ مستخدم (METERED_SECRET + METERED_APP) بدل الاسم وكلمة المرور الثابتين — والثابتة احتياطٌ إن تعذّر الإنشاء
+  let mc = null;
+  if (env.METERED_SECRET && env.METERED_APP && uid) { try { mc = await meteredCred(env, uid); } catch (e) { mErr = String((e && e.message) || e); console.log("metered cred:", mErr); } }
+  if ((!mc || mc.fresh) && env.METERED_USER && env.METERED_PASS) mc = { u: env.METERED_USER, p: env.METERED_PASS, fixed: true };   // أوّل دقيقتين لبيانات المستخدم الجديدة: الثابتة إن وُجدت
+  if (mc) {
     const hosts = String(env.METERED_HOSTS || env.METERED_HOST || METERED_DEFAULT_HOSTS).split(/[\s,]+/).filter(h => /^[a-z0-9.-]{3,80}$/i.test(h)).slice(0, 6);
     for (const h of hosts) relays.push({ id: "m:" + h, label: "Metered " + (h.split(".")[0] === "global" ? "global" : h.split(".")[0]),
-      iceServers: [{ urls: ["turn:" + h + ":80", "turn:" + h + ":80?transport=tcp", "turn:" + h + ":443", "turns:" + h + ":443?transport=tcp"], username: env.METERED_USER, credential: env.METERED_PASS }] });
+      iceServers: [{ urls: ["turn:" + h + ":80", "turn:" + h + ":80?transport=tcp", "turn:" + h + ":443", "turns:" + h + ":443?transport=tcp"], username: mc.u, credential: mc.p }] });
+    stat(mc.fixed ? "turn:mfixed" : "turn:mtemp");
   } else if (env.METERED_KEY && env.METERED_APP) {
     try {
       if (!(iceCache && Date.now() - iceAt < 30 * 60 * 1000)) {
@@ -3824,10 +3867,78 @@ async function opCallRing(uid, payload, env, claims, ctx) {
       if (!c || c.state !== "ringing" || c.acc) break;
       sent += await pushTo(token, [to], data(n));
     }
+    await telWrite(token, callId, "srv", uid, { ev: "ring", sent, video }).catch(() => {});   // C179: حدث البنية تحت معرّف المكالمة نفسه
     return sent;
   })();
   if (ctx && ctx.waitUntil) { ctx.waitUntil(job.catch(() => {})); return { queued: true }; }
   return { sent: await job };
+}
+// C179: سجلّ كلّ مكالمة — يرسله كلّ طرفٍ عند انتهائها (tel/{callId}~{طرف}) ويضيف الخادم أحداثه (الرنين) تحت المعرّف نفسه.
+//       للمدير: admin.tel يجمعها بالمعرّف (نسبة المرور عبر TURN · UDP · زمن الاتّصال · RTT/الفقد/التذبذب · أسباب الفشل). تُحذف بعد ٣٠ يوماً.
+const TEL_ID = /^[A-Za-z0-9_-]{4,60}$/;
+async function telWrite(token, cid, side, uid, d) {
+  const id = (cid + "~" + side).replace(/[^A-Za-z0-9_~-]/g, "").slice(0, 120);
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/tel/" + id, fields: { cid: { stringValue: cid }, side: { stringValue: side }, by: { stringValue: uid }, ts: { integerValue: String(Date.now()) }, d: { stringValue: JSON.stringify(d).slice(0, 3000) } } } }]);
+}
+async function opCallTel(uid, payload, env) {
+  if (!codeRate(uid, "tel", 80)) return { ok: false };
+  const p = payload || {}, cid = String(p.id || "");
+  if (!TEL_ID.test(cid)) throw new Error("bad id");
+  const str = (v, n) => String(v == null ? "" : v).replace(/[\u0000-\u001f]/g, " ").slice(0, n);
+  const num = (v, lo, hi) => { const x = Number(v); return Number.isFinite(x) ? Math.max(lo, Math.min(hi, Math.round(x))) : null; };
+  const d = { k: str(p.k, 16), role: str(p.role, 10), eng: str(p.eng, 12), mode: str(p.mode, 6), plat: str(p.plat, 30), model: str(p.model, 40), ver: str(p.ver, 12), net: str(p.net, 16),
+    ok: !!p.ok, setup: num(p.setup, 0, 120000), secs: num(p.secs, 0, 86400), reason: str(p.reason, 16), route: str(p.route, 8), proto: str(p.proto, 6), relay: str(p.relay, 32),
+    n: num(p.n, 0, 50), rst: num(p.rst, 0, 100), rtt: qaStatClean(p.rtt), jit: qaStatClean(p.jit), loss: qaStatClean(p.loss), jb: qaStatClean(p.jb), fps: qaStatClean(p.fps), h: qaStatClean(p.h) };
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  await telWrite(token, cid, uid.slice(0, 10), uid, d);
+  stat("tel:" + (d.ok ? (d.route || "ok") : "fail"));
+  return { ok: true };
+}
+async function opAdminTel(uid, payload, env, claims) {
+  if (!isAdmin(env, claims)) return { admin: false };
+  const days = Math.max(1, Math.min(30, Number((payload && payload.days) || 7)));
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "tel" }], where: { fieldFilter: { field: { fieldPath: "ts" }, op: "GREATER_THAN_OR_EQUAL", value: { integerValue: String(Date.now() - days * 86400000) } } },
+      orderBy: [{ field: { fieldPath: "ts" }, direction: "DESCENDING" }], limit: 800 } }) });
+  const data = await res.json();
+  if (!res.ok) throw new Error("firestore query: " + JSON.stringify(data).slice(0, 200));
+  const by = {};
+  for (const r of (data || [])) {
+    if (!r.document) continue;
+    const f = r.document, cid = fstr(f, "cid"), side = fstr(f, "side"), ts = fsInt(f, "ts");
+    let d = {}; try { d = JSON.parse(fstr(f, "d") || "{}"); } catch (e) {}
+    const c = by[cid] || (by[cid] = { cid, ts, sides: [], srv: null });
+    c.ts = Math.max(c.ts, ts);
+    if (side === "srv") c.srv = d; else c.sides.push(Object.assign({ by: fstr(f, "by").slice(0, 6) }, d));
+  }
+  const calls = Object.values(by).filter(c => c.sides.length).sort((a, b) => b.ts - a.ts);
+  const med = (a) => { a = a.filter(x => typeof x === "number").sort((x, y) => x - y); return a.length ? a[Math.floor(a.length / 2)] : null; };
+  const p90 = (a) => { a = a.filter(x => typeof x === "number").sort((x, y) => x - y); return a.length ? a[Math.min(a.length - 1, Math.floor(a.length * 0.9))] : null; };
+  const sum = (list) => {
+    const conn = list.filter(c => c.sides.some(x => x.ok));
+    const relay = conn.filter(c => c.sides.some(x => x.route === "relay"));
+    const tcp = conn.filter(c => c.sides.some(x => x.proto && x.proto !== "udp"));
+    const reasons = {}; list.filter(c => !c.sides.some(x => x.ok)).forEach(c => { const r = c.sides[0].reason || "?"; reasons[r] = (reasons[r] || 0) + 1; });
+    const sv = (k) => conn.map(c => med(c.sides.map(x => x[k] && x[k].med)));
+    return { n: list.length, conn: conn.length, relay: relay.length, tcp: tcp.length, setup: med(conn.map(c => med(c.sides.map(x => x.setup)))), setup90: p90(conn.map(c => med(c.sides.map(x => x.setup)))),
+      rtt: med(sv("rtt")), loss: med(sv("loss")), jit: med(sv("jit")), fps: med(conn.filter(c => /video/.test(c.sides[0].k)).map(c => med(c.sides.map(x => x.fps && x.fps.med)))), reasons,
+      ringOk: list.filter(c => c.srv && c.srv.sent > 0).length, ringN: list.filter(c => c.srv).length };
+  };
+  const one = calls.filter(c => /^(audio|video)$/.test(c.sides[0].k));
+  const plats = {}; one.forEach(c => c.sides.forEach(x => { const k = x.plat || "?"; (plats[k] = plats[k] || []).push(c); }));
+  const byPlat = {}; for (const k in plats) byPlat[k] = sum(Array.from(new Set(plats[k])));
+  const groups = calls.filter(c => !/^(audio|video)$/.test(c.sides[0].k));
+  return { admin: true, days, all: sum(one), byPlat, groups: { n: groups.length, sfu: groups.filter(c => c.sides.some(x => x.mode === "sfu")).length, conn: groups.filter(c => c.sides.some(x => x.ok)).length },
+    recent: calls.slice(0, 40) };
+}
+async function telGc(env, n) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "tel" }], where: { fieldFilter: { field: { fieldPath: "ts" }, op: "LESS_THAN", value: { integerValue: String(Date.now() - 30 * 86400000) } } }, limit: n || 100 } }) });
+  const rows = ((await res.json()) || []).filter(r => r.document).map(r => ({ delete: r.document.name }));
+  if (rows.length) await fsCommit(token, rows);
+  return rows.length;
 }
 async function opCallMissed(uid, payload, env, claims, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -4314,7 +4425,7 @@ async function opMomentPost(uid, payload, env, claims, ctx) {
 /* C153: إشعار «لحظة جديدة» — العنوان اسم الناشر (وصورته) والنصّ «لحظة جديدة 📷».
    مرّةً كلّ ٤ ساعات على الأكثر لكلّ ناشر (mset/{uid}.np) · حتّى ١٠ مستلمين (حدّ الطلبات الفرعيّة): المقرّبون أوّلاً ثمّ عشوائيّاً ·
    يُستثنى من أُشير إليه (وصله إشعار الإشارة) ومن كتم لحظاتي (mset/{هو}.mute) · أوّل لحظة بعد ١٤ يوماً ⇒ «أوّل لحظة منذ فترة طويلة». */
-const MOM_NEW_GAP = 4 * 3600000, MOM_NEW_MAX = 10;
+const MOM_NEW_GAP = 4 * 3600000, MOM_NEW_MAX = 60;   // C180: كان ١٠ (حدّ الخطّة المجّانيّة)
 async function momNewPush(token, env, uid, pid, me, au, men, media) {
   const now = Date.now(), last = (au.prefs && au.prefs.np) || 0;
   if (last && now - last < MOM_NEW_GAP) return 0;
@@ -5070,17 +5181,28 @@ export default {
   // Cron (wrangler.toml: [triggers] crons = ["*/5 * * * *"]): تذكيرات المواعيد كلّ تشغيل؛ والتنظيف بالتناوب
   // (حدّ ٥٠ طلباً فرعيّاً لكلّ تشغيل: لا تنظيف في تشغيلٍ أرسل تذكيراً)
   async scheduled(event, env, ctx) {
+    PUSH_ENV = env; notifyChat.env = env;
     ctx.waitUntil((async () => {
+      const L = LIM(env);
       await flushStats(env, true);
       let r = { reminders: 0 };
       try { r = await schedReminders(env); } catch (e) { console.log("reminders:", e && e.message); }
-      if (r.reminders) return;
-      try { const tr = await taskReminders(env); if (tr.reminders) return; } catch (e) { console.log("taskrem:", e && e.message); }   // C173
-      const slot = Math.floor(new Date(event.scheduledTime || Date.now()).getUTCMinutes() / 5) % 4;   // C178: الخانة ٣ لمراقبة الخدمات وحدها (حدّ الطلبات الفرعيّة)
-      if (slot === 3) { await healthRun(env).catch(e => console.log("health:", e && e.message)); return; }
-      if (slot === 0) await cleanupDisappearing(env).catch(e => console.log("cleanup:", e && e.message));
-      else if (slot === 1) { await cleanupCalls(env).catch(e => console.log("calls cleanup:", e && e.message)); await mediaGc(env, 10).catch(e => console.log("media gc:", e && e.message)); await storyGc(env, 2).catch(e => console.log("story gc:", e && e.message)); await storyqGc(env, 10).catch(e => console.log("storyq gc:", e && e.message)); await momentqGc(env, 10).catch(e => console.log("momentq gc:", e && e.message)); }
-      else await purgeWork(env, 40).catch(e => console.log("purge:", e && e.message));   // حذف الحسابات: ما تبقّى من عائلاتٍ ومحادثات
+      try { await taskReminders(env); } catch (e) { console.log("taskrem:", e && e.message); }   // C173
+      const job = (name, f) => f().catch(e => console.log(name + ":", e && e.message));
+      if (L.free) {   // المجّانيّة: ٥٠ طلباً فرعيّاً ⇒ مهمّةٌ واحدة في كلّ تشغيل (كما في C178)
+        if (r.reminders) return;
+        const slot = Math.floor(new Date(event.scheduledTime || Date.now()).getUTCMinutes() / 5) % 4;
+        if (slot === 3) return job("health", () => healthRun(env));
+        if (slot === 0) { await job("cleanup", () => cleanupDisappearing(env)); await job("tel gc", () => telGc(env, 100)); }
+        else if (slot === 1) { await job("calls cleanup", () => cleanupCalls(env)); await job("media gc", () => mediaGc(env, L.media)); await job("story gc", () => storyGc(env, L.story)); await job("storyq gc", () => storyqGc(env, L.q)); await job("momentq gc", () => momentqGc(env, L.q)); }
+        else await job("purge", () => purgeWork(env, L.purge));
+        return;
+      }
+      // C180: الخطّة المدفوعة — كلّ المهامّ في كلّ تشغيل (المراقبة كلّ ٥ دقائق)
+      await Promise.all([job("health", () => healthRun(env)), job("cleanup", () => cleanupDisappearing(env)), job("calls cleanup", () => cleanupCalls(env))]);
+      await job("media gc", () => mediaGc(env, L.media)); await job("story gc", () => storyGc(env, L.story));
+      await job("storyq gc", () => storyqGc(env, L.q)); await job("momentq gc", () => momentqGc(env, L.q)); await job("tel gc", () => telGc(env, 200));
+      await job("purge", () => purgeWork(env, L.purge));   // حذف الحسابات: ما تبقّى من عائلاتٍ ومحادثات
     })());
   },
   async fetch(request, env, ctx) {
@@ -5286,6 +5408,8 @@ export default {
       if (op === "moment.edit") { const r = await opMomentEdit(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "moment.seen") { const r = await opMomentSeen(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "moment.prefs") { const r = await opMomentPrefs(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "call.tel") { const r = await opCallTel(uid, body.payload, env); return json({ ok: true, ...r }); }   // C179
+      if (op === "admin.tel") { const r = await opAdminTel(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C179
       if (op === "qa.rate") { const r = await opQaRate(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "admin.health") { const r = await opAdminHealth(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C178
       if (op === "admin.relay") { const r = await opAdminRelay(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C175
