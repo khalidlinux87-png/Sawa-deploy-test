@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: فحص وسطاء TURN 
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v90-paid";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v91-quality";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -3711,7 +3711,8 @@ async function healthRun(env, opts) {
     hist[k] = ((prev.hist[k] || []).concat([[now, r.ok ? r.ms : -1]])).slice(-72);
     if (p.ok !== false && !r.ok) down.push(k); else if (p.ok === false && r.ok) up.push(k);
   }
-  await fsCommit(token, [{ update: { name, fields: { at: { integerValue: String(now) }, svc: { stringValue: JSON.stringify(svc) }, hist: { stringValue: JSON.stringify(hist) }, admin: { stringValue: opts.admin || prev.admin || "" } } } }]);
+  await fsCommit(token, [{ update: { name, fields: { at: { integerValue: String(now) }, svc: { stringValue: JSON.stringify(svc) }, hist: { stringValue: JSON.stringify(hist) }, admin: { stringValue: opts.admin || prev.admin || "" } } },
+    updateMask: { fieldPaths: ["at", "svc", "hist", "admin"] } }]);   // C181: لا تمسح حقول الملخّص اليوميّ
   const admin = opts.admin || prev.admin;
   const lbl = (k) => HEALTH_LABELS[k] || (k.indexOf("metered:") === 0 ? "وسيط Metered (" + k.slice(8) + ")" : k);
   if (admin && !opts.manual && (down.length || up.length)) {
@@ -3898,8 +3899,14 @@ async function opAdminTel(uid, payload, env, claims) {
   if (!isAdmin(env, claims)) return { admin: false };
   const days = Math.max(1, Math.min(30, Number((payload && payload.days) || 7)));
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const r = await telAnalyze(token, Date.now() - days * 86400000);
+  const h = await fsGet(token, "health/now").catch(() => null);
+  return Object.assign({ admin: true, days, qoff: !!(h && fbool(h, "qoff")) }, r);
+}
+// C181: تحليل سجلّات المكالمات منذ وقتٍ معيّن (يستعمله تقرير المدير والملخّص اليوميّ والتنبيه)
+async function telAnalyze(token, since) {
   const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "tel" }], where: { fieldFilter: { field: { fieldPath: "ts" }, op: "GREATER_THAN_OR_EQUAL", value: { integerValue: String(Date.now() - days * 86400000) } } },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "tel" }], where: { fieldFilter: { field: { fieldPath: "ts" }, op: "GREATER_THAN_OR_EQUAL", value: { integerValue: String(since) } } },
       orderBy: [{ field: { fieldPath: "ts" }, direction: "DESCENDING" }], limit: 800 } }) });
   const data = await res.json();
   if (!res.ok) throw new Error("firestore query: " + JSON.stringify(data).slice(0, 200));
@@ -3929,8 +3936,68 @@ async function opAdminTel(uid, payload, env, claims) {
   const plats = {}; one.forEach(c => c.sides.forEach(x => { const k = x.plat || "?"; (plats[k] = plats[k] || []).push(c); }));
   const byPlat = {}; for (const k in plats) byPlat[k] = sum(Array.from(new Set(plats[k])));
   const groups = calls.filter(c => !/^(audio|video)$/.test(c.sides[0].k));
-  return { admin: true, days, all: sum(one), byPlat, groups: { n: groups.length, sfu: groups.filter(c => c.sides.some(x => x.mode === "sfu")).length, conn: groups.filter(c => c.sides.some(x => x.ok)).length },
+  return { all: sum(one), byPlat, groups: { n: groups.length, sfu: groups.filter(c => c.sides.some(x => x.mode === "sfu")).length, conn: groups.filter(c => c.sides.some(x => x.ok)).length },
     recent: calls.slice(0, 40) };
+}
+// C181: ملخّص الجودة اليوميّ للمدير (٧ صباحاً بتوقيت السودان، عن آخر ٢٤ ساعة) + تنبيهٌ فوريّ إن انهارت الجودة في آخر ساعتين.
+//       الحدود: الاتّصال < ٨٥٪ · عبر TURN > ٤٠٪ · غير UDP > ١٥٪ · زمن الاتّصال > ٣ ث · وصول الرنين < ٩٠٪. المدير يوقفه من «سجلّ المكالمات».
+const Q_TZ = 2 * 3600000, Q_HOUR = 5;   // UTC+2 · الساعة ٥ UTC = ٧ صباحاً
+function qPct(a, b) { return b ? Math.round(a * 100 / b) : null; }
+function qWarnings(a) {
+  const w = [];
+  if (a.n >= 5 && qPct(a.conn, a.n) < 85) w.push("الاتّصال " + qPct(a.conn, a.n) + "% (أقلّ من ٨٥٪)");
+  if (a.conn >= 5 && qPct(a.relay, a.conn) > 40) w.push("عبر الوسيط " + qPct(a.relay, a.conn) + "% (أكثر من ٤٠٪)");
+  if (a.conn >= 5 && qPct(a.tcp, a.conn) > 15) w.push("بلا UDP " + qPct(a.tcp, a.conn) + "%");
+  if (a.setup != null && a.setup > 3000) w.push("زمن الاتّصال " + (a.setup / 1000).toFixed(1) + " ث");
+  if (a.ringN >= 5 && qPct(a.ringOk, a.ringN) < 90) w.push("وصول الرنين " + qPct(a.ringOk, a.ringN) + "%");
+  return w;
+}
+const Q_REASON = { hangup: "أُنهيت", remote: "أنهاها الآخر", noanswer: "لم يُجب", declined: "رُفضت", cancel: "أُلغيت", failed: "فشل الاتّصال", lost: "انقطعت", error: "خطأ", busy: "مشغول", missed: "فائتة" };
+function qLine(a) {
+  const top0 = Object.keys(a.reasons || {}).sort((x, y) => a.reasons[y] - a.reasons[x])[0], top = top0 ? (Q_REASON[top0] || top0) + " (" + a.reasons[top0] + ")" : "";
+  return [a.n + " مكالمة", "اتّصلت " + (qPct(a.conn, a.n) ?? "–") + "%", "عبر الوسيط " + (qPct(a.relay, a.conn) ?? "–") + "%", "UDP " + (a.conn ? 100 - qPct(a.tcp, a.conn) : "–") + "%",
+    a.setup != null ? "الاتّصال " + (a.setup / 1000).toFixed(1) + " ث" : "", a.rtt != null ? "RTT " + a.rtt + " ms" : "", a.loss != null ? "فقد " + a.loss + "%" : "", top ? "أكثر الفشل: " + top : ""].filter(Boolean).join(" · ");
+}
+async function qualityWatch(env, opts) {
+  opts = opts || {};
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const h = await fsGet(token, "health/now").catch(() => null);
+  const admin = h && fstr(h, "admin");
+  if (!admin || (h && fbool(h, "qoff") && !opts.test)) return { skipped: true };
+  const now = Date.now(), local = new Date(now + Q_TZ), day = local.toISOString().slice(0, 10), set = {};
+  let sent = 0;
+  if (opts.test || (new Date(now).getUTCHours() >= Q_HOUR && fstr(h, "qd") !== day)) {
+    const r = await telAnalyze(token, now - 86400000), a = r.all, w = qWarnings(a), g = r.groups || {};
+    if (a.n || g.n || opts.test) {
+      const body = (a.n ? qLine(a) : "لا مكالمات فرديّة") + (g.n ? "\nالمجموعات والغرف: " + g.n + " (SFU " + (qPct(g.sfu, g.n) ?? 0) + "%)" : "") + (w.length ? "\n⚠️ " + w.join(" · ") : "");
+      sent += await pushTo(token, [admin], strData({ t: "quality", title: (w.length ? "⚠️ " : "📊 ") + "سوا — جودة المكالمات أمس", body, ts: now }));
+    }
+    if (!opts.test) set.qd = { stringValue: day };
+  }
+  // التنبيه الفوريّ: كلّ ٣٠ دقيقة نفحص آخر ساعتين، ولا نكرّره قبل ٦ ساعات
+  if (!opts.test && now - fsInt(h, "qc") > 30 * 60000) {
+    set.qc = { integerValue: String(now) };
+    if (now - fsInt(h, "qa") > 6 * 3600000) {
+      const a = (await telAnalyze(token, now - 2 * 3600000)).all;
+      const bad = (a.n >= 8 && qPct(a.conn, a.n) < 70) || (a.conn >= 8 && qPct(a.relay, a.conn) > 60) || (a.ringN >= 8 && qPct(a.ringOk, a.ringN) < 70);
+      if (bad) {
+        sent += await pushTo(token, [admin], strData({ t: "quality", title: "🚨 سوا — تراجعٌ في المكالمات الآن", body: "آخر ساعتين: " + qLine(a) + "\n" + qWarnings(a).join(" · "), ts: now }));
+        set.qa = { integerValue: String(now) };
+      }
+    }
+  }
+  const keys = Object.keys(set);
+  if (keys.length) await fsCommit(token, [{ update: { name: DOC_ROOT + "/health/now", fields: set }, updateMask: { fieldPaths: keys } }]);
+  return { sent };
+}
+async function opAdminQcfg(uid, payload, env, claims) {
+  if (!isAdmin(env, claims)) return { admin: false };
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const p = payload || {}, fields = { admin: { stringValue: uid } }, mask = ["admin"];
+  if (p.off !== undefined) { fields.qoff = { booleanValue: !!p.off }; mask.push("qoff"); }
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/health/now", fields }, updateMask: { fieldPaths: mask } }]);
+  const r = p.test ? await qualityWatch(env, { test: true }) : null;
+  return { admin: true, qoff: !!p.off, sent: r ? r.sent : undefined };
 }
 async function telGc(env, n) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -5199,7 +5266,7 @@ export default {
         return;
       }
       // C180: الخطّة المدفوعة — كلّ المهامّ في كلّ تشغيل (المراقبة كلّ ٥ دقائق)
-      await Promise.all([job("health", () => healthRun(env)), job("cleanup", () => cleanupDisappearing(env)), job("calls cleanup", () => cleanupCalls(env))]);
+      await Promise.all([job("health", () => healthRun(env)), job("cleanup", () => cleanupDisappearing(env)), job("calls cleanup", () => cleanupCalls(env)), job("quality", () => qualityWatch(env))]);   // C181: ملخّص الجودة
       await job("media gc", () => mediaGc(env, L.media)); await job("story gc", () => storyGc(env, L.story));
       await job("storyq gc", () => storyqGc(env, L.q)); await job("momentq gc", () => momentqGc(env, L.q)); await job("tel gc", () => telGc(env, 200));
       await job("purge", () => purgeWork(env, L.purge));   // حذف الحسابات: ما تبقّى من عائلاتٍ ومحادثات
@@ -5409,6 +5476,7 @@ export default {
       if (op === "moment.seen") { const r = await opMomentSeen(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "moment.prefs") { const r = await opMomentPrefs(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "call.tel") { const r = await opCallTel(uid, body.payload, env); return json({ ok: true, ...r }); }   // C179
+      if (op === "admin.qcfg") { const r = await opAdminQcfg(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C181
       if (op === "admin.tel") { const r = await opAdminTel(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C179
       if (op === "qa.rate") { const r = await opQaRate(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "admin.health") { const r = await opAdminHealth(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C178
