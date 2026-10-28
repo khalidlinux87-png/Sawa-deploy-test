@@ -11,7 +11,7 @@
    ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
    ============================================================ */
 
-const VER = "v85-tasks";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v86-relay";      // علامة الإصدار — تظهر في كلّ ردّ
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
@@ -3624,6 +3624,25 @@ async function cloudflareIce(env, uid) {
   if (uid) { if (iceByUid.size > 5000) iceByUid.clear(); iceByUid.set(uid, { list, at: Date.now() }); }
   return list;
 }
+// C175: الوسيط الأساسيّ يبدّله المدير من هاتفه — config/relay.primary = "m" | "cf" | "" (تلقائيّ = TURN_PROVIDER في الـWorker)
+let RELAY_CFG = null, RELAY_AT = 0;
+async function relayPref(env) {
+  if (RELAY_CFG !== null && Date.now() - RELAY_AT < 60000) return RELAY_CFG;
+  try { const token = await getAccessToken(JSON.parse(env.SA_JSON)); const d = await fsGet(token, "config/relay"); RELAY_CFG = (d && fstr(d, "primary")) || ""; }
+  catch (e) { RELAY_CFG = RELAY_CFG || ""; }
+  RELAY_AT = Date.now(); return RELAY_CFG;
+}
+async function opAdminRelay(uid, payload, env, claims) {
+  if (!isAdmin(env, claims)) return { admin: false };
+  if (payload && payload.primary !== undefined) {
+    const v = payload.primary === "m" || payload.primary === "cf" ? payload.primary : "";
+    const token = await getAccessToken(JSON.parse(env.SA_JSON));
+    await fsCommit(token, [{ update: { name: DOC_ROOT + "/config/relay", fields: { primary: { stringValue: v }, by: { stringValue: uid }, ts: { integerValue: String(Date.now()) } } } }]);
+    RELAY_CFG = v; RELAY_AT = Date.now();
+  }
+  return { admin: true, primary: await relayPref(env), envDefault: env.TURN_PROVIDER === "cloudflare" ? "cf" : "m",
+    has: { m: !!((env.METERED_USER && env.METERED_PASS) || (env.METERED_KEY && env.METERED_APP)), cf: !!(env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN) } };
+}
 async function opRtcIce(uid, payload, env, claims, request) {
   const stun = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
   const anon = !!(claims && claims.firebase && claims.firebase.sign_in_provider === "anonymous");
@@ -3667,7 +3686,9 @@ async function opRtcIce(uid, payload, env, claims, request) {
     } catch (e) { console.log("TURN_EXTRA:", String(e.message || e)); }
   }
   // C165: Metered هو الوسيط الأساسيّ و Cloudflare احتياطٌ إن فشل (للمقارنة) · TURN_PROVIDER = "cloudflare" يعكس الترتيب
-  const primary = env.TURN_PROVIDER === "cloudflare" || !relays.some(r => /^m/.test(r.id)) ? "cf" : "m";
+  const want = (await relayPref(env).catch(() => "")) || (env.TURN_PROVIDER === "cloudflare" ? "cf" : "m");   // C175: اختيار المدير يغلب
+  const hasM = relays.some(r => /^m/.test(r.id)), hasCf = relays.some(r => r.id === "cf");
+  const primary = (want === "cf" && hasCf) || !hasM ? "cf" : "m";
   const isP = (r) => primary === "cf" ? r.id === "cf" : /^m/.test(r.id);
   relays.sort((a, b) => (isP(b) ? 1 : 0) - (isP(a) ? 1 : 0));
   if (!relays.length) return Object.assign({ iceServers: stun, turn: false }, cfErr ? { cfErr } : {}, mErr ? { err: mErr } : {});
@@ -5166,6 +5187,7 @@ export default {
       if (op === "moment.seen") { const r = await opMomentSeen(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "moment.prefs") { const r = await opMomentPrefs(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "qa.rate") { const r = await opQaRate(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+      if (op === "admin.relay") { const r = await opAdminRelay(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C175
       if (op === "admin.qa") { const r = await opAdminQa(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "admin.stats") { const r = await opAdminStats(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "people.remove") { const r = await opPeopleRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
