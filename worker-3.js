@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062D\u0635 \u06
    \u26A0\uFE0F \u0625\u0646 \u0623\u064F\u0639\u064A\u062F \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064D \u062C\u062F\u064A\u062F\u060C \u063A\u064A\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v96-sec";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C198: \u0625\u0635\u0644\u0627\u062D\u0627\u062A \u0623\u0645\u0646\u064A\u0651\u0629 \u0661\u2013\u0665)
+const VER = "v97-sec2";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C199: \u0625\u0635\u0644\u0627\u062D\u0627\u062A \u0623\u0645\u0646\u064A\u0651\u0629 \u0666\u2013\u0661\u0660)
 // C197: \u0627\u0644\u0633\u062C\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064E\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u062D\u062F\u062B { lvl, ev, ts, ...\u062D\u0642\u0648\u0644 } (Workers Logs \u062A\u0641\u0647\u0631\u0633 \u0627\u0644\u062D\u0642\u0648\u0644 \u0644\u0644\u0628\u062D\u062B \u0648\u0627\u0644\u062A\u0635\u0641\u064A\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -45,6 +45,9 @@ async function authProxy(request, u) {
   const r = await fetch(target, init);
   const out = new Headers(r.headers);
   out.delete("content-security-policy"); out.delete("x-frame-options");   // \u0627\u0644\u0640iframe \u064A\u064F\u062D\u0645\u064E\u0651\u0644 \u0645\u0646 \u0646\u0637\u0627\u0642\u0646\u0627 \u0627\u0644\u0622\u0646
+  // C198/\u0667: \u0628\u062F\u0644 \u062D\u0630\u0641 \u0627\u0644\u062D\u0645\u0627\u064A\u0629 \u0643\u0644\u0651\u064A\u0651\u0627\u064B \u2014 \u0646\u0633\u0645\u062D \u0628\u0627\u0644\u062A\u0636\u0645\u064A\u0646 \u0644\u0646\u0637\u0627\u0642 \u0633\u0648\u0627 \u0648\u062D\u062F\u0647 (\u0643\u0627\u0646\u062A \u0623\u064A\u0651 \u0635\u0641\u062D\u0629\u064D \u062A\u0633\u062A\u0637\u064A\u0639 \u062A\u0636\u0645\u064A\u0646 \u0635\u0641\u062D\u0627\u062A \u0627\u0644\u062F\u062E\u0648\u0644 \u21D2 clickjacking)
+  out.set("content-security-policy", "frame-ancestors 'self' https://www.sawaaap.com https://sawaaap.com");
+  out.set("x-frame-options", "SAMEORIGIN");
   out.set("cache-control", "no-store");
   return new Response(r.body, { status: r.status, statusText: r.statusText, headers: out });
 }
@@ -54,6 +57,13 @@ const CORS = {
   "Access-Control-Allow-Headers": "Authorization, Content-Type",
 };
 
+/* C198/\u0661\u0660: \u0645\u0642\u0627\u0631\u0646\u0629 \u062B\u0627\u0628\u062A\u0629 \u0627\u0644\u0632\u0645\u0646 \u0644\u0644\u062A\u0648\u0642\u064A\u0639\u0627\u062A \u0648\u0627\u0644\u0631\u0645\u0648\u0632 \u0627\u0644\u0633\u0631\u0651\u064A\u0651\u0629 (=== \u062A\u062A\u0648\u0642\u0651\u0641 \u0639\u0646\u062F \u0623\u0648\u0651\u0644 \u062D\u0631\u0641\u064D \u0645\u062E\u062A\u0644\u0641) */
+function ctEq(a, b) {
+  a = String(a == null ? "" : a); b = String(b == null ? "" : b);
+  let d = a.length ^ b.length;
+  for (let i = 0, n = Math.max(a.length, b.length); i < n; i++) d |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  return d === 0;
+}
 /* ---------- base64 helpers ---------- */
 function b64urlToBytes(s) {
   s = s.replace(/-/g, "+").replace(/_/g, "/");
@@ -1352,8 +1362,8 @@ async function opGroupSettings(uid, payload, env) {
    \u062C\u0647\u0629 \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 = \u0645\u0646 \u064A\u0634\u0627\u0631\u0643\u0643 \u0639\u0627\u0626\u0644\u0629\u064B \u0639\u0644\u0649 \u0627\u0644\u0633\u062D\u0627\u0628\u0629 + \u0645\u0646 \u0623\u0636\u0641\u062A\u0647 \u0628\u0631\u0627\u0628\u0637\u064D \u0634\u062E\u0635\u064A\u0651 (accounts/{uid}/people/{other}).
    people.list \u064A\u0643\u062A\u0628 \u0623\u064A\u0636\u0627\u064B \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0635\u0644\u0627\u062D\u064A\u0651\u0629 \u0641\u064A Realtime Database: acl/{\u0623\u0646\u0627}/{\u0647\u0648} = true \u21D2 \u064A\u0631\u0649 \u062D\u0636\u0648\u0631\u064A. */
 async function rtdbPatch(token, updates) {
-  const res = await fetch(RTDB_URL + "/.json?access_token=" + encodeURIComponent(token), {
-    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updates) });
+  const res = await fetch(RTDB_URL + "/.json", {   // C198/\u0661\u0660: \u0627\u0644\u0631\u0645\u0632 \u0641\u064A \u0627\u0644\u062A\u0631\u0648\u064A\u0633\u0629 \u0644\u0627 \u0641\u064A \u0627\u0644\u0631\u0627\u0628\u0637 (\u0627\u0644\u0631\u0648\u0627\u0628\u0637 \u062A\u064F\u0633\u062C\u064E\u0651\u0644)
+    method: "PATCH", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify(updates) });
   if (!res.ok) throw new Error("rtdb: " + res.status + " " + (await res.text()).slice(0, 200));
 }
 async function peopleOf(token, uid, opts) {
@@ -2287,7 +2297,7 @@ async function ackSig(env, s) {
    \u0644\u0643\u0646 \u0628\u0631\u0627\u0628\u0637\u064D \u0645\u0648\u0642\u064E\u0651\u0639 (ak = HMAC "av|uid") \u0644\u0627 \u064A\u0635\u062F\u0631 \u0625\u0644\u0651\u0627 \u062F\u0627\u062E\u0644 \u0625\u0634\u0639\u0627\u0631\u064D \u0645\u0646 \u0630\u0644\u0643 \u0627\u0644\u0645\u0631\u0633\u0650\u0644 \u21D2 \u0644\u0627 \u062A\u0639\u062F\u0627\u062F \u0644\u0644\u0635\u0648\u0631. */
 async function avatarImg(request, env) {
   const q = new URL(request.url).searchParams, u = String(q.get("u") || ""), sg = String(q.get("s") || "");
-  if (!segOk(u) || !/^[0-9a-f]{32}$/.test(sg) || sg !== await ackSig(env, "av|" + u)) return new Response("", { status: 403 });
+  if (!segOk(u) || !/^[0-9a-f]{32}$/.test(sg) || !ctEq(sg, await ackSig(env, "av|" + u))) return new Response("", { status: 403 });
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const doc = await fsGet(token, "avatars/" + u).catch(() => null);
   const m = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(fstr(doc, "d") || "");
@@ -2302,7 +2312,7 @@ async function deviceAck(request, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   if (k === "r") {   // \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u0631\u0646\u0651\u062A \u0639\u0644\u0649 \u062C\u0647\u0627\u0632\u0647
     const call = String(b.call || "");
-    if (!/^[A-Za-z0-9_-]{6,40}$/.test(call) || sg !== await ackSig(env, "r|" + call + "|" + to)) return json({ ok: false }, 403);
+    if (!/^[A-Za-z0-9_-]{6,40}$/.test(call) || !ctEq(sg, await ackSig(env, "r|" + call + "|" + to))) return json({ ok: false }, 403);
     const c = await rtdbGet(token, "calls/" + call).catch(() => null);
     if (c && c.to === to && c.state === "ringing" && !c.rung) await rtdbPatch(token, { ["calls/" + call + "/rung"]: Date.now() });
     stat("ack:ring");
@@ -2310,7 +2320,7 @@ async function deviceAck(request, env) {
   }
   if (k === "x") {   // C142: \u00AB\u0631\u0641\u0636\u00BB \u0645\u0646 \u0625\u0634\u0639\u0627\u0631 \u0627\u0644\u0647\u0627\u062A\u0641 \u0648\u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0645\u063A\u0644\u0642 \u2014 \u0643\u0627\u0646 \u0627\u0644\u0645\u062A\u0651\u0635\u0644 \u064A\u0628\u0642\u0649 \u00AB\u064A\u0631\u0646\u0651\u2026\u00BB \u062D\u062A\u0651\u0649 \u062A\u0646\u062A\u0647\u064A \u0627\u0644\u0645\u0647\u0644\u0629
     const call = String(b.call || "");
-    if (!/^[A-Za-z0-9_-]{6,40}$/.test(call) || sg !== await ackSig(env, "r|" + call + "|" + to)) return json({ ok: false }, 403);
+    if (!/^[A-Za-z0-9_-]{6,40}$/.test(call) || !ctEq(sg, await ackSig(env, "r|" + call + "|" + to))) return json({ ok: false }, 403);
     const c = await rtdbGet(token, "calls/" + call).catch(() => null);
     if (c && c.to === to && c.state === "ringing" && !c.acc) await rtdbPatch(token, { ["calls/" + call + "/state"]: "declined" });
     stat("ack:decline");
@@ -2318,7 +2328,7 @@ async function deviceAck(request, env) {
   }
   if (k === "d") {   // \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0648\u0635\u0644\u062A \u062C\u0647\u0627\u0632\u0647
     const cid = String(b.cid || ""), ts = Math.floor(Number(b.ts || 0));
-    if (!segOk(cid) || !(ts > 0) || sg !== await ackSig(env, "d|" + cid + "|" + to + "|" + ts)) return json({ ok: false }, 403);
+    if (!segOk(cid) || !(ts > 0) || !ctEq(sg, await ackSig(env, "d|" + cid + "|" + to + "|" + ts))) return json({ ok: false }, 403);
     const c = await fsGet(token, "chats/" + cid).catch(() => null);
     const cur = Number((((c && c.fields && c.fields.delivered && c.fields.delivered.mapValue && c.fields.delivered.mapValue.fields) || {})[to] || {}).integerValue || 0);
     if (c && ts > cur) await opChatMark(to, { marks: [{ cid, d: ts }] }, env);
@@ -3032,7 +3042,7 @@ async function opSfuClose(uid, payload, env) {
   return { done: true, renegotiate: false };
 }
 async function rtdbGet(token, path, q) {
-  const res = await fetch(RTDB_URL + "/" + path + ".json?access_token=" + encodeURIComponent(token) + (q || ""));
+  const res = await fetch(RTDB_URL + "/" + path + ".json" + (q ? "?" + String(q).replace(/^&/, "") : ""), { headers: { Authorization: "Bearer " + token } });   // C198/\u0661\u0660
   if (!res.ok) throw new Error("rtdb get: " + res.status);
   return res.json();
 }
@@ -3553,7 +3563,7 @@ async function opVouchRespond(uid, payload, env, claims, ctx) {
 async function waWebhook(request, env, ctx) {
   const u = new URL(request.url);
   if (request.method === "GET") {
-    if (u.searchParams.get("hub.mode") === "subscribe" && env.WA_VERIFY_TOKEN && u.searchParams.get("hub.verify_token") === env.WA_VERIFY_TOKEN)
+    if (u.searchParams.get("hub.mode") === "subscribe" && env.WA_VERIFY_TOKEN && ctEq(u.searchParams.get("hub.verify_token") || "", env.WA_VERIFY_TOKEN))
       return new Response(u.searchParams.get("hub.challenge") || "", { status: 200 });
     return new Response("forbidden", { status: 403 });
   }
@@ -4243,7 +4253,19 @@ async function opLinkPeek(uid, payload, env) {
   const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 10000);
   let out = { ok: true, url: key, host: u.hostname.replace(/^www\./, ""), title: "", desc: "", image: "" };
   try {
-    const res = await fetch(key, { redirect: "follow", signal: ctl.signal, headers: { "User-Agent": "Mozilla/5.0 (compatible; SawaLinkPreview/1; +https://www.sawaaap.com)", "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5", "Accept-Language": "ar,en;q=0.8" } });
+    // C198/\u0669: \u0646\u062A\u0628\u0639 \u0627\u0644\u062A\u062D\u0648\u064A\u0644\u0627\u062A \u064A\u062F\u0648\u064A\u0651\u0627\u064B (\u0665 \u0642\u0641\u0632\u0627\u062A) \u0648\u0646\u0639\u064A\u062F \u0641\u062D\u0635 \u0627\u0644\u0628\u0631\u0648\u062A\u0648\u0643\u0648\u0644 \u0648\u0627\u0644\u0646\u0637\u0627\u0642 \u0641\u064A \u0643\u0644\u0651 \u0642\u0641\u0632\u0629 \u2014 \u0643\u0627\u0646 redirect: "follow" \u064A\u062A\u062E\u0637\u0651\u0649 linkHostOk
+    const hdrs = { "User-Agent": "Mozilla/5.0 (compatible; SawaLinkPreview/1; +https://www.sawaaap.com)", "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5", "Accept-Language": "ar,en;q=0.8" };
+    let cur = key, res = null;
+    for (let hop = 0; hop < 6; hop++) {
+      res = await fetch(cur, { redirect: "manual", signal: ctl.signal, headers: hdrs });
+      if (res.status < 300 || res.status >= 400) break;
+      const loc = res.headers.get("location"); if (!loc || hop === 5) { res = null; break; }
+      let nu; try { nu = new URL(loc, cur); } catch (e) { res = null; break; }
+      if ((nu.protocol !== "http:" && nu.protocol !== "https:") || !linkHostOk(nu.hostname)) { res = null; break; }
+      nu.hash = ""; cur = nu.toString();
+    }
+    if (!res) throw new Error("redirect");
+    const resUrl = cur;
     const ct = String(res.headers.get("content-type") || "");
     if (res.ok && /text\/html|application\/xhtml/i.test(ct)) {
       const reader = res.body.getReader(); const chunks = []; let got = 0;
@@ -4255,9 +4277,9 @@ async function opLinkPeek(uid, payload, env) {
       out.title = metaOf(html, ["og:title", "twitter:title"]) || (tm2 ? htmlDecode(tm2[1]) : "");
       out.desc = metaOf(html, ["og:description", "twitter:description", "description"]).slice(0, 220);
       let img = metaOf(html, ["og:image", "og:image:url", "twitter:image", "twitter:image:src"]);
-      if (img) { try { const iu = new URL(img, res.url || key); if ((iu.protocol === "https:" || iu.protocol === "http:") && linkHostOk(iu.hostname)) out.image = iu.toString().slice(0, 1000); } catch (e) {} }
-      try { out.host = new URL(res.url || key).hostname.replace(/^www\./, ""); } catch (e) {}
-    } else if (res.ok && /^image\//i.test(ct)) { out.image = key; }
+      if (img) { try { const iu = new URL(img, resUrl); if ((iu.protocol === "https:" || iu.protocol === "http:") && linkHostOk(iu.hostname)) out.image = iu.toString().slice(0, 1000); } catch (e) {} }
+      try { out.host = new URL(resUrl).hostname.replace(/^www\./, ""); } catch (e) {}
+    } else if (res.ok && /^image\//i.test(ct)) { out.image = resUrl; }
   } catch (e) { out.err = "unreachable"; }
   clearTimeout(tm);
   out.title = String(out.title || "").slice(0, 160);
@@ -5298,6 +5320,7 @@ async function recentMsgs(token, cid, n) {
   return all.filter(x => x && !x.gone && x.type !== "system").sort((a, b) => (a.ts || 0) - (b.ts || 0)).slice(-n)
     .map(x => ({ by: x.by || null, type: x.type || "text", text: typeof x.text === "string" ? x.text.slice(0, 300) : "", ts: x.ts || 0 }));
 }
+const REPORT_TRUST_DAYS = 14;
 async function opReportCreate(uid, payload, env, claims) {
   if (!codeRate(uid, "report", 10)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -5326,11 +5349,21 @@ async function opReportCreate(uid, payload, env, claims) {
     if (cmid) { tgtDoc = await fsGet(token, path + "/cm/" + cmid).catch(() => null); if (!tgtDoc || !tgtDoc.fields) throw new Error("comment gone"); path += "/cm/" + cmid; }
     type = cmid ? "moment-comment" : "moment"; target = fstr(tgtDoc, "by") || target;
     sample = [{ by: target, type: type, text: fstr(tgtDoc, "text").slice(0, 600), media: cmid ? 0 : (momMap(md, "media") || []).length, ts: fsInt(tgtDoc, "ts"), pid, cmid }];
-    const reps = fsArr(tgtDoc, "reps");
+    const reps = fsArr(tgtDoc, "reps"), treps = fsArr(tgtDoc, "treps");
     if (reps.indexOf(uid) < 0) {
-      const held = reps.length + 1 >= 3;
+      // C198/\u0666: \u0643\u0644\u0651 \u0645\u0628\u0644\u0650\u0651\u063A\u064D \u064A\u064F\u0633\u062C\u064E\u0651\u0644 \u0641\u064A reps (\u0644\u0644\u0645\u0631\u0627\u062C\u0639\u0629)\u060C \u0644\u0643\u0646\u0651 \u0627\u0644\u062D\u062C\u0628 \u0627\u0644\u062A\u0644\u0642\u0627\u0626\u064A\u0651 \u064A\u062D\u062A\u0627\u062C \u0663 \u0645\u0628\u0644\u0650\u0651\u063A\u064A\u0646 \u00AB\u0645\u0648\u062B\u0648\u0642\u064A\u0646\u00BB (treps):
+      //        \u063A\u064A\u0631 \u0636\u064A\u0641\u060C \u0648\u0631\u0642\u0645\u0647 \u0645\u0648\u062B\u064E\u0651\u0642 \u0623\u0648 \u0639\u0645\u0631 \u062D\u0633\u0627\u0628\u0647 \u2265 REPORT_TRUST_DAYS \u2014 \u0641\u0644\u0627 \u062A\u0643\u0641\u064A \u062D\u0633\u0627\u0628\u0627\u062A\u064C \u062C\u062F\u064A\u062F\u0629 \u0644\u0625\u062E\u0641\u0627\u0621 \u0644\u062D\u0638\u0629 \u0623\u062D\u062F
+      let trusted = false;
+      if (!isAnon(claims)) {
+        const pr = await profileOf(token, uid).catch(() => ({}));
+        if (pr.phoneVerified) trusted = true;
+        else { const cr = await authCreatedAt(token, uid).catch(() => 0); trusted = !!cr && Date.now() - cr >= REPORT_TRUST_DAYS * DAY_MS; }
+      }
+      const held = trusted && treps.indexOf(uid) < 0 && treps.length + 1 >= 3;
+      const tf = [{ fieldPath: "reps", appendMissingElements: { values: [{ stringValue: uid }] } }];
+      if (trusted) tf.push({ fieldPath: "treps", appendMissingElements: { values: [{ stringValue: uid }] } });
       await fsCommit(token, [{ update: { name: DOC_ROOT + "/" + path, fields: held ? { held: { booleanValue: true } } : {} }, updateMask: { fieldPaths: held ? ["held"] : [] },
-        updateTransforms: [{ fieldPath: "reps", appendMissingElements: { values: [{ stringValue: uid }] } }], currentDocument: { exists: true } }]).catch(e => slog("warn", "reps", { err: e && e.message }));
+        updateTransforms: tf, currentDocument: { exists: true } }]).catch(e => slog("warn", "reps", { err: e && e.message }));
     }
   }
   if (target && !segOk(String(target))) throw new Error("bad target");
@@ -5400,8 +5433,8 @@ async function opAdminReportClose(uid, payload, env, claims) {
   // C150: \u00AB\u0644\u0627 \u0645\u062E\u0627\u0644\u0641\u0629\u00BB \u21D2 \u062A\u064F\u0631\u0641\u0639 \u0627\u0644\u062D\u062C\u0628 \u0639\u0646 \u0627\u0644\u0644\u062D\u0638\u0629/\u0627\u0644\u062A\u0639\u0644\u064A\u0642 \u0648\u064A\u064F\u0635\u0641\u064E\u0651\u0631 \u0639\u062F\u0651\u0627\u062F \u0627\u0644\u0645\u0628\u0644\u0650\u0651\u063A\u064A\u0646
   if (payload.release) {
     const rp = await fsGet(token, "reports/" + id).catch(() => null), pid = rp && fstr(rp, "pid"), cmid = rp && fstr(rp, "cmid");
-    if (pid && momPidOk(pid)) await fsCommit(token, [{ update: { name: DOC_ROOT + "/moments/" + pid + (cmid ? "/cm/" + cmid : ""), fields: { held: { booleanValue: false }, reps: { arrayValue: { values: [] } } } },
-      updateMask: { fieldPaths: ["held", "reps"] }, currentDocument: { exists: true } }]).catch(() => {});
+    if (pid && momPidOk(pid)) await fsCommit(token, [{ update: { name: DOC_ROOT + "/moments/" + pid + (cmid ? "/cm/" + cmid : ""), fields: { held: { booleanValue: false }, reps: { arrayValue: { values: [] } }, treps: { arrayValue: { values: [] } } } },
+      updateMask: { fieldPaths: ["held", "reps", "treps"] }, currentDocument: { exists: true } }]).catch(() => {});
   }
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/reports/" + id, fields: { status: { stringValue: "closed" }, closedTs: { integerValue: String(Date.now()) } } },
     updateMask: { fieldPaths: ["status", "closedTs"] }, currentDocument: { exists: true } }]);
@@ -5439,6 +5472,16 @@ async function rlGc(env, n) {
   const rows = ((await res.json()) || []).filter(r => r.document).map(r => ({ delete: r.document.name }));
   if (rows.length) await fsCommit(token, rows);
   return rows.length;
+}
+/* C198/\u0668: \u0644\u0627 \u062A\u064F\u0639\u0627\u062F \u062A\u0641\u0627\u0635\u064A\u0644 \u062F\u0627\u062E\u0644\u064A\u0651\u0629 \u0644\u0644\u0639\u0645\u064A\u0644 (JSON \u0623\u062E\u0637\u0627\u0621 Firestore\u060C \u0631\u0633\u0627\u0626\u0644 JS\u060C \u0645\u0633\u0627\u0631\u0627\u062A). \u0631\u0645\u0648\u0632 \u0627\u0644\u0623\u062E\u0637\u0627\u0621 \u0627\u0644\u0642\u0635\u064A\u0631\u0629 (rate_limited\u060C not_contact\u2026)
+   \u062A\u0628\u0642\u0649 \u0643\u0645\u0627 \u0647\u064A. \u0648\u0627\u0644\u062F\u0627\u062E\u0644\u064A\u0651 \u21D2 "server_error" \u2014 \u0645\u0639 \u00ABinvalid\u00BB \u0625\u0646 \u0643\u0627\u0646 \u0627\u0644\u062E\u0637\u0623 \u0646\u0647\u0627\u0626\u064A\u0651\u0627\u064B \u0628\u0645\u0639\u064A\u0627\u0631 \u0637\u0627\u0628\u0648\u0631 \u0627\u0644\u0635\u0627\u062F\u0631 \u0641\u064A sawa-sync (FINAL) \u0641\u0644\u0627 \u064A\u064F\u0639\u0627\u062F \u0625\u0631\u0633\u0627\u0644\u0647. */
+const FINAL_ERR = /not allowed|only the owner|required|bad |not found|equals|not stored|deleted|removed|full|expired|invalid|exists|too (large|many)|unknown op|bad op|cycle|slot/i;
+function publicErr(e) {
+  const m = String((e && e.message) || e || "");
+  const internal = !m || m.length > 160 || /[{}\n]/.test(m) || /^(firestore|rtdb|fcm|token mint|auth lookup|cloudflare turn|metered|bad doc path|bad path|apns|sfu)/i.test(m)
+    || !!(e && /^(TypeError|ReferenceError|SyntaxError|RangeError)$/.test(e.name));
+  if (!internal) return m;
+  return /ALREADY_EXISTS|NOT_FOUND|INVALID_ARGUMENT|PERMISSION_DENIED|FAILED_PRECONDITION/.test(m) || FINAL_ERR.test(m) ? "server_error: invalid request" : "server_error";
 }
 function isAnon(claims) { return !!(claims && claims.firebase && claims.firebase.sign_in_provider === "anonymous"); }
 function ipOf(claims) { return (claims && claims._ip) || "?"; }
@@ -5492,7 +5535,7 @@ export default {
     try { const u0 = new URL(request.url); if (isAuthProxyPath(u0.pathname)) return await authProxy(request, u0); } catch (e) { return new Response("auth proxy error", { status: 502 }); }
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
     try { if (new URL(request.url).pathname === "/wa/webhook") return await waWebhook(request, env, ctx); } catch (e) { return new Response("webhook error", { status: 500 }); }
-    try { if (request.method === "POST" && new URL(request.url).pathname === "/ack") return await deviceAck(request, env); } catch (e) { return json({ ok: false, error: String(e && e.message || e) }, 500); }
+    try { if (request.method === "POST" && new URL(request.url).pathname === "/ack") return await deviceAck(request, env); } catch (e) { slog("error", "ack.fail", { err: String(e && e.message || e).slice(0, 300) }); return json({ ok: false, error: publicErr(e) }, 500); }
     try { if (request.method === "GET" && new URL(request.url).pathname === "/av") return await avatarImg(request, env); } catch (e) { return new Response("", { status: 500 }); }   // C152
     let statOp = null;
     try {
@@ -5714,7 +5757,9 @@ export default {
       return json({ ok: false, error: "unknown op: " + op }, 400);
     } catch (e) {
       if (statOp) { stat("err:" + statOp); if (ctx && ctx.waitUntil) ctx.waitUntil(flushStats(env)); }
-      return json({ ok: false, error: String((e && e.message) || e) }, 401);
+      const pub = publicErr(e);
+      if (pub !== String((e && e.message) || e)) slog("error", "op.fail", { op: statOp, err: String((e && e.message) || e).slice(0, 500) });
+      return json({ ok: false, error: pub }, 401);
     }
   },
 };
