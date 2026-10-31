@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062D\u0635 \u06
    \u26A0\uFE0F \u0625\u0646 \u0623\u064F\u0639\u064A\u062F \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064D \u062C\u062F\u064A\u062F\u060C \u063A\u064A\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v95-slog";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C197: \u0627\u0644\u0633\u062C\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064E\u0651\u0645)
+const VER = "v96-sec";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C198: \u0625\u0635\u0644\u0627\u062D\u0627\u062A \u0623\u0645\u0646\u064A\u0651\u0629 \u0661\u2013\u0665)
 // C197: \u0627\u0644\u0633\u062C\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064E\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u062D\u062F\u062B { lvl, ev, ts, ...\u062D\u0642\u0648\u0644 } (Workers Logs \u062A\u0641\u0647\u0631\u0633 \u0627\u0644\u062D\u0642\u0648\u0644 \u0644\u0644\u0628\u062D\u062B \u0648\u0627\u0644\u062A\u0635\u0641\u064A\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -174,9 +174,15 @@ async function fsCommit(accessToken, writes) {
   return data;
 }
 
+/* C198: \u0645\u0633\u0627\u0631\u064C \u0646\u0633\u0628\u064A\u0651 \u0622\u0645\u0646 \u0644\u0644\u0631\u0627\u0628\u0637 \u2014 \u064A\u064F\u0631\u0645\u064E\u0651\u0632 \u0643\u0644\u0651 \u062C\u0632\u0621 \u0639\u0644\u0649 \u062D\u062F\u0629\u060C \u0648\u064A\u064F\u0631\u0641\u0636 \u00AB.\u00BB \u0648\u00AB..\u00BB \u0648\u0623\u064A\u0651 \u062C\u0632\u0621\u064D \u0641\u064A\u0647 % \u0623\u0648 ? \u0623\u0648 # \u0623\u0648 \\ */
+function fsRel(rel) {
+  const segs = String(rel).split("/");
+  for (const x of segs) if (x === "." || x === ".." || /[%?#\\]/.test(x)) throw new Error("bad path");
+  return segs.map(encodeURIComponent).join("/");
+}
 /* \u0642\u0631\u0627\u0621\u0629 \u0648\u062B\u064A\u0642\u0629 \u0648\u0627\u062D\u062F\u0629 \u2014 relPath \u0645\u062B\u0644 "groups/{gid}/members/{uid}" */
 async function fsGet(accessToken, relPath) {
-  const res = await fetch(FS_BASE + "/" + relPath, {
+  const res = await fetch(FS_BASE + "/" + fsRel(relPath), {
     headers: { Authorization: "Bearer " + accessToken },
   });
   if (res.status === 404) return null;
@@ -195,7 +201,7 @@ function fbool(doc, name) {
 async function fsList(accessToken, collPath) {
   let out = [], pageToken = null, guard = 0;
   do {
-    const url = FS_BASE + "/" + collPath + "?pageSize=300" +
+    const url = FS_BASE + "/" + fsRel(collPath) + "?pageSize=300" +
       (pageToken ? "&pageToken=" + encodeURIComponent(pageToken) : "");
     const res = await fetch(url, { headers: { Authorization: "Bearer " + accessToken } });
     if (res.status === 404) return out;
@@ -239,7 +245,7 @@ async function fsQueryEq(accessToken, collectionId, eqs, limit) {
 async function fsQuerySub(accessToken, parentRel, collectionId, filters, limit) {
   const fl = filters.map(([k, op, v]) => ({ fieldFilter: { field: { fieldPath: k }, op: op,
     value: op === "IN" ? { arrayValue: { values: v.map(x => ({ stringValue: x })) } } : { stringValue: v } } }));
-  const res = await fetch(FS_BASE + "/" + parentRel + ":runQuery", {
+  const res = await fetch(FS_BASE + "/" + fsRel(parentRel) + ":runQuery", {
     method: "POST",
     headers: { Authorization: "Bearer " + accessToken, "Content-Type": "application/json" },
     body: JSON.stringify({ structuredQuery: { from: [{ collectionId: collectionId }],
@@ -253,7 +259,7 @@ async function fsQuerySub(accessToken, parentRel, collectionId, filters, limit) 
 async function fsCount(accessToken, parentRel, collectionId, eq) {
   const q = { from: [{ collectionId: collectionId }] };
   if (eq) q.where = { fieldFilter: { field: { fieldPath: eq[0] }, op: "EQUAL", value: toFsValue(eq[1]) } };
-  const res = await fetch(FS_BASE + "/" + parentRel + ":runAggregationQuery", {
+  const res = await fetch(FS_BASE + "/" + fsRel(parentRel) + ":runAggregationQuery", {
     method: "POST",
     headers: { Authorization: "Bearer " + accessToken, "Content-Type": "application/json" },
     body: JSON.stringify({ structuredAggregationQuery: { structuredQuery: q, aggregations: [{ alias: "n", count: {} }] } }),
@@ -1018,7 +1024,9 @@ async function opReviewList(uid, payload, env) {
 /* ---------- 21) photo.set \u2014 \u0635\u0648\u0631\u0629 \u0634\u062E\u0635 (\u0645\u0635\u063A\u064E\u0651\u0631\u0629 \u0639\u0644\u0649 \u0627\u0644\u062C\u0647\u0627\u0632) \u0641\u064A groups/{gid}/photos/{pid} ----------
    \u062E\u062F\u0645\u0629 \u0627\u0644\u062A\u062E\u0632\u064A\u0646 \u062A\u062A\u0637\u0644\u0651\u0628 \u062E\u0637\u0651\u0629 Blaze (\u0645\u062D\u062C\u0648\u0628\u0629 \u0644\u0644\u0633\u0648\u062F\u0627\u0646) \u21D2 \u0627\u0644\u0635\u0648\u0631\u0629 \u0627\u0644\u0645\u0635\u063A\u064E\u0651\u0631\u0629 \u0646\u0635\u0651\u0627\u064B \u0641\u064A Firestore. */
 /* \u0645\u0639\u0631\u0651\u0641\u064C \u0622\u0645\u0646 \u0643\u062C\u0632\u0621\u064D \u0645\u0646 \u0645\u0633\u0627\u0631 Firestore: \u0628\u0644\u0627 \u00AB/\u00BB \u0648\u0644\u0627 \u00AB..\u00BB */
-function segOk(x) { return typeof x === "string" && x.length > 0 && x.length <= 200 && x.indexOf("/") < 0 && x !== "." && x !== ".."; }
+// C198: \u0642\u0627\u0626\u0645\u0629 \u0633\u0645\u0627\u062D\u064D \u0635\u0627\u0631\u0645\u0629 \u2014 \u0644\u0627 \u00AB%\u00BB (\u0643\u0627\u0646 \u200E%2e%2e\u200E \u064A\u0635\u064A\u0631 \u00AB..\u00BB \u0641\u064A \u0627\u0644\u0631\u0627\u0628\u0637 \u0641\u064A\u0635\u0639\u062F \u0645\u0633\u062A\u0648\u0649) \u0648\u0644\u0627 \u00AB?\u00BB \u0648\u0644\u0627 \u00AB#\u00BB \u0648\u0644\u0627 \u00AB\\\u00BB \u0648\u0644\u0627 \u0645\u0633\u0627\u0641\u0627\u062A.
+const SEG_RE = /^[A-Za-z0-9_\-.~+=,]{1,200}$/;
+function segOk(x) { return typeof x === "string" && SEG_RE.test(x) && !/^\.+$/.test(x); }
 async function opPhotoSet(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const groupId = payload && payload.groupId, pid = payload && payload.personId;
@@ -3411,6 +3419,7 @@ async function opPhoneStart(uid, payload, env, claims) {
   if (!cfg.whatsapp) return { enabled: false };
   if (!codeRate(uid, "otp", 6)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  if (!(await rateGate(token, [["otp:u:" + uid, 6, 3600], ["otp:ud:" + uid, 20, 86400]]))) throw new Error("rate_limited");   // C198
   const p = await profileOf(token, uid);
   const code = otpCode(), now = Date.now(), exp = now + 15 * 60 * 1000;
   const writes = [{ update: { name: DOC_ROOT + "/otp/" + code, fields: { uid: { stringValue: uid }, phone: p.phone ? { stringValue: p.phone } : { nullValue: null }, exp: { integerValue: String(exp) }, at: { integerValue: String(now) } } } },
@@ -3437,15 +3446,48 @@ async function opPhoneStatus(uid, payload, env) {
    (verifiedBy = "contacts"). accounts/{to}/vouchin/{from} = \u0637\u0644\u0628 \u00B7 accounts/{owner}/vouches/{voucher} = { phone, name, ts, matched } (C187: \u0627\u0644\u0645\u0633\u0627\u0631 \u0627\u0644\u0633\u0627\u0628\u0642 vouches/{owner}/{voucher} \u0643\u0627\u0646 \u0645\u0633\u0627\u0631\u0627\u064B \u063A\u064A\u0631 \u0635\u0627\u0644\u062D \u0644\u0640 Firestore).
    \u062A\u063A\u064A\u064A\u0631 \u0627\u0644\u0631\u0642\u0645 \u064A\u064F\u0628\u0637\u0644 \u0627\u0644\u062A\u0623\u0643\u064A\u062F\u0627\u062A \u0627\u0644\u0642\u062F\u064A\u0645\u0629 (\u062A\u064F\u062D\u0633\u0628 \u0641\u0642\u0637 \u0627\u0644\u062A\u064A \u062A\u062D\u0645\u0644 \u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u062D\u0627\u0644\u064A\u0651). \u0631\u0642\u0645\u064C \u0648\u0627\u062D\u062F \u0644\u062D\u0633\u0627\u0628\u064D \u0648\u0627\u062D\u062F (phones/). */
 const VOUCH_NEEDED = 2;
+/* C198: \u0643\u0627\u0646 \u064A\u0643\u0641\u064A \u062D\u0633\u0627\u0628\u0627 Gmail \u062C\u062F\u064A\u062F\u0627\u0646 \u064A\u0642\u0628\u0644\u0627\u0646 \u0631\u0627\u0628\u0637 \u062F\u0639\u0648\u0629 \u0627\u0644\u0645\u0647\u0627\u062C\u0645 \u0644\u064A\u0624\u0643\u0651\u062F\u0627 \u0631\u0642\u0645 \u063A\u064A\u0631\u0647. \u0627\u0644\u0622\u0646 \u0627\u0644\u0645\u0624\u0643\u0650\u0651\u062F \u064A\u062C\u0628 \u0623\u0646:
+   - \u064A\u0643\u0648\u0646 \u0631\u0642\u0645\u0647 \u0645\u0648\u062B\u064E\u0651\u0642\u0627\u064B \u0639\u0628\u0631 \u0648\u0627\u062A\u0633\u0627\u0628\u060C \u0623\u0648 \u064A\u0643\u0648\u0646 \u062D\u0633\u0627\u0628\u0647 (Firebase Auth\u060C \u0644\u0627 \u064A\u064F\u0632\u0648\u064E\u0651\u0631) \u0623\u0642\u062F\u0645 \u0645\u0646 VOUCH_MIN_ACCOUNT_DAYS \u064A\u0648\u0645\u0627\u064B\u061B
+   - \u062A\u0643\u0648\u0646 \u0635\u0644\u062A\u0647 \u0628\u0635\u0627\u062D\u0628 \u0627\u0644\u0631\u0642\u0645 (\u062C\u0647\u0629 \u0627\u062A\u0651\u0635\u0627\u0644 \u0645\u0628\u0627\u0634\u0631\u0629 \u0623\u0648 \u0639\u0627\u0626\u0644\u0629 \u0645\u0634\u062A\u0631\u0643\u0629) \u0623\u0642\u062F\u0645 \u0645\u0646 VOUCH_MIN_LINK_DAYS \u0623\u064A\u0651\u0627\u0645 (createTime \u0645\u0646 Firestore)\u061B
+   - \u0644\u0645 \u064A\u0624\u0643\u0651\u062F \u0623\u0643\u062B\u0631 \u0645\u0646 VOUCH_GIVE_MAX \u0631\u0642\u0645\u0627\u064B \u0641\u064A \u0663\u0660 \u064A\u0648\u0645\u0627\u064B (\u062D\u062F\u064C\u0651 \u0645\u0634\u062A\u0631\u0643).
+   \u062A\u064F\u062D\u0633\u0628 \u0641\u0642\u0637 \u0627\u0644\u062A\u0623\u0643\u064A\u062F\u0627\u062A \u0627\u0644\u062A\u064A \u0645\u0631\u0651\u062A \u0628\u0647\u0630\u0647 \u0627\u0644\u0641\u062D\u0648\u0635 (chk = 2)\u061B \u00ABmatched\u00BB \u0645\u0646 \u0627\u0644\u0639\u0645\u064A\u0644 \u064A\u064F\u062D\u0641\u0638 \u0644\u0644\u0639\u0631\u0636 \u0648\u0644\u0627 \u064A\u064F\u0639\u062A\u0645\u062F \u0639\u0644\u064A\u0647.
+   \u0648\u0627\u062A\u0633\u0627\u0628 \u064A\u0628\u0642\u0649 \u0623\u0642\u0648\u0649: \u062A\u0648\u062B\u064A\u0642 \u0627\u0644\u0631\u0642\u0645 \u0639\u0628\u0631\u0647 \u064A\u0646\u0632\u0639\u0647 \u0645\u0646 \u0623\u064A\u0651 \u062D\u0633\u0627\u0628\u064D \u0623\u0643\u0651\u062F\u0647 \u0627\u0644\u0645\u0639\u0627\u0631\u0641. */
+const VOUCH_MIN_ACCOUNT_DAYS = 30, VOUCH_MIN_LINK_DAYS = 7, VOUCH_GIVE_MAX = 5, DAY_MS = 86400000;
+const AUTH_CREATED = new Map();
+async function authCreatedAt(token, uid) {
+  const c = AUTH_CREATED.get(uid); if (c) return c;
+  const r = await fetch("https://identitytoolkit.googleapis.com/v1/projects/" + PROJECT_ID + "/accounts:lookup", {
+    method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ localId: [uid] }) });
+  let b = null; try { b = await r.json(); } catch (e) {}
+  const t = Number(b && b.users && b.users[0] && b.users[0].createdAt || 0);
+  if (!r.ok || !t) throw new Error("auth lookup " + r.status);
+  if (AUTH_CREATED.size > 5000) AUTH_CREATED.clear();
+  AUTH_CREATED.set(uid, t);
+  return t;
+}
+// \u0645\u0646\u0630 \u0645\u062A\u0649 \u0628\u064A\u0646 a \u0648b \u0635\u0644\u0629\u061F createTime \u0644\u0648\u062B\u064A\u0642\u0629 \u062C\u0647\u0629 \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 \u0627\u0644\u0645\u0628\u0627\u0634\u0631\u0629\u060C \u0623\u0648 \u0644\u0639\u0636\u0648\u064A\u0651\u0629 \u0627\u0644\u0637\u0631\u0641\u064A\u0646 \u0641\u064A \u0639\u0627\u0626\u0644\u0629\u064D \u0645\u0634\u062A\u0631\u0643\u0629 (\u0627\u0644\u0623\u062D\u062F\u062B \u0645\u0646\u0647\u0645\u0627) \u2014 \u0627\u0644\u0623\u0642\u062F\u0645 \u0628\u064A\u0646\u0647\u0627\u060C \u0623\u0648 null
+async function contactSince(token, a, b) {
+  let best = null;
+  const d = await fsGet(token, "accounts/" + a + "/people/" + b).catch(() => null);
+  if (d && d.createTime) best = Date.parse(d.createTime);
+  const mine = (await fsList(token, "accounts/" + a + "/groups").catch(() => [])).slice(0, 20);
+  for (const g of mine) {
+    const gid = g.name.split("/").pop();
+    const [mb, ma] = await Promise.all([fsGet(token, "groups/" + gid + "/members/" + b).catch(() => null), fsGet(token, "groups/" + gid + "/members/" + a).catch(() => null)]);
+    if (mb && ma && mb.createTime && ma.createTime) { const t = Math.max(Date.parse(mb.createTime), Date.parse(ma.createTime)); if (best == null || t < best) best = t; }
+  }
+  return best;
+}
 async function vouchCount(token, owner, phone) {
   const vs = await fsList(token, "accounts/" + owner + "/vouches").catch(() => []);
   const names = [];
-  for (const d of vs) if (fstr(d, "phone") === phone) names.push(fstr(d, "name") || null);
+  for (const d of vs) if (fstr(d, "phone") === phone && Number(d.fields && d.fields.chk && d.fields.chk.integerValue || 0) >= 2) names.push(fstr(d, "name") || null);   // C198
   return { n: names.length, names: names.slice(0, 5) };
 }
 async function opVouchRequest(uid, payload, env, claims, ctx) {
   if (!codeRate(uid, "vouch", 5)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  if (!(await rateGate(token, [["vreq:u:" + uid, 5, 3600], ["vreq:ud:" + uid, 15, 86400]]))) throw new Error("rate_limited");   // C198
   const p = await profileOf(token, uid);
   if (!p.phone) throw new Error("no_phone");
   if (p.phoneVerified) return { already: true };
@@ -3469,7 +3511,7 @@ async function opVouchRequest(uid, payload, env, claims, ctx) {
 async function opVouchRespond(uid, payload, env, claims, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const owner = String((payload && payload.for) || ""), ok = !!(payload && payload.ok), matched = !!(payload && payload.matched);
-  if (!owner || owner === uid) throw new Error("bad_target");
+  if (!segOk(owner) || owner === uid) throw new Error("bad_target");   // C198: \u0643\u0627\u0646 \u00ABfor\u00BB \u0628\u0644\u0627 \u0641\u062D\u0635
   const rq = await fsGet(token, "accounts/" + uid + "/vouchin/" + owner);
   if (!rq) throw new Error("not_found");
   const del = { delete: DOC_ROOT + "/accounts/" + uid + "/vouchin/" + owner };
@@ -3477,12 +3519,20 @@ async function opVouchRespond(uid, payload, env, claims, ctx) {
   if (claims.firebase && claims.firebase.sign_in_provider === "anonymous") throw new Error("not_eligible");
   const mine = await profileOf(token, uid);
   if (!(claims.email && claims.email_verified) && !mine.phoneVerified) throw new Error("not_eligible");
-  if (!(await sharesContact(token, uid, owner))) throw new Error("not_contact");
+  // C198: \u0639\u0645\u0631 \u0627\u0644\u062D\u0633\u0627\u0628 (\u0625\u0644\u0651\u0627 \u0644\u0645\u0646 \u0631\u0642\u0645\u0647 \u0645\u0648\u062B\u064E\u0651\u0642 \u0639\u0628\u0631 \u0648\u0627\u062A\u0633\u0627\u0628) \u00B7 \u0639\u0645\u0631 \u0627\u0644\u0635\u0644\u0629 \u00B7 \u062D\u0635\u0651\u0629 \u0627\u0644\u062A\u0623\u0643\u064A\u062F\u0627\u062A
+  if (!(mine.phoneVerified && mine.verifiedBy === "whatsapp")) {
+    const created = await authCreatedAt(token, uid).catch((e) => { slog("warn", "vouch.age", { err: e && e.message }); return 0; });
+    if (!created || Date.now() - created < VOUCH_MIN_ACCOUNT_DAYS * DAY_MS) throw new Error("voucher_too_new");
+  }
+  const since = await contactSince(token, uid, owner);
+  if (since == null) throw new Error("not_contact");
+  if (Date.now() - since < VOUCH_MIN_LINK_DAYS * DAY_MS) throw new Error("contact_too_new");
+  if (!(await rateGate(token, [["vgive:u:" + uid, VOUCH_GIVE_MAX, 30 * 86400]]))) throw new Error("vouch_quota");
   const target = await fsGet(token, "accounts/" + owner);
   const tphone = fstr(target, "phone"), rqPhone = fstr(rq, "phone");
   if (!tphone || tphone !== rqPhone) { await fsCommit(token, [del]); return { done: true, counted: false, stale: true }; }
   const myNm = await myName(token, uid, claims);
-  await fsCommit(token, [del, { update: { name: DOC_ROOT + "/accounts/" + owner + "/vouches/" + uid, fields: { phone: { stringValue: tphone }, name: myNm ? { stringValue: myNm } : { nullValue: null }, ts: { integerValue: String(Date.now()) }, matched: { booleanValue: matched } } } }]);
+  await fsCommit(token, [del, { update: { name: DOC_ROOT + "/accounts/" + owner + "/vouches/" + uid, fields: { phone: { stringValue: tphone }, name: myNm ? { stringValue: myNm } : { nullValue: null }, ts: { integerValue: String(Date.now()) }, chk: { integerValue: "2" }, matched: { booleanValue: matched } } } }]);
   const vc = await vouchCount(token, owner, tphone);
   let verified = fbool(target, "phoneVerified") === true, conflict = false;
   if (!verified && vc.n >= VOUCH_NEEDED) {
@@ -3565,9 +3615,12 @@ async function findTarget(token, uidHit) {
   if (!acc || !accFindable(acc)) return null;
   return { uid: uidHit, code: fstr(acc, "code") || null, name: fstr(acc, "displayName") || fstr(acc, "gname") || null };
 }
-async function opFindBy(uid, payload, env, kind) {
+async function opFindBy(uid, payload, env, kind, claims) {
+  // C198: \u0627\u0644\u0628\u062D\u062B \u0628\u0627\u0644\u0631\u0642\u0645/\u0627\u0644\u0628\u0631\u064A\u062F \u0642\u0627\u0628\u0644\u064C \u0644\u0644\u0645\u0633\u062D \u0627\u0644\u0645\u062A\u062A\u0627\u0628\u0639 \u21D2 \u0645\u0645\u0646\u0648\u0639\u064C \u0639\u0644\u0649 \u0627\u0644\u0636\u064A\u0641\u060C \u0648\u0645\u062D\u062F\u0648\u062F\u064C \u0644\u0643\u0644\u0651 \u062D\u0633\u0627\u0628\u064D \u0648\u0644\u0643\u0644\u0651 \u0639\u0646\u0648\u0627\u0646 \u0641\u064A \u0643\u0644\u0651 \u0646\u0633\u062E \u0627\u0644\u0640Worker
+  if (isAnon(claims)) throw new Error("guest_limited");
   if (!codeRate(uid, "find", 30)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  if (!(await rateGate(token, [["find:u:" + uid, 30, 3600], ["find:ud:" + uid, 100, 86400], ["find:ip:" + ipOf(claims), 120, 86400]]))) throw new Error("rate_limited");
   let t = null;
   if (kind === "phone") {
     const ph = cleanPhone(payload && payload.phone); if (!ph) throw new Error("bad_phone");
@@ -3815,6 +3868,16 @@ async function opAdminRelay(uid, payload, env, claims) {
   return { admin: true, role, primary: await relayPref(env), envDefault: env.TURN_PROVIDER === "cloudflare" ? "cf" : "m",
     has: { m: !!((env.METERED_USER && env.METERED_PASS) || (env.METERED_KEY && env.METERED_APP)), cf: !!(env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN) } };
 }
+const HAS_CONTACT = new Map();
+async function hasAnyContact(token, uid) {
+  const c = HAS_CONTACT.get(uid); if (c && Date.now() - c < 3600000) return true;
+  const res = await fetch(FS_BASE + "/" + fsRel("accounts/" + uid + "/people") + "?pageSize=1&mask.fieldPaths=__none__", { headers: { Authorization: "Bearer " + token } });
+  let ok = false;
+  if (res.ok) { const b = await res.json().catch(() => null); ok = !!(b && b.documents && b.documents.length); }
+  if (!ok) { const gs = await fsList(token, "accounts/" + uid + "/groups").catch(() => []); ok = gs.length > 0; }
+  if (ok) { if (HAS_CONTACT.size > 5000) HAS_CONTACT.clear(); HAS_CONTACT.set(uid, Date.now()); }
+  return ok;
+}
 async function opRtcIce(uid, payload, env, claims, request) {
   const stun = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
   const anon = !!(claims && claims.firebase && claims.firebase.sign_in_provider === "anonymous");
@@ -3823,6 +3886,14 @@ async function opRtcIce(uid, payload, env, claims, request) {
   const cached = iceByUid.get(uid);
   if (!(cached && Date.now() - cached.at < 2 * 3600 * 1000)) {
     if (!iceRateOk("u:" + uid, anon ? 6 : 20) || (anon && !iceRateOk("ip:" + ip, 20))) { stat("turn:limited"); return { iceServers: stun, turn: false, limited: true }; }
+    // C198: \u0627\u0644\u0636\u064A\u0641 \u064A\u062D\u062A\u0627\u062C \u062C\u0647\u0629 \u0627\u062A\u0651\u0635\u0627\u0644 \u0648\u0627\u062D\u062F\u0629 \u0639\u0644\u0649 \u0627\u0644\u0623\u0642\u0644\u0651 (\u062D\u0633\u0627\u0628\u0627\u062A \u0627\u0644\u0636\u064A\u0641 \u0627\u0644\u0645\u0635\u0646\u0648\u0639\u0629 \u0628\u0627\u0644\u062C\u0645\u0644\u0629 \u0644\u0627 \u062A\u0633\u062A\u0637\u064A\u0639 \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 \u0628\u0623\u062D\u062F \u0623\u0635\u0644\u0627\u064B)\u060C
+    //       \u0648\u062D\u062F\u0648\u062F\u064C \u0645\u0634\u062A\u0631\u0643\u0629 \u0628\u064A\u0646 \u0643\u0644\u0651 \u0646\u0633\u062E \u0627\u0644\u0640Worker \u0644\u0643\u0644\u0651 \u062D\u0633\u0627\u0628 \u0648\u0644\u0643\u0644\u0651 \u0639\u0646\u0648\u0627\u0646 (\u0627\u0644\u062D\u062F\u0648\u062F \u0641\u064A \u0627\u0644\u0630\u0627\u0643\u0631\u0629 \u0643\u0627\u0646\u062A \u062A\u062A\u0635\u0641\u0651\u0631 \u0628\u064A\u0646 \u0627\u0644\u0646\u0633\u062E)
+    try {
+      const token = await getAccessToken(JSON.parse(env.SA_JSON));
+      if (anon && !(await hasAnyContact(token, uid))) { stat("turn:nocontact"); return { iceServers: stun, turn: false, limited: true }; }
+      const rules = anon ? [["ice:u:" + uid, 8, 86400], ["ice:ip:" + ip, 40, 86400]] : [["ice:u:" + uid, 60, 86400]];
+      if (!(await rateGate(token, rules))) { stat("turn:limited"); return { iceServers: stun, turn: false, limited: true }; }
+    } catch (e) { slog("warn", "ice.gate", { err: e && e.message }); }
   }
   // v60 (C94): \u0639\u062F\u0651\u0629 \u0648\u0633\u0637\u0627\u0621 \u2014 \u064A\u064F\u0639\u0627\u062F \u0643\u0644\u0651 \u0648\u0633\u064A\u0637\u064D \u0645\u062A\u0627\u062D \u0641\u064A \u00ABrelays\u00BB \u0644\u064A\u0642\u064A\u0633 \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0623\u0642\u0631\u0628\u0647\u0627 \u0644\u0634\u0628\u0643\u062A\u0647 \u0648\u064A\u062E\u062A\u0627\u0631\u0647 (\u0623\u0648 \u064A\u062E\u062A\u0627\u0631 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u064A\u062F\u0648\u064A\u0651\u0627\u064B).
   //   Cloudflare (CF_TURN_*) \u00B7 Metered (METERED_USER/PASS \u0645\u0639 METERED_HOSTS: \u0645\u0636\u064A\u0641\u0648\u0646 \u0645\u0641\u0635\u0648\u0644\u0648\u0646 \u0628\u0641\u0627\u0635\u0644\u0629\u060C \u0623\u0648 METERED_HOST) \u0623\u0648 \u0645\u0641\u062A\u0627\u062D API
@@ -4220,9 +4291,12 @@ async function opCodeMine(uid, payload, env, claims) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   return await ensureCode(token, uid, claims, false);
 }
-async function opCodeFind(uid, payload, env) {
+async function opCodeFind(uid, payload, env, claims) {
   if (!codeRate(uid, "find", 30)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  // C198: \u0627\u0644\u0631\u0645\u0632 (\u0661\u0660 \u0623\u0631\u0642\u0627\u0645) \u064A\u0634\u0627\u0631\u0643\u0647 \u0635\u0627\u062D\u0628\u0647 \u0641\u064A\u0628\u0642\u0649 \u0645\u062A\u0627\u062D\u0627\u064B \u0644\u0644\u0636\u064A\u0641 \u2014 \u0628\u062D\u062F\u064D\u0651 \u0645\u0634\u062A\u0631\u0643 \u0644\u0643\u0644\u0651 \u062D\u0633\u0627\u0628\u060C \u0648\u0644\u0644\u0636\u064A\u0641 \u0644\u0643\u0644\u0651 \u0639\u0646\u0648\u0627\u0646\u064D \u0623\u064A\u0636\u0627\u064B
+  const anon = isAnon(claims);
+  if (!(await rateGate(token, [["cfind:u:" + uid, anon ? 10 : 30, 3600]].concat(anon ? [["cfind:ip:" + ipOf(claims), 40, 86400]] : [])))) throw new Error("rate_limited");
   const t = await codeTarget(token, payload && payload.code);
   if (!t) return { found: false };
   if (t.uid === uid) return { found: true, self: true, name: t.name, code: t.code };
@@ -4239,6 +4313,10 @@ async function sigTo(token, uids, kind) {
 async function opCodeRequest(uid, payload, env, claims, ctx) {
   if (!codeRate(uid, "req", 10)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  // C198: \u0643\u0644\u0651 \u0637\u0644\u0628\u064D \u064A\u0635\u0644 \u0625\u0634\u0639\u0627\u0631\u0627\u064B \u0644\u0647\u0627\u062A\u0641 \u0627\u0644\u0637\u0631\u0641 \u0627\u0644\u0622\u062E\u0631 \u21D2 \u062D\u062F\u064C\u0651 \u0645\u0634\u062A\u0631\u0643 (\u0633\u0627\u0639\u0629/\u064A\u0648\u0645)\u060C \u0648\u0623\u0636\u064A\u0642 \u0644\u0644\u0636\u064A\u0641 \u0648\u0644\u0643\u0644\u0651 \u0639\u0646\u0648\u0627\u0646
+  const anon = isAnon(claims);
+  if (!(await rateGate(token, [["creq:u:" + uid, anon ? 3 : 10, 3600], ["creq:ud:" + uid, anon ? 10 : 30, 86400]]
+      .concat(anon ? [["creq:ip:" + ipOf(claims), 20, 86400]] : [])))) throw new Error("rate_limited");
   const t = await codeTarget(token, payload && payload.code);
   if (!t) throw new Error("not_found");
   if (t.uid === uid) throw new Error("self");
@@ -5054,7 +5132,7 @@ async function purgeWork(env, budget) {
 async function purgeColl(token, rel, spend) {
   for (;;) {
     if (!spend()) return false;
-    const res = await fetch(FS_BASE + "/" + rel + "?pageSize=300&mask.fieldPaths=__none__", { headers: { Authorization: "Bearer " + token } });
+    const res = await fetch(FS_BASE + "/" + fsRel(rel) + "?pageSize=300&mask.fieldPaths=__none__", { headers: { Authorization: "Bearer " + token } });
     if (res.status === 404) return true;
     const b = await res.json(); const docs = (b && b.documents) || [];
     if (!docs.length) return true;
@@ -5333,6 +5411,37 @@ async function opAdminReportClose(uid, payload, env, claims) {
 
 /* ---------- \u062D\u062F\u0648\u062F \u0627\u0644\u0637\u0644\u0628\u0627\u062A \u0648\u0627\u0644\u0645\u0639\u0631\u0651\u0641\u0627\u062A ---------- */
 const RL = new Map(), RL_WINDOW = 5 * 60 * 1000, RL_MAX = 400;   // \u0664\u0660\u0660 \u0637\u0644\u0628 / \u0665 \u062F\u0642\u0627\u0626\u0642 \u0644\u0643\u0644\u0651 \u0645\u0633\u062A\u062E\u062F\u0645
+/* C198: \u062D\u062F\u064C\u0651 \u0645\u0634\u062A\u0631\u0643 \u0628\u064A\u0646 \u0643\u0644\u0651 \u0646\u0633\u062E \u0627\u0644\u0640Worker \u2014 \u0639\u062F\u0651\u0627\u062F\u064C \u0641\u064A Firestore \u200Erl/{hash}\u200E \u0628\u0632\u064A\u0627\u062F\u0629\u064D \u0630\u0631\u0651\u064A\u0651\u0629 (increment) \u0644\u0643\u0644\u0651 \u0646\u0627\u0641\u0630\u0629.
+   \u0627\u0644\u0645\u0641\u062A\u0627\u062D \u064A\u064F\u062C\u0632\u064E\u0651\u0623 (SHA-256) \u0641\u0644\u0627 \u064A\u064F\u062E\u0632\u064E\u0651\u0646 \u0639\u0646\u0648\u0627\u0646 IP \u0648\u0644\u0627 \u0627\u0644\u0645\u0639\u0631\u0651\u0641 \u0643\u0645\u0627 \u0647\u0648. \u0641\u0634\u0644 Firestore \u21D2 \u064A\u064F\u0633\u0645\u062D (\u0644\u0627 \u0646\u0648\u0642\u0641 \u0627\u0644\u062E\u062F\u0645\u0629) \u0645\u0639 \u0633\u062C\u0644\u0651.
+   rules: [[key, max, windowSec]] \u2014 \u0643\u0644\u0651\u0647\u0627 \u062A\u064F\u062D\u0633\u0628 \u0645\u0639\u0627\u064B (\u0637\u0644\u0628\u064C \u0648\u0627\u062D\u062F)\u060C \u0648\u062A\u062C\u0627\u0648\u0632 \u0623\u064A\u064D\u0651 \u0645\u0646\u0647\u0627 \u21D2 false. \u0627\u0644\u062A\u0646\u0638\u064A\u0641: rlGc \u0641\u064A \u0627\u0644\u0645\u0647\u0627\u0645\u0651 \u0627\u0644\u062F\u0648\u0631\u064A\u0651\u0629. */
+async function rateGate(token, rules) {
+  const now = Date.now(), writes = [];
+  for (const [key, , win] of rules) {
+    const bucket = Math.floor(now / (win * 1000));
+    const id = (await sha256Hex(key + "|" + win + "|" + bucket)).slice(0, 40);
+    writes.push({ update: { name: DOC_ROOT + "/rl/" + id, fields: { exp: { integerValue: String((bucket + 1) * win * 1000) } } },
+      updateMask: { fieldPaths: ["exp"] }, updateTransforms: [{ fieldPath: "n", increment: { integerValue: "1" } }] });
+  }
+  try {
+    const r = await fsCommit(token, writes);
+    const res = (r && r.writeResults) || [];
+    for (let i = 0; i < rules.length; i++) {
+      const tr = res[i] && res[i].transformResults && res[i].transformResults[0];
+      if (tr && Number(tr.integerValue) > rules[i][1]) { stat("rl:block"); slog("info", "rl.block", { rule: String(rules[i][0]).split(":")[0], win: rules[i][2] }); return false; }
+    }
+  } catch (e) { slog("warn", "rl.fail", { err: e && e.message }); }
+  return true;
+}
+async function rlGc(env, n) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "rl" }], where: { fieldFilter: { field: { fieldPath: "exp" }, op: "LESS_THAN", value: { integerValue: String(Date.now() - 3600000) } } }, limit: n || 300 } }) });
+  const rows = ((await res.json()) || []).filter(r => r.document).map(r => ({ delete: r.document.name }));
+  if (rows.length) await fsCommit(token, rows);
+  return rows.length;
+}
+function isAnon(claims) { return !!(claims && claims.firebase && claims.firebase.sign_in_provider === "anonymous"); }
+function ipOf(claims) { return (claims && claims._ip) || "?"; }
 function rateOk(uid) {
   const now = Date.now(); let e = RL.get(uid);
   if (!e || now - e.t > RL_WINDOW) { e = { t: now, n: 0 }; RL.set(uid, e); }
@@ -5341,7 +5450,7 @@ function rateOk(uid) {
   return e.n <= RL_MAX;
 }
 // \u0643\u0644\u0651 \u0645\u0639\u0631\u0651\u0641\u064D \u064A\u062F\u062E\u0644 \u0645\u0633\u0627\u0631 Firestore: \u0628\u0644\u0627 \u00AB/\u00BB \u0648\u0644\u0627 \u00AB..\u00BB \u0648\u0644\u0627 \u0637\u0648\u0644\u064D \u0645\u0641\u0631\u0637
-const ID_KEYS = ["groupId", "personId", "eventId", "relationId", "reviewId", "token", "uid", "from", "to", "cid"];
+const ID_KEYS = ["groupId", "personId", "eventId", "relationId", "reviewId", "token", "uid", "from", "to", "cid", "for"];   // C198: + for (vouch.respond)
 function badIds(p) {
   if (!p || typeof p !== "object") return null;
   for (const k of ID_KEYS) if (k in p && p[k] != null && !segOk(String(p[k]))) return k;
@@ -5365,7 +5474,7 @@ export default {
         if (r.reminders) return;
         const slot = Math.floor(new Date(event.scheduledTime || Date.now()).getUTCMinutes() / 5) % 4;
         if (slot === 3) return job("health", () => healthRun(env));
-        if (slot === 0) { await job("cleanup", () => cleanupDisappearing(env)); await job("tel gc", () => telGc(env, 100)); }
+        if (slot === 0) { await job("cleanup", () => cleanupDisappearing(env)); await job("tel gc", () => telGc(env, 100)); await job("rl gc", () => rlGc(env, 100)); }
         else if (slot === 1) { await job("calls cleanup", () => cleanupCalls(env)); await job("media gc", () => mediaGc(env, L.media)); await job("story gc", () => storyGc(env, L.story)); await job("storyq gc", () => storyqGc(env, L.q)); await job("momentq gc", () => momentqGc(env, L.q)); }
         else await job("purge", () => purgeWork(env, L.purge));
         return;
@@ -5373,7 +5482,7 @@ export default {
       // C180: \u0627\u0644\u062E\u0637\u0651\u0629 \u0627\u0644\u0645\u062F\u0641\u0648\u0639\u0629 \u2014 \u0643\u0644\u0651 \u0627\u0644\u0645\u0647\u0627\u0645\u0651 \u0641\u064A \u0643\u0644\u0651 \u062A\u0634\u063A\u064A\u0644 (\u0627\u0644\u0645\u0631\u0627\u0642\u0628\u0629 \u0643\u0644\u0651 \u0665 \u062F\u0642\u0627\u0626\u0642)
       await Promise.all([job("health", () => healthRun(env)), job("cleanup", () => cleanupDisappearing(env)), job("calls cleanup", () => cleanupCalls(env)), job("quality", () => qualityWatch(env))]);   // C181: \u0645\u0644\u062E\u0651\u0635 \u0627\u0644\u062C\u0648\u062F\u0629
       await job("media gc", () => mediaGc(env, L.media)); await job("story gc", () => storyGc(env, L.story));
-      await job("storyq gc", () => storyqGc(env, L.q)); await job("momentq gc", () => momentqGc(env, L.q)); await job("tel gc", () => telGc(env, 200));
+      await job("storyq gc", () => storyqGc(env, L.q)); await job("momentq gc", () => momentqGc(env, L.q)); await job("tel gc", () => telGc(env, 200)); await job("rl gc", () => rlGc(env, 300));
       await job("purge", () => purgeWork(env, L.purge));   // \u062D\u0630\u0641 \u0627\u0644\u062D\u0633\u0627\u0628\u0627\u062A: \u0645\u0627 \u062A\u0628\u0642\u0651\u0649 \u0645\u0646 \u0639\u0627\u0626\u0644\u0627\u062A\u064D \u0648\u0645\u062D\u0627\u062F\u062B\u0627\u062A
     })());
   },
@@ -5392,6 +5501,7 @@ export default {
       if (!m) return json({ ok: false, error: "no bearer token" }, 401);
       let claims = await verifyIdToken(m[1]);
       const uid = claims.sub;
+      claims = Object.assign({}, claims, { _ip: request.headers.get("CF-Connecting-IP") || "?" });   // C198: \u0644\u0644\u062D\u062F\u0648\u062F \u0627\u0644\u0645\u0634\u062A\u0631\u0643\u0629 \u0644\u0643\u0644\u0651 \u0639\u0646\u0648\u0627\u0646
 
       // \u062D\u062F\u064C\u0651 \u0644\u0643\u0644\u0651 \u0645\u0633\u062A\u062E\u062F\u0645 (\u062A\u0642\u0631\u064A\u0628\u064A\u0651\u060C \u0644\u0643\u0644\u0651 \u0646\u0633\u062E\u0629\u064D \u0645\u0646 \u0627\u0644\u0640Worker): \u064A\u062D\u0645\u064A \u0627\u0644\u062D\u0635\u0651\u0629 \u0627\u0644\u0645\u062C\u0627\u0646\u064A\u0651\u0629 \u0645\u0646 \u0639\u0645\u064A\u0644\u064D \u0645\u0639\u0637\u0648\u0628 \u0623\u0648 \u0645\u0633\u064A\u0621
       if (!rateOk(uid)) return json({ ok: false, error: "rate_limited" }, 429);
@@ -5413,14 +5523,14 @@ export default {
       if (op === "profile.set") { const r = await opProfileSet(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "phone.start") { const r = await opPhoneStart(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "phone.status") { const r = await opPhoneStatus(uid, body.payload, env); return json({ ok: true, ...r }); }
-      if (op === "find.phone") { const r = await opFindBy(uid, body.payload, env, "phone"); return json({ ok: true, ...r }); }
+      if (op === "find.phone") { const r = await opFindBy(uid, body.payload, env, "phone", claims); return json({ ok: true, ...r }); }
       // C53: \u0637\u0644\u0628\u064C \u0648\u0627\u062D\u062F \u0639\u0646\u062F \u0627\u0644\u0625\u0642\u0644\u0627\u0639 \u0628\u062F\u0644 \u062B\u0644\u0627\u062B\u0629 (people.list + chat.prefs + code.requests) \u2014 \u064A\u0648\u0641\u0651\u0631 \u0631\u062D\u0644\u062A\u064A\u0646 \u0625\u0644\u0649 \u0627\u0644\u062E\u0627\u062F\u0645 \u0639\u0644\u0649 \u0627\u0644\u0634\u0628\u0643\u0627\u062A \u0627\u0644\u0628\u0637\u064A\u0626\u0629
       if (op === "boot") {
         const [people, prefs, requests] = await Promise.all([opPeopleList(uid, {}, env, claims), opChatPrefs(uid, {}, env), opCodeRequests(uid, {}, env)]);
         return json({ ok: true, people, prefs, requests });
       }
       if (op === "link.peek") { const r = await opLinkPeek(uid, body.payload, env); return json(r); }
-      if (op === "find.email") { const r = await opFindBy(uid, body.payload, env, "email"); return json({ ok: true, ...r }); }
+      if (op === "find.email") { const r = await opFindBy(uid, body.payload, env, "email", claims); return json({ ok: true, ...r }); }
       if (op === "sfu.cfg") { const r = await opSfuCfg(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "sfu.new") { const r = await opSfuNew(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "sfu.push") { const r = await opSfuPush(uid, body.payload, env); return json({ ok: true, ...r }); }
