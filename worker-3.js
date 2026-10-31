@@ -2415,6 +2415,12 @@ async function opChatTask(uid, payload, env, ctx) {
     else { delete next.doneBy; delete next.doneAt; }
   }
   if (payload.note != null) next.note = String(payload.note).slice(0, 300);
+  if (payload.pct !== undefined) {   // C188: نسبة إنجاز المهمّة 0–100 — يُغيّرها المسؤول (أو المنشئ/المشرف)
+    if (!m.enc && eff0 && eff0 !== uid && !boss) throw new Error("only the assignee can change this task");
+    const v = Math.round(Number(payload.pct));
+    if (!(v >= 0 && v <= 100)) throw new Error("bad pct");
+    next.pct = v;
+  }
   const m2 = Object.assign({}, m, { tstate: Object.assign({}, m.tstate, { [taskId]: next }) });
   await fsCommit(token, [setPath(cid, day, ["msgs", id, "tstate", taskId], next)].concat(m.enc ? [] : [taskIdxWrite(c, cid, day, id, m2)]));
   // الإشعارات بعد الردّ
