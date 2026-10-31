@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062D\u0635 \u06
    \u26A0\uFE0F \u0625\u0646 \u0623\u064F\u0639\u064A\u062F \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064D \u062C\u062F\u064A\u062F\u060C \u063A\u064A\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v97-sec2";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C199: \u0625\u0635\u0644\u0627\u062D\u0627\u062A \u0623\u0645\u0646\u064A\u0651\u0629 \u0666\u2013\u0661\u0660)
+const VER = "v98-link";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C200: \u0645\u0639\u0627\u064A\u0646\u0629 \u0627\u0644\u0631\u0648\u0627\u0628\u0637)
 // C197: \u0627\u0644\u0633\u062C\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064E\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u062D\u062F\u062B { lvl, ev, ts, ...\u062D\u0642\u0648\u0644 } (Workers Logs \u062A\u0641\u0647\u0631\u0633 \u0627\u0644\u062D\u0642\u0648\u0644 \u0644\u0644\u0628\u062D\u062B \u0648\u0627\u0644\u062A\u0635\u0641\u064A\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -4234,22 +4234,48 @@ function linkHostOk(h) {
   if (h.indexOf(":") >= 0) return false;         // IPv6 \u062D\u0631\u0641\u064A\u0651
   return true;
 }
-function htmlDecode(t) { return String(t || "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&nbsp;/g, " ").replace(/&#(\d+);/g, (m, n) => { try { return String.fromCodePoint(Number(n)); } catch (e) { return ""; } }).replace(/\s+/g, " ").trim(); }
-function metaOf(html, names) {
+// C200: + \u0643\u064A\u0627\u0646\u0627\u062A \u0633\u062A \u0639\u0634\u0631\u064A\u0651\u0629 (&#x27;) \u0648\u0623\u0634\u0647\u0631 \u0627\u0644\u0643\u064A\u0627\u0646\u0627\u062A \u0627\u0644\u0645\u0633\u0645\u0651\u0627\u0629\u060C \u0648\u062A\u0637\u0628\u064A\u0639 \u0627\u0644\u0645\u0633\u0627\u0641\u0627\u062A
+const HTML_ENT = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", hellip: "\u2026", mdash: "\u2014", ndash: "\u2013", lsquo: "\u2018", rsquo: "\u2019", ldquo: "\u201C", rdquo: "\u201D", laquo: "\u00AB", raquo: "\u00BB", copy: "\u00A9", reg: "\u00AE", trade: "\u2122", middot: "\u00B7", bull: "\u2022" };
+function htmlDecode(t) {
+  return String(t || "").replace(/&(#x[0-9a-f]{1,6}|#\d{1,7}|[a-z]{2,8});/gi, (m, e) => {
+    if (e[0] === "#") { const cp = e[1] === "x" || e[1] === "X" ? parseInt(e.slice(2), 16) : Number(e.slice(1)); try { return cp > 0 ? String.fromCodePoint(cp) : ""; } catch (x) { return ""; } }
+    const v = HTML_ENT[e.toLowerCase()]; return v === undefined ? m : v;
+  }).replace(/\s+/g, " ").trim();
+}
+// C200: \u062A\u062D\u0644\u064A\u0644 \u062E\u0635\u0627\u0626\u0635 \u0648\u0633\u0645 meta \u0628\u062F\u0644 \u062A\u0639\u0628\u064A\u0631\u064D \u0648\u0627\u062D\u062F \u0643\u0627\u0646 \u064A\u0642\u0637\u0639 \u0627\u0644\u0646\u0635\u0651 \u0639\u0646\u062F \u0623\u0648\u0651\u0644 ' \u0623\u0648 " (Khalid's \u21D2 Khalid) \u2014 \u0648\u0627\u0644\u062A\u0631\u062A\u064A\u0628 \u062D\u0633\u0628 \u0623\u0648\u0644\u0648\u064A\u0651\u0629 \u0627\u0644\u0623\u0633\u0645\u0627\u0621
+function metaTags(html) {
+  const out = [], re = /<meta\b([^>]*)>/gi; let m;
+  while ((m = re.exec(html)) && out.length < 300) {
+    const a = {}, ar = /([a-z:_-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi; let x;
+    while ((x = ar.exec(m[1]))) a[x[1].toLowerCase()] = x[2] != null ? x[2] : x[3] != null ? x[3] : x[4];
+    out.push(a);
+  }
+  return out;
+}
+function metaOf(html, names, tags) {
+  tags = tags || metaTags(html);
   for (const n of names) {
-    const re1 = new RegExp("<meta[^>]+(?:property|name)=[\"']" + n.replace(/:/g, "\\:") + "[\"'][^>]*content=[\"']([^\"']{1,600})[\"']", "i");
-    const re2 = new RegExp("<meta[^>]+content=[\"']([^\"']{1,600})[\"'][^>]*(?:property|name)=[\"']" + n.replace(/:/g, "\\:") + "[\"']", "i");
-    const m = html.match(re1) || html.match(re2); if (m) return htmlDecode(m[1]);
+    const t = tags.find(a => String(a.property || a.name || "").toLowerCase() === n && a.content);
+    if (t) return htmlDecode(String(t.content).slice(0, 2000));
   }
   return "";
 }
+function htmlCharset(ct, bytes) {
+  let cs = (String(ct).match(/charset\s*=\s*["']?([\w-]+)/i) || [])[1];
+  if (!cs) { const head = String.fromCharCode.apply(null, bytes.subarray(0, 2048)); cs = (head.match(/<meta[^>]+charset\s*=\s*["']?([\w-]+)/i) || [])[1]; }   // \u0628\u0627\u064A\u062A\u0627\u062A \u0643\u0645\u0627 \u0647\u064A (\u0644\u0627 \u064A\u0639\u062A\u0645\u062F \u0639\u0644\u0649 \u062A\u0631\u0645\u064A\u0632\u064D \u0641\u064A \u0627\u0644\u0628\u064A\u0626\u0629)
+  return String(cs || "utf-8").toLowerCase();
+}
+function decodeHtml(bytes, cs) {
+  try { return new TextDecoder(cs, { fatal: false }).decode(bytes); } catch (e) { return new TextDecoder("utf-8", { fatal: false }).decode(bytes); }   // \u062A\u0631\u0645\u064A\u0632\u064C \u0644\u0627 \u062A\u0639\u0631\u0641\u0647 \u0627\u0644\u0628\u064A\u0626\u0629 \u21D2 UTF-8
+}
+
 async function opLinkPeek(uid, payload, env) {
   if (!codeRate(uid, "link", 60)) throw new Error("rate_limited");
   let u; try { u = new URL(String((payload && payload.url) || "")); } catch (e) { throw new Error("bad url"); }
   if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("bad url");
   if (!linkHostOk(u.hostname)) throw new Error("bad url");
   u.hash = ""; const key = u.toString().slice(0, 1500);
-  const c = LINK_CACHE.get(key); if (c && Date.now() - c.at < 3600000) return c.v;
+  const c = LINK_CACHE.get(key); if (c && Date.now() - c.at < (c.v.err ? 120000 : 3600000)) return c.v;   // C200: \u0627\u0644\u0641\u0634\u0644 \u064A\u064F\u062D\u0641\u0638 \u062F\u0642\u064A\u0642\u062A\u064A\u0646 \u0641\u0642\u0637
   const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 10000);
   let out = { ok: true, url: key, host: u.hostname.replace(/^www\./, ""), title: "", desc: "", image: "" };
   try {
@@ -4271,12 +4297,14 @@ async function opLinkPeek(uid, payload, env) {
       const reader = res.body.getReader(); const chunks = []; let got = 0;
       while (got < 262144) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); got += value.length; }
       try { reader.cancel(); } catch (e) {}
-      const buf = new Uint8Array(got); let o = 0; for (const ch of chunks) { buf.set(ch.subarray(0, Math.min(ch.length, got - o)), o); o += ch.length; if (o >= got) break; }
-      const html = new TextDecoder("utf-8", { fatal: false }).decode(buf);
-      const tm2 = html.match(/<title[^>]*>([^<]{1,300})<\/title>/i);
-      out.title = metaOf(html, ["og:title", "twitter:title"]) || (tm2 ? htmlDecode(tm2[1]) : "");
-      out.desc = metaOf(html, ["og:description", "twitter:description", "description"]).slice(0, 220);
-      let img = metaOf(html, ["og:image", "og:image:url", "twitter:image", "twitter:image:src"]);
+      const cap = Math.min(got, 262144), buf = new Uint8Array(cap); let o = 0;   // C200: \u0627\u0644\u0642\u0637\u0639\u0629 \u0627\u0644\u0623\u062E\u064A\u0631\u0629 \u0643\u0627\u0646\u062A \u062A\u064F\u0642\u0631\u0623 \u0643\u0627\u0645\u0644\u0629\u064B \u0641\u062A\u062A\u062C\u0627\u0648\u0632 \u0627\u0644\u062D\u062F\u0651
+      for (const ch of chunks) { const k = Math.min(ch.length, cap - o); buf.set(ch.subarray(0, k), o); o += k; if (o >= cap) break; }
+      const html = decodeHtml(buf, htmlCharset(ct, buf));   // C200: windows-1256 \u0648\u063A\u064A\u0631\u0647 (\u0645\u0648\u0627\u0642\u0639 \u0639\u0631\u0628\u064A\u0651\u0629 \u0642\u062F\u064A\u0645\u0629) \u2014 \u0643\u0627\u0646 \u064A\u064F\u0641\u0643\u0651 UTF-8 \u062F\u0627\u0626\u0645\u0627\u064B
+      const tags = metaTags(html);
+      const tm2 = html.match(/<title[^>]*>([\s\S]{1,3000}?)<\/title>/i);   // C200: \u0639\u0646\u0648\u0627\u0646\u064C \u0623\u0637\u0648\u0644 \u0645\u0646 \u0663\u0660\u0660 \u062D\u0631\u0641 \u0643\u0627\u0646 \u064A\u064F\u0647\u0645\u064E\u0644 \u0643\u0644\u0651\u0647
+      out.title = metaOf(html, ["og:title", "twitter:title"], tags) || (tm2 ? htmlDecode(tm2[1].replace(/<[^>]*>/g, "")) : "");
+      out.desc = metaOf(html, ["og:description", "twitter:description", "description"], tags).slice(0, 220);
+      let img = metaOf(html, ["og:image", "og:image:url", "twitter:image", "twitter:image:src"], tags);
       if (img) { try { const iu = new URL(img, resUrl); if ((iu.protocol === "https:" || iu.protocol === "http:") && linkHostOk(iu.hostname)) out.image = iu.toString().slice(0, 1000); } catch (e) {} }
       try { out.host = new URL(resUrl).hostname.replace(/^www\./, ""); } catch (e) {}
     } else if (res.ok && /^image\//i.test(ct)) { out.image = resUrl; }
