@@ -143,7 +143,20 @@ async function getAccessToken(sa) {
 }
 
 /* ---------- 3) الكتابة إلى Firestore (commit ذرّي) ---------- */
+// C187: مسار المستند يجب أن يكون زوجيّ الأجزاء وبلا جزءٍ فارغ (وإلّا يرفضه Firestore بـ«lacks /») — يُرفض قبل الإرسال باسم العملية
+function docPathOk(name) {
+  if (typeof name !== "string" || !name.startsWith(DOC_ROOT + "/")) return false;
+  const seg = name.slice(DOC_ROOT.length + 1).split("/");
+  return seg.length % 2 === 0 && seg.every((x) => x.length > 0);
+}
+function checkWrites(writes) {
+  for (const w of writes || []) {
+    const n = (w && w.update && w.update.name) || (w && w.delete) || (w && w.transform && w.transform.document);
+    if (n !== undefined && !docPathOk(n)) throw new Error("bad doc path: " + String(n).slice(DOC_ROOT.length, DOC_ROOT.length + 160));
+  }
+}
 async function fsCommit(accessToken, writes) {
+  checkWrites(writes);
   const res = await fetch(FS_BASE + ":commit", {
     method: "POST",
     headers: { Authorization: "Bearer " + accessToken, "Content-Type": "application/json" },
@@ -3405,11 +3418,11 @@ async function opPhoneStatus(uid, payload, env) {
 /* ---------- 44) تأكيد الرقم عبر المعارف (C44) ----------
    بلا Meta ولا SMS: صاحب الرقم يطلب من معارفه (جهات اتّصال متبادلة) تأكيد أنّ هذا رقمه. كلّ مؤكِّدٍ يجب أن يكون
    غير مجهول وموثَّق البريد (Google/بريد مؤكَّد) أو موثَّق الهاتف. تأكيدان من شخصين مختلفين للرقم الحاليّ ⇒ phoneVerified
-   (verifiedBy = "contacts"). accounts/{to}/vouchin/{from} = طلب · vouches/{owner}/{voucher} = { phone, ts, matched }.
+   (verifiedBy = "contacts"). accounts/{to}/vouchin/{from} = طلب · accounts/{owner}/vouches/{voucher} = { phone, name, ts, matched } (C187: المسار السابق vouches/{owner}/{voucher} كان مساراً غير صالح لـ Firestore).
    تغيير الرقم يُبطل التأكيدات القديمة (تُحسب فقط التي تحمل الرقم الحاليّ). رقمٌ واحد لحسابٍ واحد (phones/). */
 const VOUCH_NEEDED = 2;
 async function vouchCount(token, owner, phone) {
-  const vs = await fsList(token, "vouches/" + owner).catch(() => []);
+  const vs = await fsList(token, "accounts/" + owner + "/vouches").catch(() => []);
   const names = [];
   for (const d of vs) if (fstr(d, "phone") === phone) names.push(fstr(d, "name") || null);
   return { n: names.length, names: names.slice(0, 5) };
@@ -3453,7 +3466,7 @@ async function opVouchRespond(uid, payload, env, claims, ctx) {
   const tphone = fstr(target, "phone"), rqPhone = fstr(rq, "phone");
   if (!tphone || tphone !== rqPhone) { await fsCommit(token, [del]); return { done: true, counted: false, stale: true }; }
   const myNm = await myName(token, uid, claims);
-  await fsCommit(token, [del, { update: { name: DOC_ROOT + "/vouches/" + owner + "/" + uid, fields: { phone: { stringValue: tphone }, name: myNm ? { stringValue: myNm } : { nullValue: null }, ts: { integerValue: String(Date.now()) }, matched: { booleanValue: matched } } } }]);
+  await fsCommit(token, [del, { update: { name: DOC_ROOT + "/accounts/" + owner + "/vouches/" + uid, fields: { phone: { stringValue: tphone }, name: myNm ? { stringValue: myNm } : { nullValue: null }, ts: { integerValue: String(Date.now()) }, matched: { booleanValue: matched } } } }]);
   const vc = await vouchCount(token, owner, tphone);
   let verified = fbool(target, "phoneVerified") === true, conflict = false;
   if (!verified && vc.n >= VOUCH_NEEDED) {
