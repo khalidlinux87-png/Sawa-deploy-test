@@ -2420,6 +2420,9 @@ async function opChatTask(uid, payload, env, ctx) {
     const v = Math.round(Number(payload.pct));
     if (!(v >= 0 && v <= 100)) throw new Error("bad pct");
     next.pct = v;
+    // C190: 100\u066A \u21D2 \u0645\u0646\u062C\u0632\u0629 (\u062A\u0646\u062A\u0642\u0644 \u0625\u0644\u0649 \u00AB\u0627\u0644\u0645\u0646\u062C\u064E\u0632\u0629\u00BB) \u00B7 \u0623\u0642\u0644\u0651 \u0645\u0646 100 \u0628\u0639\u062F \u0625\u0646\u062C\u0627\u0632\u0647\u0627 \u21D2 \u062A\u0639\u0648\u062F \u0645\u0639\u0644\u0651\u0642\u0629
+    if (v === 100 && next.status !== "done") { next.status = "done"; next.doneBy = uid; next.doneAt = Date.now(); }
+    else if (v < 100 && next.status === "done" && payload.status === undefined) { next.status = "pending"; delete next.doneBy; delete next.doneAt; }
   }
   const m2 = Object.assign({}, m, { tstate: Object.assign({}, m.tstate, { [taskId]: next }) });
   await fsCommit(token, [setPath(cid, day, ["msgs", id, "tstate", taskId], next)].concat(m.enc ? [] : [taskIdxWrite(c, cid, day, id, m2)]));
