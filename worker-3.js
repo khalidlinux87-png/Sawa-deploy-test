@@ -1,32 +1,32 @@
-import { connect } from "cloudflare:sockets";   // C178: فحص وسطاء TURN بطلب STUN عبر TCP (مراقبة الخدمات)
+import { connect } from "cloudflare:sockets";   // C178: \u0641\u062D\u0635 \u0648\u0633\u0637\u0627\u0621 TURN \u0628\u0637\u0644\u0628 STUN \u0639\u0628\u0631 TCP (\u0645\u0631\u0627\u0642\u0628\u0629 \u0627\u0644\u062E\u062F\u0645\u0627\u062A)
 /* ============================================================
-   worker.js — سوا · applyEdit (v2: التحقّق + الكتابة إلى Firestore)
+   worker.js \u2014 \u0633\u0648\u0627 \u00B7 applyEdit (v2: \u0627\u0644\u062A\u062D\u0642\u0651\u0642 + \u0627\u0644\u0643\u062A\u0627\u0628\u0629 \u0625\u0644\u0649 Firestore)
    ------------------------------------------------------------
-   يعمل على Cloudflare Workers (الخطّة المدفوعة منذ C180 — WORKERS_FREE=1 يعيد حدود المجّانيّة).
-   v2 يضيف: مفتاح خدمة → رمز وصول Google → الكتابة إلى Firestore.
-   أوّل عمليّة: group.create (ينشئ العائلة وعضويّة المالك).
+   \u064A\u0639\u0645\u0644 \u0639\u0644\u0649 Cloudflare Workers (\u0627\u0644\u062E\u0637\u0651\u0629 \u0627\u0644\u0645\u062F\u0641\u0648\u0639\u0629 \u0645\u0646\u0630 C180 \u2014 WORKERS_FREE=1 \u064A\u0639\u064A\u062F \u062D\u062F\u0648\u062F \u0627\u0644\u0645\u062C\u0651\u0627\u0646\u064A\u0651\u0629).
+   v2 \u064A\u0636\u064A\u0641: \u0645\u0641\u062A\u0627\u062D \u062E\u062F\u0645\u0629 \u2192 \u0631\u0645\u0632 \u0648\u0635\u0648\u0644 Google \u2192 \u0627\u0644\u0643\u062A\u0627\u0628\u0629 \u0625\u0644\u0649 Firestore.
+   \u0623\u0648\u0651\u0644 \u0639\u0645\u0644\u064A\u0651\u0629: group.create (\u064A\u0646\u0634\u0626 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u0648\u0639\u0636\u0648\u064A\u0651\u0629 \u0627\u0644\u0645\u0627\u0644\u0643).
 
-   يتطلّب سرّاً في Cloudflare اسمه SA_JSON = محتوى ملف مفتاح
-   الخدمة (Service Account JSON) كاملاً.
+   \u064A\u062A\u0637\u0644\u0651\u0628 \u0633\u0631\u0651\u0627\u064B \u0641\u064A Cloudflare \u0627\u0633\u0645\u0647 SA_JSON = \u0645\u062D\u062A\u0648\u0649 \u0645\u0644\u0641 \u0645\u0641\u062A\u0627\u062D
+   \u0627\u0644\u062E\u062F\u0645\u0629 (Service Account JSON) \u0643\u0627\u0645\u0644\u0627\u064B.
 
-   ⚠️ إن أُعيد إنشاء مشروع Firebase بمعرّفٍ جديد، غيّر PROJECT_ID.
+   \u26A0\uFE0F \u0625\u0646 \u0623\u064F\u0639\u064A\u062F \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064D \u062C\u062F\u064A\u062F\u060C \u063A\u064A\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v92-vup";      // علامة الإصدار — تظهر في كلّ ردّ
+const VER = "v92-vup";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651
 const PROJECT_ID = "sawa-test-9770f";
 const ISS = "https://securetoken.google.com/" + PROJECT_ID;
 const JWK_URL =
   "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
-// مسار المستند النسبيّ (يُستعمل في حقل name داخل الكتابة)
+// \u0645\u0633\u0627\u0631 \u0627\u0644\u0645\u0633\u062A\u0646\u062F \u0627\u0644\u0646\u0633\u0628\u064A\u0651 (\u064A\u064F\u0633\u062A\u0639\u0645\u0644 \u0641\u064A \u062D\u0642\u0644 name \u062F\u0627\u062E\u0644 \u0627\u0644\u0643\u062A\u0627\u0628\u0629)
 const DOC_ROOT = "projects/" + PROJECT_ID + "/databases/(default)/documents";
-// الرابط الكامل (يُستعمل لاستدعاء الـAPI فقط)
+// \u0627\u0644\u0631\u0627\u0628\u0637 \u0627\u0644\u0643\u0627\u0645\u0644 (\u064A\u064F\u0633\u062A\u0639\u0645\u0644 \u0644\u0627\u0633\u062A\u062F\u0639\u0627\u0621 \u0627\u0644\u0640API \u0641\u0642\u0637)
 const FS_BASE = "https://firestore.googleapis.com/v1/" + DOC_ROOT;
-// Realtime Database (الحضور · «يكتب…» · إشارات المكالمات والغرف) — يكتب الـWorker فيها قوائم الصلاحيّة فقط
+// Realtime Database (\u0627\u0644\u062D\u0636\u0648\u0631 \u00B7 \u00AB\u064A\u0643\u062A\u0628\u2026\u00BB \u00B7 \u0625\u0634\u0627\u0631\u0627\u062A \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0648\u0627\u0644\u063A\u0631\u0641) \u2014 \u064A\u0643\u062A\u0628 \u0627\u0644\u0640Worker \u0641\u064A\u0647\u0627 \u0642\u0648\u0627\u0626\u0645 \u0627\u0644\u0635\u0644\u0627\u062D\u064A\u0651\u0629 \u0641\u0642\u0637
 const RTDB_URL = "https://sawa-test-9770f-default-rtdb.europe-west1.firebasedatabase.app";
 
-/* C36: وكيل مصادقة Firebase — يُظهر نطاقنا بدل firebaseapp.com في شاشة Google.
-   مسار Worker على www.sawaaap.com/__/* يمرّر /__/auth/* و/__/firebase/* إلى sawa-test-9770f.firebaseapp.com كما هي
-   (الطريقة التي توصي بها Firebase: "proxy auth requests to firebaseapp.com"). authDomain في التطبيق = www.sawaaap.com. */
+/* C36: \u0648\u0643\u064A\u0644 \u0645\u0635\u0627\u062F\u0642\u0629 Firebase \u2014 \u064A\u064F\u0638\u0647\u0631 \u0646\u0637\u0627\u0642\u0646\u0627 \u0628\u062F\u0644 firebaseapp.com \u0641\u064A \u0634\u0627\u0634\u0629 Google.
+   \u0645\u0633\u0627\u0631 Worker \u0639\u0644\u0649 www.sawaaap.com/__/* \u064A\u0645\u0631\u0651\u0631 /__/auth/* \u0648/__/firebase/* \u0625\u0644\u0649 sawa-test-9770f.firebaseapp.com \u0643\u0645\u0627 \u0647\u064A
+   (\u0627\u0644\u0637\u0631\u064A\u0642\u0629 \u0627\u0644\u062A\u064A \u062A\u0648\u0635\u064A \u0628\u0647\u0627 Firebase: "proxy auth requests to firebaseapp.com"). authDomain \u0641\u064A \u0627\u0644\u062A\u0637\u0628\u064A\u0642 = www.sawaaap.com. */
 const FB_AUTH_HOST = "sawa-test-9770f.firebaseapp.com";
 function isAuthProxyPath(pathname) { return pathname.startsWith("/__/auth/") || pathname.startsWith("/__/firebase/"); }
 async function authProxy(request, u) {
@@ -37,7 +37,7 @@ async function authProxy(request, u) {
   if (request.method !== "GET" && request.method !== "HEAD") init.body = request.body;
   const r = await fetch(target, init);
   const out = new Headers(r.headers);
-  out.delete("content-security-policy"); out.delete("x-frame-options");   // الـiframe يُحمَّل من نطاقنا الآن
+  out.delete("content-security-policy"); out.delete("x-frame-options");   // \u0627\u0644\u0640iframe \u064A\u064F\u062D\u0645\u064E\u0651\u0644 \u0645\u0646 \u0646\u0637\u0627\u0642\u0646\u0627 \u0627\u0644\u0622\u0646
   out.set("cache-control", "no-store");
   return new Response(r.body, { status: r.status, statusText: r.statusText, headers: out });
 }
@@ -70,7 +70,7 @@ function bytesToB64url(bytes) {
 function strToB64url(s) { return bytesToB64url(new TextEncoder().encode(s)); }
 function b64urlStr(s) { return new TextDecoder().decode(b64urlToBytes(s)); }
 
-/* ---------- 1) التحقّق من Firebase ID token ---------- */
+/* ---------- 1) \u0627\u0644\u062A\u062D\u0642\u0651\u0642 \u0645\u0646 Firebase ID token ---------- */
 let jwkCache = null, jwkAt = 0;
 async function getKeys() {
   const now = Date.now();
@@ -103,7 +103,7 @@ async function verifyIdToken(token) {
   return payload;
 }
 
-/* ---------- 2) رمز وصول من مفتاح الخدمة ---------- */
+/* ---------- 2) \u0631\u0645\u0632 \u0648\u0635\u0648\u0644 \u0645\u0646 \u0645\u0641\u062A\u0627\u062D \u0627\u0644\u062E\u062F\u0645\u0629 ---------- */
 let saTokCache = null, saTokExp = 0;
 function pemToDer(pem) {
   const body = pem
@@ -118,7 +118,7 @@ async function getAccessToken(sa) {
   const header = { alg: "RS256", typ: "JWT" };
   const claim = {
     iss: sa.client_email,
-    // رمزٌ واحد لكلّ الخدمات: Firestore + Realtime Database (+ الإشعارات لاحقاً)
+    // \u0631\u0645\u0632\u064C \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u0627\u0644\u062E\u062F\u0645\u0627\u062A: Firestore + Realtime Database (+ \u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062A \u0644\u0627\u062D\u0642\u0627\u064B)
     scope: "https://www.googleapis.com/auth/datastore https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/firebase.messaging https://www.googleapis.com/auth/identitytoolkit",
     aud: "https://oauth2.googleapis.com/token",
     iat: now, exp: now + 3600,
@@ -142,8 +142,8 @@ async function getAccessToken(sa) {
   return saTokCache;
 }
 
-/* ---------- 3) الكتابة إلى Firestore (commit ذرّي) ---------- */
-// C187: مسار المستند يجب أن يكون زوجيّ الأجزاء وبلا جزءٍ فارغ (وإلّا يرفضه Firestore بـ«lacks /») — يُرفض قبل الإرسال باسم العملية
+/* ---------- 3) \u0627\u0644\u0643\u062A\u0627\u0628\u0629 \u0625\u0644\u0649 Firestore (commit \u0630\u0631\u0651\u064A) ---------- */
+// C187: \u0645\u0633\u0627\u0631 \u0627\u0644\u0645\u0633\u062A\u0646\u062F \u064A\u062C\u0628 \u0623\u0646 \u064A\u0643\u0648\u0646 \u0632\u0648\u062C\u064A\u0651 \u0627\u0644\u0623\u062C\u0632\u0627\u0621 \u0648\u0628\u0644\u0627 \u062C\u0632\u0621\u064D \u0641\u0627\u0631\u063A (\u0648\u0625\u0644\u0651\u0627 \u064A\u0631\u0641\u0636\u0647 Firestore \u0628\u0640\u00ABlacks /\u00BB) \u2014 \u064A\u064F\u0631\u0641\u0636 \u0642\u0628\u0644 \u0627\u0644\u0625\u0631\u0633\u0627\u0644 \u0628\u0627\u0633\u0645 \u0627\u0644\u0639\u0645\u0644\u064A\u0629
 function docPathOk(name) {
   if (typeof name !== "string" || !name.startsWith(DOC_ROOT + "/")) return false;
   const seg = name.slice(DOC_ROOT.length + 1).split("/");
@@ -167,7 +167,7 @@ async function fsCommit(accessToken, writes) {
   return data;
 }
 
-/* قراءة وثيقة واحدة — relPath مثل "groups/{gid}/members/{uid}" */
+/* \u0642\u0631\u0627\u0621\u0629 \u0648\u062B\u064A\u0642\u0629 \u0648\u0627\u062D\u062F\u0629 \u2014 relPath \u0645\u062B\u0644 "groups/{gid}/members/{uid}" */
 async function fsGet(accessToken, relPath) {
   const res = await fetch(FS_BASE + "/" + relPath, {
     headers: { Authorization: "Bearer " + accessToken },
@@ -175,7 +175,7 @@ async function fsGet(accessToken, relPath) {
   if (res.status === 404) return null;
   const data = await res.json();
   if (!res.ok) throw new Error("firestore get: " + JSON.stringify(data));
-  return data; // فيه .fields
+  return data; // \u0641\u064A\u0647 .fields
 }
 function fstr(doc, name) {
   return doc && doc.fields && doc.fields[name] ? doc.fields[name].stringValue : null;
@@ -184,7 +184,7 @@ function fbool(doc, name) {
   return doc && doc.fields && doc.fields[name] ? !!doc.fields[name].booleanValue : false;
 }
 
-/* قائمة مجموعةٍ كاملة (صفحاتٍ متتابعة) */
+/* \u0642\u0627\u0626\u0645\u0629 \u0645\u062C\u0645\u0648\u0639\u0629\u064D \u0643\u0627\u0645\u0644\u0629 (\u0635\u0641\u062D\u0627\u062A\u064D \u0645\u062A\u062A\u0627\u0628\u0639\u0629) */
 async function fsList(accessToken, collPath) {
   let out = [], pageToken = null, guard = 0;
   do {
@@ -200,7 +200,7 @@ async function fsList(accessToken, collPath) {
   return out;
 }
 
-/* قيمة Firestore REST → JS */
+/* \u0642\u064A\u0645\u0629 Firestore REST \u2192 JS */
 function fsToJs(v) {
   if (!v) return null;
   if ("nullValue" in v) return null;
@@ -213,7 +213,7 @@ function fsToJs(v) {
   if ("mapValue" in v) { const o = {}, f = (v.mapValue && v.mapValue.fields) || {}; for (const k in f) o[k] = fsToJs(f[k]); return o; }
   return null;
 }
-/* استعلامٌ بمساواتين (لا يحتاج فهرساً مركّباً) */
+/* \u0627\u0633\u062A\u0639\u0644\u0627\u0645\u064C \u0628\u0645\u0633\u0627\u0648\u0627\u062A\u064A\u0646 (\u0644\u0627 \u064A\u062D\u062A\u0627\u062C \u0641\u0647\u0631\u0633\u0627\u064B \u0645\u0631\u0643\u0651\u0628\u0627\u064B) */
 async function fsQueryEq(accessToken, collectionId, eqs, limit) {
   const filters = Object.keys(eqs).map(k => ({ fieldFilter: { field: { fieldPath: k }, op: "EQUAL", value: { stringValue: eqs[k] } } }));
   const res = await fetch(FS_BASE + ":runQuery", {
@@ -227,7 +227,7 @@ async function fsQueryEq(accessToken, collectionId, eqs, limit) {
   return (data || []).filter(r => r.document).map(r => r.document);
 }
 
-/* استعلامٌ داخل مجموعةٍ فرعيّة (groups/{g}/relations…) — يقرأ ما يطابق فقط بدل القائمة كلّها.
+/* \u0627\u0633\u062A\u0639\u0644\u0627\u0645\u064C \u062F\u0627\u062E\u0644 \u0645\u062C\u0645\u0648\u0639\u0629\u064D \u0641\u0631\u0639\u064A\u0651\u0629 (groups/{g}/relations\u2026) \u2014 \u064A\u0642\u0631\u0623 \u0645\u0627 \u064A\u0637\u0627\u0628\u0642 \u0641\u0642\u0637 \u0628\u062F\u0644 \u0627\u0644\u0642\u0627\u0626\u0645\u0629 \u0643\u0644\u0651\u0647\u0627.
    filters: [[field, "EQUAL"|"IN", value|array]] */
 async function fsQuerySub(accessToken, parentRel, collectionId, filters, limit) {
   const fl = filters.map(([k, op, v]) => ({ fieldFilter: { field: { fieldPath: k }, op: op,
@@ -242,7 +242,7 @@ async function fsQuerySub(accessToken, parentRel, collectionId, filters, limit) 
   if (!res.ok) throw new Error("firestore query: " + JSON.stringify(data));
   return (data || []).filter(r => r.document).map(r => r.document);
 }
-/* عدّ وثائق مجموعةٍ فرعيّة: قراءةٌ واحدة لكلّ ١٠٠٠ بدل قراءة كلّ وثيقة */
+/* \u0639\u062F\u0651 \u0648\u062B\u0627\u0626\u0642 \u0645\u062C\u0645\u0648\u0639\u0629\u064D \u0641\u0631\u0639\u064A\u0651\u0629: \u0642\u0631\u0627\u0621\u0629\u064C \u0648\u0627\u062D\u062F\u0629 \u0644\u0643\u0644\u0651 \u0661\u0660\u0660\u0660 \u0628\u062F\u0644 \u0642\u0631\u0627\u0621\u0629 \u0643\u0644\u0651 \u0648\u062B\u064A\u0642\u0629 */
 async function fsCount(accessToken, parentRel, collectionId, eq) {
   const q = { from: [{ collectionId: collectionId }] };
   if (eq) q.where = { fieldFilter: { field: { fieldPath: eq[0] }, op: "EQUAL", value: toFsValue(eq[1]) } };
@@ -257,8 +257,8 @@ async function fsCount(accessToken, parentRel, collectionId, eq) {
   const v = r && r.result.aggregateFields && r.result.aggregateFields.n;
   return v ? Number(v.integerValue || 0) : 0;
 }
-/* قصّ القيم قبل الحفظ: نصوصٌ ≤ ٢٠٠٠ حرف، قوائم ≤ ٥٠، عمقٌ ≤ ٤ — لا يملأ أحدٌ القاعدة بنصٍّ ضخم */
-/* C37: مواقع الأقارب — {type, lat, lng, radius_meters, address_text} حتى ٣، وإلّا تُسقَط */
+/* \u0642\u0635\u0651 \u0627\u0644\u0642\u064A\u0645 \u0642\u0628\u0644 \u0627\u0644\u062D\u0641\u0638: \u0646\u0635\u0648\u0635\u064C \u2264 \u0662\u0660\u0660\u0660 \u062D\u0631\u0641\u060C \u0642\u0648\u0627\u0626\u0645 \u2264 \u0665\u0660\u060C \u0639\u0645\u0642\u064C \u2264 \u0664 \u2014 \u0644\u0627 \u064A\u0645\u0644\u0623 \u0623\u062D\u062F\u064C \u0627\u0644\u0642\u0627\u0639\u062F\u0629 \u0628\u0646\u0635\u064D\u0651 \u0636\u062E\u0645 */
+/* C37: \u0645\u0648\u0627\u0642\u0639 \u0627\u0644\u0623\u0642\u0627\u0631\u0628 \u2014 {type, lat, lng, radius_meters, address_text} \u062D\u062A\u0649 \u0663\u060C \u0648\u0625\u0644\u0651\u0627 \u062A\u064F\u0633\u0642\u064E\u0637 */
 function cleanLocations(v) {
   if (!Array.isArray(v)) return [];
   const out = [];
@@ -267,7 +267,7 @@ function cleanLocations(v) {
     if (!l || typeof l !== "object") continue;
     const lat = Number(l.lat), lng = Number(l.lng);
     if (!(isFinite(lat) && isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) || (lat === 0 && lng === 0)) continue;
-    let r = Number(l.radius_meters); r = (isFinite(r) && r > 0) ? Math.min(5000, Math.max(100, Math.round(r))) : 0;   // 0 = النطاق العامّ لدى كلّ مستخدم
+    let r = Number(l.radius_meters); r = (isFinite(r) && r > 0) ? Math.min(5000, Math.max(100, Math.round(r))) : 0;   // 0 = \u0627\u0644\u0646\u0637\u0627\u0642 \u0627\u0644\u0639\u0627\u0645\u0651 \u0644\u062F\u0649 \u0643\u0644\u0651 \u0645\u0633\u062A\u062E\u062F\u0645
     out.push({ type: l.type === "work" ? "work" : "home", lat: Math.round(lat * 1e6) / 1e6, lng: Math.round(lng * 1e6) / 1e6, radius_meters: r, address_text: String(l.address_text || "").slice(0, 120) });
   }
   return out;
@@ -285,7 +285,7 @@ function capVal(v, d) {
   return v;
 }
 
-/* تحويل قيمة JS إلى صيغة Firestore REST */
+/* \u062A\u062D\u0648\u064A\u0644 \u0642\u064A\u0645\u0629 JS \u0625\u0644\u0649 \u0635\u064A\u063A\u0629 Firestore REST */
 function toFsValue(v) {
   if (v === null || v === undefined) return { nullValue: null };
   if (typeof v === "string") return { stringValue: v };
@@ -300,14 +300,14 @@ function toFsValue(v) {
   return { stringValue: String(v) };
 }
 
-/* ---------- 4) العمليّة: group.create ---------- */
+/* ---------- 4) \u0627\u0644\u0639\u0645\u0644\u064A\u0651\u0629: group.create ---------- */
 async function opGroupCreate(uid, payload, env, claims) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
   const token = await getAccessToken(sa);
   const gid = crypto.randomUUID();
   const now = new Date().toISOString();
-  const name = (payload && payload.name) ? String(payload.name).slice(0, 100) : "عائلتي";
+  const name = (payload && payload.name) ? String(payload.name).slice(0, 100) : "\u0639\u0627\u0626\u0644\u062A\u064A";
   await fsCommit(token, [
     { update: { name: DOC_ROOT + "/groups/" + gid,
       fields: { name: { stringValue: name }, ownerUid: { stringValue: uid },
@@ -319,26 +319,26 @@ async function opGroupCreate(uid, payload, env, claims) {
   return { groupId: gid, name: name };
 }
 
-/* ---------- 5) العمليّة: invite.create (owner/editor) ---------- */
+/* ---------- 5) \u0627\u0644\u0639\u0645\u0644\u064A\u0651\u0629: invite.create (owner/editor) ---------- */
 async function opInviteCreate(uid, payload, env) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
   const token = await getAccessToken(sa);
   const groupId = payload && payload.groupId;
   if (!groupId) throw new Error("groupId required");
-  // التحقّق من الدور: عضوٌ owner أو editor وحده يدعو
+  // \u0627\u0644\u062A\u062D\u0642\u0651\u0642 \u0645\u0646 \u0627\u0644\u062F\u0648\u0631: \u0639\u0636\u0648\u064C owner \u0623\u0648 editor \u0648\u062D\u062F\u0647 \u064A\u062F\u0639\u0648
   const member = await fsGet(token, "groups/" + groupId + "/members/" + uid);
   const role = fstr(member, "role");
   if (role !== "owner" && role !== "editor")
     throw new Error("not a manager of this group");
-  // الدور الممنوح: مشاهد افتراضياً؛ «محرّر» يمنحه المالك وحده
+  // \u0627\u0644\u062F\u0648\u0631 \u0627\u0644\u0645\u0645\u0646\u0648\u062D: \u0645\u0634\u0627\u0647\u062F \u0627\u0641\u062A\u0631\u0627\u0636\u064A\u0627\u064B\u061B \u00AB\u0645\u062D\u0631\u0651\u0631\u00BB \u064A\u0645\u0646\u062D\u0647 \u0627\u0644\u0645\u0627\u0644\u0643 \u0648\u062D\u062F\u0647
   const grant = (payload && payload.role === "editor") ? "editor" : "viewer";
   if (grant === "editor" && role !== "owner") throw new Error("only the owner can invite editors");
   const inviteToken = crypto.randomUUID();
   const now = new Date().toISOString();
-  const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(); // أسبوع
+  const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(); // \u0623\u0633\u0628\u0648\u0639
   const g = await fsGet(token, "groups/" + groupId);
-  // C156: دعوةٌ باسم شخصٍ في الشجرة ⇒ يُحفظ معرّفه، فيُربط من يقبلها ويؤكّد «أنا هو» (لا يكفي اختيار اسمٍ بعد الانضمام)
+  // C156: \u062F\u0639\u0648\u0629\u064C \u0628\u0627\u0633\u0645 \u0634\u062E\u0635\u064D \u0641\u064A \u0627\u0644\u0634\u062C\u0631\u0629 \u21D2 \u064A\u064F\u062D\u0641\u0638 \u0645\u0639\u0631\u0651\u0641\u0647\u060C \u0641\u064A\u064F\u0631\u0628\u0637 \u0645\u0646 \u064A\u0642\u0628\u0644\u0647\u0627 \u0648\u064A\u0624\u0643\u0651\u062F \u00AB\u0623\u0646\u0627 \u0647\u0648\u00BB (\u0644\u0627 \u064A\u0643\u0641\u064A \u0627\u062E\u062A\u064A\u0627\u0631 \u0627\u0633\u0645\u064D \u0628\u0639\u062F \u0627\u0644\u0627\u0646\u0636\u0645\u0627\u0645)
   const ipid = payload && payload.personId != null ? String(payload.personId) : "";
   if (ipid && !segOk(ipid)) throw new Error("bad id");
   await fsCommit(token, [
@@ -346,12 +346,12 @@ async function opInviteCreate(uid, payload, env) {
       fields: { groupId: { stringValue: groupId }, createdBy: { stringValue: uid },
                 role: { stringValue: grant }, createdTs: { timestampValue: now },
                 expiresTs: { timestampValue: expires },
-                groupName: { stringValue: fstr(g, "name") || "عائلتي" }, ...(ipid ? { personId: { stringValue: ipid } } : {}) } } },
+                groupName: { stringValue: fstr(g, "name") || "\u0639\u0627\u0626\u0644\u062A\u064A" }, ...(ipid ? { personId: { stringValue: ipid } } : {}) } } },
   ]);
   return { token: inviteToken, groupId: groupId, role: grant, expiresTs: expires };
 }
 
-/* ---------- 6) العمليّة: invite.accept (أيّ مستخدم مُتحقَّق) ---------- */
+/* ---------- 6) \u0627\u0644\u0639\u0645\u0644\u064A\u0651\u0629: invite.accept (\u0623\u064A\u0651 \u0645\u0633\u062A\u062E\u062F\u0645 \u0645\u064F\u062A\u062D\u0642\u064E\u0651\u0642) ---------- */
 async function opInviteAccept(uid, payload, env, claims) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
@@ -367,13 +367,13 @@ async function opInviteAccept(uid, payload, env, claims) {
   const grant = fstr(invite, "role") === "editor" ? "editor" : "viewer";
   const g = await fsGet(token, "groups/" + groupId);
   if (!g || fbool(g, "deleted")) throw new Error("this family was deleted");
-  if (fsArr(g, "banned").indexOf(uid) >= 0) throw new Error("removed from this family");   // v39: من أزاله المالك لا يعود بالرابط
-  const gname = fstr(g, "name") || fstr(invite, "groupName") || "عائلتي";
+  if (fsArr(g, "banned").indexOf(uid) >= 0) throw new Error("removed from this family");   // v39: \u0645\u0646 \u0623\u0632\u0627\u0644\u0647 \u0627\u0644\u0645\u0627\u0644\u0643 \u0644\u0627 \u064A\u0639\u0648\u062F \u0628\u0627\u0644\u0631\u0627\u0628\u0637
+  const gname = fstr(g, "name") || fstr(invite, "groupName") || "\u0639\u0627\u0626\u0644\u062A\u064A";
   const now = new Date().toISOString();
-  // عضوٌ سلفاً؟ لا نُنزِل دوره — نرفعه فقط إن كانت الدعوة أعلى
+  // \u0639\u0636\u0648\u064C \u0633\u0644\u0641\u0627\u064B\u061F \u0644\u0627 \u0646\u064F\u0646\u0632\u0650\u0644 \u062F\u0648\u0631\u0647 \u2014 \u0646\u0631\u0641\u0639\u0647 \u0641\u0642\u0637 \u0625\u0646 \u0643\u0627\u0646\u062A \u0627\u0644\u062F\u0639\u0648\u0629 \u0623\u0639\u0644\u0649
   const existing = await fsGet(token, "groups/" + groupId + "/members/" + uid);
   const cur = existing ? fstr(existing, "role") : null;
-  // C156: «أنا هو» في دعوةٍ باسم شخص ⇒ ربطٌ إن كان الشخص هو نفسه في الدعوة، موجوداً وغير مربوطٍ بغيري، وأنا غير مربوطٍ بآخر
+  // C156: \u00AB\u0623\u0646\u0627 \u0647\u0648\u00BB \u0641\u064A \u062F\u0639\u0648\u0629\u064D \u0628\u0627\u0633\u0645 \u0634\u062E\u0635 \u21D2 \u0631\u0628\u0637\u064C \u0625\u0646 \u0643\u0627\u0646 \u0627\u0644\u0634\u062E\u0635 \u0647\u0648 \u0646\u0641\u0633\u0647 \u0641\u064A \u0627\u0644\u062F\u0639\u0648\u0629\u060C \u0645\u0648\u062C\u0648\u062F\u0627\u064B \u0648\u063A\u064A\u0631 \u0645\u0631\u0628\u0648\u0637\u064D \u0628\u063A\u064A\u0631\u064A\u060C \u0648\u0623\u0646\u0627 \u063A\u064A\u0631 \u0645\u0631\u0628\u0648\u0637\u064D \u0628\u0622\u062E\u0631
   let claimPid = null;
   const want = payload && payload.claim ? String(payload.claim) : "";
   if (want && want === fstr(invite, "personId") && segOk(want) && !(existing && fstr(existing, "personId"))) {
@@ -395,7 +395,7 @@ async function opInviteAccept(uid, payload, env, claims) {
   return { groupId: groupId, role: grant, name: gname, claimed: claimPid };
 }
 
-/* يتحقّق أنّ المستخدم محرِّر/مالك في العائلة */
+/* \u064A\u062A\u062D\u0642\u0651\u0642 \u0623\u0646\u0651 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u0645\u062D\u0631\u0650\u0651\u0631/\u0645\u0627\u0644\u0643 \u0641\u064A \u0627\u0644\u0639\u0627\u0626\u0644\u0629 */
 async function requireEditor(token, groupId, uid) {
   const me = await fsGet(token, "groups/" + groupId + "/members/" + uid);
   const role = fstr(me, "role");
@@ -403,25 +403,25 @@ async function requireEditor(token, groupId, uid) {
   return role;
 }
 
-/* اسم العضو كما يظهر لأهله: من حساب Google (الاسم فقط، لا البريد). الضيف بلا اسم. */
+/* \u0627\u0633\u0645 \u0627\u0644\u0639\u0636\u0648 \u0643\u0645\u0627 \u064A\u0638\u0647\u0631 \u0644\u0623\u0647\u0644\u0647: \u0645\u0646 \u062D\u0633\u0627\u0628 Google (\u0627\u0644\u0627\u0633\u0645 \u0641\u0642\u0637\u060C \u0644\u0627 \u0627\u0644\u0628\u0631\u064A\u062F). \u0627\u0644\u0636\u064A\u0641 \u0628\u0644\u0627 \u0627\u0633\u0645. */
 function memberIdFields(claims) {
   const anon = !!(claims && claims.firebase && claims.firebase.sign_in_provider === "anonymous");
-  // اسم «سوا» الذي اختاره المستخدم يسبق اسم Google (ويصلح للضيف أيضاً)
+  // \u0627\u0633\u0645 \u00AB\u0633\u0648\u0627\u00BB \u0627\u0644\u0630\u064A \u0627\u062E\u062A\u0627\u0631\u0647 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u064A\u0633\u0628\u0642 \u0627\u0633\u0645 Google (\u0648\u064A\u0635\u0644\u062D \u0644\u0644\u0636\u064A\u0641 \u0623\u064A\u0636\u0627\u064B)
   const nm = claims && typeof claims.sawaName === "string" && claims.sawaName ? claims.sawaName.slice(0, 60)
     : !anon && claims && typeof claims.name === "string" ? claims.name.trim().slice(0, 60) : "";
   return { name: nm ? { stringValue: nm } : { nullValue: null }, anon: { booleanValue: anon } };
 }
 
-/* فهرس عائلات الحساب: accounts/{uid}/groups/{gid} — يكتبه الـWorker وحده،
-   ويقرؤه الـWorker في my.groups (لا يحتاج تعديل قواعد الأمان). */
+/* \u0641\u0647\u0631\u0633 \u0639\u0627\u0626\u0644\u0627\u062A \u0627\u0644\u062D\u0633\u0627\u0628: accounts/{uid}/groups/{gid} \u2014 \u064A\u0643\u062A\u0628\u0647 \u0627\u0644\u0640Worker \u0648\u062D\u062F\u0647\u060C
+   \u0648\u064A\u0642\u0631\u0624\u0647 \u0627\u0644\u0640Worker \u0641\u064A my.groups (\u0644\u0627 \u064A\u062D\u062A\u0627\u062C \u062A\u0639\u062F\u064A\u0644 \u0642\u0648\u0627\u0639\u062F \u0627\u0644\u0623\u0645\u0627\u0646). */
 const ROLE_RANK = { viewer: 1, editor: 2, owner: 3 };
 function indexWrite(uid, gid, name, role, now) {
   return { update: { name: DOC_ROOT + "/accounts/" + uid + "/groups/" + gid,
-    fields: { name: { stringValue: String(name || "عائلتي") }, role: { stringValue: role },
+    fields: { name: { stringValue: String(name || "\u0639\u0627\u0626\u0644\u062A\u064A") }, role: { stringValue: role },
               ts: { timestampValue: now } } } };
 }
 
-/* ---------- 7) العمليّة: person.set (حقليّ — الأحدث يفوز) ---------- */
+/* ---------- 7) \u0627\u0644\u0639\u0645\u0644\u064A\u0651\u0629: person.set (\u062D\u0642\u0644\u064A\u0651 \u2014 \u0627\u0644\u0623\u062D\u062F\u062B \u064A\u0641\u0648\u0632) ---------- */
 async function opPersonSet(uid, payload, env) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
@@ -431,11 +431,11 @@ async function opPersonSet(uid, payload, env) {
   await requireEditor(token, groupId, uid);
 
   const fields = (payload && payload.fields) || {};
-  // ⛔ الحالة الصحّية لا تُخزَّن على السيرفر (قرار الخصوصية)
+  // \u26D4 \u0627\u0644\u062D\u0627\u0644\u0629 \u0627\u0644\u0635\u062D\u0651\u064A\u0629 \u0644\u0627 \u062A\u064F\u062E\u0632\u064E\u0651\u0646 \u0639\u0644\u0649 \u0627\u0644\u0633\u064A\u0631\u0641\u0631 (\u0642\u0631\u0627\u0631 \u0627\u0644\u062E\u0635\u0648\u0635\u064A\u0629)
   if ("healthStatus" in fields) throw new Error("healthStatus is not stored on server");
-  // status_detail يشمل «مريض» — قرار خالد (٩ أكتوبر): يظهر لأعضاء العائلة ليطمئنّوا عليه
-  // الحقول الفعليّة في التطبيق. ⛔ status_detail (الحالة الصحّية) و healthStatus
-  // و photo (حجمها) لا تُخزَّن على الخادم أبداً — ليست في القائمة فتُتجاهَل.
+  // status_detail \u064A\u0634\u0645\u0644 \u00AB\u0645\u0631\u064A\u0636\u00BB \u2014 \u0642\u0631\u0627\u0631 \u062E\u0627\u0644\u062F (\u0669 \u0623\u0643\u062A\u0648\u0628\u0631): \u064A\u0638\u0647\u0631 \u0644\u0623\u0639\u0636\u0627\u0621 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u0644\u064A\u0637\u0645\u0626\u0646\u0651\u0648\u0627 \u0639\u0644\u064A\u0647
+  // \u0627\u0644\u062D\u0642\u0648\u0644 \u0627\u0644\u0641\u0639\u0644\u064A\u0651\u0629 \u0641\u064A \u0627\u0644\u062A\u0637\u0628\u064A\u0642. \u26D4 status_detail (\u0627\u0644\u062D\u0627\u0644\u0629 \u0627\u0644\u0635\u062D\u0651\u064A\u0629) \u0648 healthStatus
+  // \u0648 photo (\u062D\u062C\u0645\u0647\u0627) \u0644\u0627 \u062A\u064F\u062E\u0632\u064E\u0651\u0646 \u0639\u0644\u0649 \u0627\u0644\u062E\u0627\u062F\u0645 \u0623\u0628\u062F\u0627\u064B \u2014 \u0644\u064A\u0633\u062A \u0641\u064A \u0627\u0644\u0642\u0627\u0626\u0645\u0629 \u0641\u062A\u064F\u062A\u062C\u0627\u0647\u064E\u0644.
   const ALLOWED = ["local_name", "gender", "kinship", "proximity", "birthYear", "birthday", "alive",
                    "death_date", "deathYear", "contacts", "phones", "notes", "motherId",
                    "status_detail", "noChildren", "locations"];
@@ -446,7 +446,7 @@ async function opPersonSet(uid, payload, env) {
     const ex = await fsGet(token, "groups/" + groupId + "/persons/" + pid);
     if (!ex) creating = true;
     else if (fbool(ex, "deleted")) {
-      // ⛔ تعديلٌ مقابل حذف (قرار ④): لا يُطبَّق صامتاً — يُراجَع
+      // \u26D4 \u062A\u0639\u062F\u064A\u0644\u064C \u0645\u0642\u0627\u0628\u0644 \u062D\u0630\u0641 (\u0642\u0631\u0627\u0631 \u2463): \u0644\u0627 \u064A\u064F\u0637\u0628\u064E\u0651\u0642 \u0635\u0627\u0645\u062A\u0627\u064B \u2014 \u064A\u064F\u0631\u0627\u062C\u064E\u0639
       const rid = crypto.randomUUID();
       await fsCommit(token, [{ update: { name: DOC_ROOT + "/reviewQueue/" + rid,
         fields: { groupId: { stringValue: groupId }, kind: { stringValue: "edit_vs_delete" },
@@ -457,7 +457,7 @@ async function opPersonSet(uid, payload, env) {
     }
   } else { pid = crypto.randomUUID(); creating = true; }
 
-  // v39: «الأحدث يفوز» لكلّ حقل — العميل يرسل وقت تعديله (ts)؛ حقلٌ كُتب في الخادم بعده يُترك كما هو (كان المتأخّر وصولاً يمسح الأحدث)
+  // v39: \u00AB\u0627\u0644\u0623\u062D\u062F\u062B \u064A\u0641\u0648\u0632\u00BB \u0644\u0643\u0644\u0651 \u062D\u0642\u0644 \u2014 \u0627\u0644\u0639\u0645\u064A\u0644 \u064A\u0631\u0633\u0644 \u0648\u0642\u062A \u062A\u0639\u062F\u064A\u0644\u0647 (ts)\u061B \u062D\u0642\u0644\u064C \u0643\u064F\u062A\u0628 \u0641\u064A \u0627\u0644\u062E\u0627\u062F\u0645 \u0628\u0639\u062F\u0647 \u064A\u064F\u062A\u0631\u0643 \u0643\u0645\u0627 \u0647\u0648 (\u0643\u0627\u0646 \u0627\u0644\u0645\u062A\u0623\u062E\u0651\u0631 \u0648\u0635\u0648\u0644\u0627\u064B \u064A\u0645\u0633\u062D \u0627\u0644\u0623\u062D\u062F\u062B)
   const editTs = Number(payload && payload.ts) || 0, exFts = (!creating && (await fsGet(token, "groups/" + groupId + "/persons/" + pid).catch(() => null)) || null);
   const srvTs = (k) => { try { const v = exFts.fields.fts.mapValue.fields[k].timestampValue; return Date.parse(v) || 0; } catch (e) { return 0; } };
   const changed = [], skipped = [], updFields = {}, ftsSub = {};
@@ -467,13 +467,13 @@ async function opPersonSet(uid, payload, env) {
     updFields[k] = toFsValue(capVal(fields[k])); ftsSub[k] = { timestampValue: editTs ? new Date(Math.min(editTs, Date.now())).toISOString() : now }; changed.push(k);
   }
   if (changed.length === 0 && !creating) return { personId: pid, created: false, changed: [], skipped };
-  if (creating) {   // v39: سقف الأشخاص في العائلة
+  if (creating) {   // v39: \u0633\u0642\u0641 \u0627\u0644\u0623\u0634\u062E\u0627\u0635 \u0641\u064A \u0627\u0644\u0639\u0627\u0626\u0644\u0629
     try { const n = await fsCount(token, "groups/" + groupId, "persons"); if (n >= 5000) throw new Error("family is full (5000)"); } catch (e) { if (/full/.test(String(e && e.message))) throw e; }
   }
 
-  // ترقيعٌ لا استبدال: updateMask يكتب الحقول المذكورة وحدها
+  // \u062A\u0631\u0642\u064A\u0639\u064C \u0644\u0627 \u0627\u0633\u062A\u0628\u062F\u0627\u0644: updateMask \u064A\u0643\u062A\u0628 \u0627\u0644\u062D\u0642\u0648\u0644 \u0627\u0644\u0645\u0630\u0643\u0648\u0631\u0629 \u0648\u062D\u062F\u0647\u0627
   const mask = changed.slice();
-  updFields.fts = { mapValue: { fields: ftsSub } };     // طابع آخر كتابةٍ لكلّ حقل
+  updFields.fts = { mapValue: { fields: ftsSub } };     // \u0637\u0627\u0628\u0639 \u0622\u062E\u0631 \u0643\u062A\u0627\u0628\u0629\u064D \u0644\u0643\u0644\u0651 \u062D\u0642\u0644
   for (const k of changed) mask.push("fts." + k);
   updFields.updatedTs = { timestampValue: now }; mask.push("updatedTs");
   if (creating) { updFields.deleted = { booleanValue: false }; updFields.createdTs = { timestampValue: now }; mask.push("deleted", "createdTs"); }
@@ -481,7 +481,7 @@ async function opPersonSet(uid, payload, env) {
   await fsCommit(token, [
     { update: { name: DOC_ROOT + "/groups/" + groupId + "/persons/" + pid, fields: updFields },
       updateMask: { fieldPaths: mask } },
-    // سجلّ خفيف
+    // \u0633\u062C\u0644\u0651 \u062E\u0641\u064A\u0641
     { update: { name: DOC_ROOT + "/groups/" + groupId + "/changelog/" + crypto.randomUUID(),
       fields: { ts: { timestampValue: now }, by: { stringValue: uid }, personId: { stringValue: pid },
                 op: { stringValue: "person.set" }, changed: toFsValue(changed) } } },
@@ -489,7 +489,7 @@ async function opPersonSet(uid, payload, env) {
   return { personId: pid, created: creating, changed: changed, skipped };
 }
 
-/* ---------- 8) العمليّة: relation.add (بنيويّ — حارسٌ ثم مراجعة) ---------- */
+/* ---------- 8) \u0627\u0644\u0639\u0645\u0644\u064A\u0651\u0629: relation.add (\u0628\u0646\u064A\u0648\u064A\u0651 \u2014 \u062D\u0627\u0631\u0633\u064C \u062B\u0645 \u0645\u0631\u0627\u062C\u0639\u0629) ---------- */
 async function opRelationAdd(uid, payload, env) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
@@ -498,19 +498,19 @@ async function opRelationAdd(uid, payload, env) {
   if (!groupId) throw new Error("groupId required");
   await requireEditor(token, groupId, uid);
 
-  const type = payload.type, from = payload.from, to = payload.to; // parent: from=الوالد, to=الابن
+  const type = payload.type, from = payload.from, to = payload.to; // parent: from=\u0627\u0644\u0648\u0627\u0644\u062F, to=\u0627\u0644\u0627\u0628\u0646
   if (["parent", "spouse", "ex_spouse", "sibling"].indexOf(type) < 0) throw new Error("bad relation type");
   if (!from || !to) throw new Error("from/to required");
   if (from === to) throw new Error("from equals to");
   if (!segOk(String(from)) || !segOk(String(to))) throw new Error("bad id");
-  // v39: الطرفان من هذه العائلة وغير محذوفَين (كانت تُقبل معرّفاتٌ من عائلةٍ أخرى أو وهميّة)
+  // v39: \u0627\u0644\u0637\u0631\u0641\u0627\u0646 \u0645\u0646 \u0647\u0630\u0647 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u0648\u063A\u064A\u0631 \u0645\u062D\u0630\u0648\u0641\u064E\u064A\u0646 (\u0643\u0627\u0646\u062A \u062A\u064F\u0642\u0628\u0644 \u0645\u0639\u0631\u0651\u0641\u0627\u062A\u064C \u0645\u0646 \u0639\u0627\u0626\u0644\u0629\u064D \u0623\u062E\u0631\u0649 \u0623\u0648 \u0648\u0647\u0645\u064A\u0651\u0629)
   const [pf, pt] = await Promise.all([fsGet(token, "groups/" + groupId + "/persons/" + from), fsGet(token, "groups/" + groupId + "/persons/" + to)]);
   if (!pf || fbool(pf, "deleted") || !pt || fbool(pt, "deleted")) throw new Error("person not found");
 
-  // ⛔ لا نقرأ كلّ صلات العائلة (كانت تكلّف قراءةً لكلّ صلة في كلّ إضافة): استعلاماتٌ موجّهة فقط
+  // \u26D4 \u0644\u0627 \u0646\u0642\u0631\u0623 \u0643\u0644\u0651 \u0635\u0644\u0627\u062A \u0627\u0644\u0639\u0627\u0626\u0644\u0629 (\u0643\u0627\u0646\u062A \u062A\u0643\u0644\u0651\u0641 \u0642\u0631\u0627\u0621\u0629\u064B \u0644\u0643\u0644\u0651 \u0635\u0644\u0629 \u0641\u064A \u0643\u0644\u0651 \u0625\u0636\u0627\u0641\u0629): \u0627\u0633\u062A\u0639\u0644\u0627\u0645\u0627\u062A\u064C \u0645\u0648\u062C\u0651\u0647\u0629 \u0641\u0642\u0637
   const gPath = "groups/" + groupId;
   const live = docs => docs.filter(d => !fbool(d, "deleted")).map(d => ({ type: fstr(d, "type"), from: fstr(d, "from"), to: fstr(d, "to") }));
-  // احتياط: إن رفض Firestore الاستعلام (فهرسٌ ناقص مثلاً) نعود للطريقة القديمة — قائمةٌ كاملة مرّةً واحدة
+  // \u0627\u062D\u062A\u064A\u0627\u0637: \u0625\u0646 \u0631\u0641\u0636 Firestore \u0627\u0644\u0627\u0633\u062A\u0639\u0644\u0627\u0645 (\u0641\u0647\u0631\u0633\u064C \u0646\u0627\u0642\u0635 \u0645\u062B\u0644\u0627\u064B) \u0646\u0639\u0648\u062F \u0644\u0644\u0637\u0631\u064A\u0642\u0629 \u0627\u0644\u0642\u062F\u064A\u0645\u0629 \u2014 \u0642\u0627\u0626\u0645\u0629\u064C \u0643\u0627\u0645\u0644\u0629 \u0645\u0631\u0651\u0629\u064B \u0648\u0627\u062D\u062F\u0629
   let all = null;
   const allRels = async () => all || (all = live(await fsList(token, gPath + "/relations")));
   const q = async (filters, lim, fallback) => {
@@ -525,7 +525,7 @@ async function opRelationAdd(uid, payload, env) {
 
   let conflict = null;
   if (type === "parent") {
-    // حارس مقعد الوالد بالجنس (v173): لا والدَين من نفس الجنس للابن
+    // \u062D\u0627\u0631\u0633 \u0645\u0642\u0639\u062F \u0627\u0644\u0648\u0627\u0644\u062F \u0628\u0627\u0644\u062C\u0646\u0633 (v173): \u0644\u0627 \u0648\u0627\u0644\u062F\u064E\u064A\u0646 \u0645\u0646 \u0646\u0641\u0633 \u0627\u0644\u062C\u0646\u0633 \u0644\u0644\u0627\u0628\u0646
     const parent = await fsGet(token, "groups/" + groupId + "/persons/" + from);
     const pGender = fstr(parent, "gender");
     const existingParents = (await parentsOf([to])).map(r => r.from);
@@ -534,8 +534,8 @@ async function opRelationAdd(uid, payload, env) {
       const g = fstr(ppDoc, "gender");
       if (g && pGender && g === pGender) { conflict = "parent slot of this gender already taken"; break; }
     }
-    // حارس الدورات: لو كان الابن أصلاً من أسلاف الوالد → دورة
-    // جيلاً بعد جيل (استعلامٌ واحد لكلّ جيل، ≤ ١٢ جيلاً — يبقى تحت حدّ ٥٠ طلباً فرعيّاً)
+    // \u062D\u0627\u0631\u0633 \u0627\u0644\u062F\u0648\u0631\u0627\u062A: \u0644\u0648 \u0643\u0627\u0646 \u0627\u0644\u0627\u0628\u0646 \u0623\u0635\u0644\u0627\u064B \u0645\u0646 \u0623\u0633\u0644\u0627\u0641 \u0627\u0644\u0648\u0627\u0644\u062F \u2192 \u062F\u0648\u0631\u0629
+    // \u062C\u064A\u0644\u0627\u064B \u0628\u0639\u062F \u062C\u064A\u0644 (\u0627\u0633\u062A\u0639\u0644\u0627\u0645\u064C \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u062C\u064A\u0644\u060C \u2264 \u0661\u0662 \u062C\u064A\u0644\u0627\u064B \u2014 \u064A\u0628\u0642\u0649 \u062A\u062D\u062A \u062D\u062F\u0651 \u0665\u0660 \u0637\u0644\u0628\u0627\u064B \u0641\u0631\u0639\u064A\u0651\u0627\u064B)
     if (!conflict) {
       const seen = new Set([from]); let gen = [from], depth = 0;
       while (gen.length && depth < 12 && !conflict) {
@@ -562,25 +562,25 @@ async function opRelationAdd(uid, payload, env) {
     return { applied: false, queued: true, reviewId: rid, reason: conflict };
   }
 
-  // المعرّف المحلّيّ = معرّف الخادم (قرار §٨-١): استعمل relationId من العميل إن وُجد
+  // \u0627\u0644\u0645\u0639\u0631\u0651\u0641 \u0627\u0644\u0645\u062D\u0644\u0651\u064A\u0651 = \u0645\u0639\u0631\u0651\u0641 \u0627\u0644\u062E\u0627\u062F\u0645 (\u0642\u0631\u0627\u0631 \u00A7\u0668-\u0661): \u0627\u0633\u062A\u0639\u0645\u0644 relationId \u0645\u0646 \u0627\u0644\u0639\u0645\u064A\u0644 \u0625\u0646 \u0648\u064F\u062C\u062F
   const relId = (payload.relationId && String(payload.relationId)) || crypto.randomUUID();
   await fsCommit(token, [
     { update: { name: DOC_ROOT + "/groups/" + groupId + "/relations/" + relId,
       fields: Object.assign({ type: { stringValue: type }, from: { stringValue: from }, to: { stringValue: to },
                 createdTs: { timestampValue: now }, deleted: { booleanValue: false } },
                 payload.inferred ? { inferred: { stringValue: String(payload.inferred).slice(0, 60) } } : {},
-                // v53: الأخوّة غير الشقيقة — «من الأب» أو «من الأم» (C75)
+                // v53: \u0627\u0644\u0623\u062E\u0648\u0651\u0629 \u063A\u064A\u0631 \u0627\u0644\u0634\u0642\u064A\u0642\u0629 \u2014 \u00AB\u0645\u0646 \u0627\u0644\u0623\u0628\u00BB \u0623\u0648 \u00AB\u0645\u0646 \u0627\u0644\u0623\u0645\u00BB (C75)
                 (type === "sibling" && (payload.half === "father" || payload.half === "mother")) ? { half: { stringValue: payload.half } } : {}) } },
   ]);
   return { applied: true, relationId: relId };
 }
 
-/* كتابةٌ على دفعاتٍ (حدّ Firestore 500 كتابة/طلب) */
+/* \u0643\u062A\u0627\u0628\u0629\u064C \u0639\u0644\u0649 \u062F\u0641\u0639\u0627\u062A\u064D (\u062D\u062F\u0651 Firestore 500 \u0643\u062A\u0627\u0628\u0629/\u0637\u0644\u0628) */
 async function commitChunks(token, writes) {
   for (let i = 0; i < writes.length; i += 400) await fsCommit(token, writes.slice(i, i + 400));
 }
 
-/* ---------- 9) العمليّة: review.resolve (editor يحسم مراجعة) ---------- */
+/* ---------- 9) \u0627\u0644\u0639\u0645\u0644\u064A\u0651\u0629: review.resolve (editor \u064A\u062D\u0633\u0645 \u0645\u0631\u0627\u062C\u0639\u0629) ---------- */
 async function opReviewResolve(uid, payload, env) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
@@ -614,7 +614,7 @@ async function opReviewResolve(uid, payload, env) {
       if (!d) throw new Error("review detail missing");
       const type = d.type.stringValue, from = d.from.stringValue, to = d.to.stringValue;
       const relId = (d.relationId && d.relationId.stringValue) || crypto.randomUUID();
-      // تطبيقٌ بقرار الإنسان، رغم التحذير — في نفس الـcommit مع إغلاق المراجعة
+      // \u062A\u0637\u0628\u064A\u0642\u064C \u0628\u0642\u0631\u0627\u0631 \u0627\u0644\u0625\u0646\u0633\u0627\u0646\u060C \u0631\u063A\u0645 \u0627\u0644\u062A\u062D\u0630\u064A\u0631 \u2014 \u0641\u064A \u0646\u0641\u0633 \u0627\u0644\u0640commit \u0645\u0639 \u0625\u063A\u0644\u0627\u0642 \u0627\u0644\u0645\u0631\u0627\u062C\u0639\u0629
       await fsCommit(token, [
         { update: { name: DOC_ROOT + "/groups/" + groupId + "/relations/" + relId,
           fields: { type: { stringValue: type }, from: { stringValue: from }, to: { stringValue: to },
@@ -626,7 +626,7 @@ async function opReviewResolve(uid, payload, env) {
       return { resolved: true, resolution: "applied", relationId: relId };
     }
     if (kind === "edit_vs_delete") {
-      // قبول: يُستعاد الشخص المحذوف ويُطبَّق عليه التعديل المحجوز
+      // \u0642\u0628\u0648\u0644: \u064A\u064F\u0633\u062A\u0639\u0627\u062F \u0627\u0644\u0634\u062E\u0635 \u0627\u0644\u0645\u062D\u0630\u0648\u0641 \u0648\u064A\u064F\u0637\u0628\u064E\u0651\u0642 \u0639\u0644\u064A\u0647 \u0627\u0644\u062A\u0639\u062F\u064A\u0644 \u0627\u0644\u0645\u062D\u062C\u0648\u0632
       const dv = fsToJs(review.fields.detail) || {};
       const pid = dv.personId, vals = dv.values || {};
       if (!pid) throw new Error("review detail missing");
@@ -640,58 +640,58 @@ async function opReviewResolve(uid, payload, env) {
       ]);
       return { resolved: true, resolution: "applied", personId: pid };
     }
-    // أنواع أخرى (self_duplicate …) تُغلَق فقط، دون تطبيقٍ آليّ
+    // \u0623\u0646\u0648\u0627\u0639 \u0623\u062E\u0631\u0649 (self_duplicate \u2026) \u062A\u064F\u063A\u0644\u064E\u0642 \u0641\u0642\u0637\u060C \u062F\u0648\u0646 \u062A\u0637\u0628\u064A\u0642\u064D \u0622\u0644\u064A\u0651
     await fsCommit(token, [closeReview("acknowledged")]);
     return { resolved: true, resolution: "acknowledged", kind: kind };
   }
   throw new Error("decision must be apply or reject");
 }
 
-/* ---------- 10) العمليّة: bulk.import (المالك · الرفع الأوّل) ---------- */
+/* ---------- 10) \u0627\u0644\u0639\u0645\u0644\u064A\u0651\u0629: bulk.import (\u0627\u0644\u0645\u0627\u0644\u0643 \u00B7 \u0627\u0644\u0631\u0641\u0639 \u0627\u0644\u0623\u0648\u0651\u0644) ---------- */
 async function opBulkImport(uid, payload, env, claims) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
   const token = await getAccessToken(sa);
   const now = new Date().toISOString();
-  // ⛔ أمان: معرّف مجموعةٍ من العميل يُقبَل فقط لمجموعةٍ موجودة وهو محرّرٌ فيها (استبدالٌ في مكانها).
-  // مجموعةٌ جديدة يولّد الخادم معرّفها دائماً — لا يصير أحدٌ مالكاً لمجموعةٍ بمعرفة معرّفها.
+  // \u26D4 \u0623\u0645\u0627\u0646: \u0645\u0639\u0631\u0651\u0641 \u0645\u062C\u0645\u0648\u0639\u0629\u064D \u0645\u0646 \u0627\u0644\u0639\u0645\u064A\u0644 \u064A\u064F\u0642\u0628\u064E\u0644 \u0641\u0642\u0637 \u0644\u0645\u062C\u0645\u0648\u0639\u0629\u064D \u0645\u0648\u062C\u0648\u062F\u0629 \u0648\u0647\u0648 \u0645\u062D\u0631\u0651\u0631\u064C \u0641\u064A\u0647\u0627 (\u0627\u0633\u062A\u0628\u062F\u0627\u0644\u064C \u0641\u064A \u0645\u0643\u0627\u0646\u0647\u0627).
+  // \u0645\u062C\u0645\u0648\u0639\u0629\u064C \u062C\u062F\u064A\u062F\u0629 \u064A\u0648\u0644\u0651\u062F \u0627\u0644\u062E\u0627\u062F\u0645 \u0645\u0639\u0631\u0651\u0641\u0647\u0627 \u062F\u0627\u0626\u0645\u0627\u064B \u2014 \u0644\u0627 \u064A\u0635\u064A\u0631 \u0623\u062D\u062F\u064C \u0645\u0627\u0644\u0643\u0627\u064B \u0644\u0645\u062C\u0645\u0648\u0639\u0629\u064D \u0628\u0645\u0639\u0631\u0641\u0629 \u0645\u0639\u0631\u0651\u0641\u0647\u0627.
   let gid = crypto.randomUUID(), existing = false, myRole = "owner";
   if (payload && payload.groupId) {
     const gdoc = await fsGet(token, "groups/" + String(payload.groupId));
     if (gdoc) {
       myRole = await requireEditor(token, String(payload.groupId), uid);
-      // استبدال الشجرة كلّها للمالك وحده (قرار خالد ١٠ أكتوبر) — المحرّر يعدّل شخصاً شخصاً
+      // \u0627\u0633\u062A\u0628\u062F\u0627\u0644 \u0627\u0644\u0634\u062C\u0631\u0629 \u0643\u0644\u0651\u0647\u0627 \u0644\u0644\u0645\u0627\u0644\u0643 \u0648\u062D\u062F\u0647 (\u0642\u0631\u0627\u0631 \u062E\u0627\u0644\u062F \u0661\u0660 \u0623\u0643\u062A\u0648\u0628\u0631) \u2014 \u0627\u0644\u0645\u062D\u0631\u0651\u0631 \u064A\u0639\u062F\u0651\u0644 \u0634\u062E\u0635\u0627\u064B \u0634\u062E\u0635\u0627\u064B
       if (myRole !== "owner") throw new Error("only the owner can replace the family");
       gid = String(payload.groupId); existing = true;
     }
   }
   const replace = existing && payload && payload.replace === true;
-  const name = (payload && payload.name) ? String(payload.name).slice(0, 100) : "عائلتي";
+  const name = (payload && payload.name) ? String(payload.name).slice(0, 100) : "\u0639\u0627\u0626\u0644\u062A\u064A";
   const persons = (payload && Array.isArray(payload.persons)) ? payload.persons : [];
   const relations = (payload && Array.isArray(payload.relations)) ? payload.relations : [];
-  // سقفٌ يحمي حصّة الكتابة اليوميّة (٢٠ ألفاً) من رفعٍ واحدٍ ضخم
+  // \u0633\u0642\u0641\u064C \u064A\u062D\u0645\u064A \u062D\u0635\u0651\u0629 \u0627\u0644\u0643\u062A\u0627\u0628\u0629 \u0627\u0644\u064A\u0648\u0645\u064A\u0651\u0629 (\u0662\u0660 \u0623\u0644\u0641\u0627\u064B) \u0645\u0646 \u0631\u0641\u0639\u064D \u0648\u0627\u062D\u062F\u064D \u0636\u062E\u0645
   if (persons.length > 3000 || relations.length > 6000) throw new Error("tree too large for one upload");
-  // الحقول الفعليّة في التطبيق. ⛔ status_detail (الحالة الصحّية) و healthStatus
-  // و photo (حجمها) لا تُخزَّن على الخادم أبداً — ليست في القائمة فتُتجاهَل.
+  // \u0627\u0644\u062D\u0642\u0648\u0644 \u0627\u0644\u0641\u0639\u0644\u064A\u0651\u0629 \u0641\u064A \u0627\u0644\u062A\u0637\u0628\u064A\u0642. \u26D4 status_detail (\u0627\u0644\u062D\u0627\u0644\u0629 \u0627\u0644\u0635\u062D\u0651\u064A\u0629) \u0648 healthStatus
+  // \u0648 photo (\u062D\u062C\u0645\u0647\u0627) \u0644\u0627 \u062A\u064F\u062E\u0632\u064E\u0651\u0646 \u0639\u0644\u0649 \u0627\u0644\u062E\u0627\u062F\u0645 \u0623\u0628\u062F\u0627\u064B \u2014 \u0644\u064A\u0633\u062A \u0641\u064A \u0627\u0644\u0642\u0627\u0626\u0645\u0629 \u0641\u062A\u064F\u062A\u062C\u0627\u0647\u064E\u0644.
   const ALLOWED = ["local_name", "gender", "kinship", "proximity", "birthYear", "birthday", "alive",
                    "death_date", "deathYear", "contacts", "phones", "notes", "motherId",
                    "status_detail", "noChildren", "locations"];
 
-  // خريطة المعرّفات المحلّية → الخادم. مع حفظ المعرّفات: fid = lid (لا تبديل).
+  // \u062E\u0631\u064A\u0637\u0629 \u0627\u0644\u0645\u0639\u0631\u0651\u0641\u0627\u062A \u0627\u0644\u0645\u062D\u0644\u0651\u064A\u0629 \u2192 \u0627\u0644\u062E\u0627\u062F\u0645. \u0645\u0639 \u062D\u0641\u0638 \u0627\u0644\u0645\u0639\u0631\u0651\u0641\u0627\u062A: fid = lid (\u0644\u0627 \u062A\u0628\u062F\u064A\u0644).
   const map = {}; let selfCount = 0; const personWrites = [];
   for (const p of persons) {
     const lid = (p.localId && segOk(String(p.localId))) ? String(p.localId) : crypto.randomUUID();
     const fid = lid; map[p.localId || lid] = fid;
-    if (p.kinship === "نفسي") selfCount++;
+    if (p.kinship === "\u0646\u0641\u0633\u064A") selfCount++;
     const f = { deleted: { booleanValue: false }, createdTs: { timestampValue: now }, updatedTs: { timestampValue: now } };
     const ftsSub = {};
     for (const k of ALLOWED) if (k in p) { f[k] = toFsValue(capVal(k === "locations" ? cleanLocations(p[k]) : p[k])); ftsSub[k] = { timestampValue: now }; }
-    // ⛔ healthStatus لا يُنسَخ (خارج ALLOWED) — لا يعبر القاعدة
+    // \u26D4 healthStatus \u0644\u0627 \u064A\u064F\u0646\u0633\u064E\u062E (\u062E\u0627\u0631\u062C ALLOWED) \u2014 \u0644\u0627 \u064A\u0639\u0628\u0631 \u0627\u0644\u0642\u0627\u0639\u062F\u0629
     f.fts = { mapValue: { fields: ftsSub } };
     personWrites.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/persons/" + fid, fields: f } });
   }
 
-  // إعادة تأصيل الصلات؛ ما سقط طرفه يُتخطّى
+  // \u0625\u0639\u0627\u062F\u0629 \u062A\u0623\u0635\u064A\u0644 \u0627\u0644\u0635\u0644\u0627\u062A\u061B \u0645\u0627 \u0633\u0642\u0637 \u0637\u0631\u0641\u0647 \u064A\u064F\u062A\u062E\u0637\u0651\u0649
   let orphans = 0; const relWrites = [];
   for (const r of relations) {
     const from = map[r.fromLocalId], to = map[r.toLocalId];
@@ -705,7 +705,7 @@ async function opBulkImport(uid, payload, env, claims) {
                 (r.type === "sibling" && (r.half === "father" || r.half === "mother")) ? { half: { stringValue: r.half } } : {}) } });
   }
 
-  // عائلةٌ جديدة: الوثيقة + المالك. موجودةٌ: لا نمسّ المالك ولا الأعضاء.
+  // \u0639\u0627\u0626\u0644\u0629\u064C \u062C\u062F\u064A\u062F\u0629: \u0627\u0644\u0648\u062B\u064A\u0642\u0629 + \u0627\u0644\u0645\u0627\u0644\u0643. \u0645\u0648\u062C\u0648\u062F\u0629\u064C: \u0644\u0627 \u0646\u0645\u0633\u0651 \u0627\u0644\u0645\u0627\u0644\u0643 \u0648\u0644\u0627 \u0627\u0644\u0623\u0639\u0636\u0627\u0621.
   if (!existing) {
     await fsCommit(token, [
       { update: { name: DOC_ROOT + "/groups/" + gid,
@@ -717,7 +717,7 @@ async function opBulkImport(uid, payload, env, claims) {
   } else {
     await fsCommit(token, [indexWrite(uid, gid, name, myRole, now)]);
   }
-  // استبدال: ما في الخادم وليس في الشجرة المرفوعة يُوسَم محذوفاً (شاهدة، لا محو)
+  // \u0627\u0633\u062A\u0628\u062F\u0627\u0644: \u0645\u0627 \u0641\u064A \u0627\u0644\u062E\u0627\u062F\u0645 \u0648\u0644\u064A\u0633 \u0641\u064A \u0627\u0644\u0634\u062C\u0631\u0629 \u0627\u0644\u0645\u0631\u0641\u0648\u0639\u0629 \u064A\u064F\u0648\u0633\u064E\u0645 \u0645\u062D\u0630\u0648\u0641\u0627\u064B (\u0634\u0627\u0647\u062F\u0629\u060C \u0644\u0627 \u0645\u062D\u0648)
   let removedPersons = 0, removedRelations = 0;
   if (replace) {
     const keepP = {}; for (const w of personWrites) keepP[w.update.name.split("/").pop()] = 1;
@@ -742,7 +742,7 @@ async function opBulkImport(uid, payload, env, claims) {
   await commitChunks(token, personWrites);
   await commitChunks(token, relWrites);
 
-  // ⛔ حارس «نفسي» المكرّر: لا يُحذف أحد، بل يُفتح بند مراجعة
+  // \u26D4 \u062D\u0627\u0631\u0633 \u00AB\u0646\u0641\u0633\u064A\u00BB \u0627\u0644\u0645\u0643\u0631\u0651\u0631: \u0644\u0627 \u064A\u064F\u062D\u0630\u0641 \u0623\u062D\u062F\u060C \u0628\u0644 \u064A\u064F\u0641\u062A\u062D \u0628\u0646\u062F \u0645\u0631\u0627\u062C\u0639\u0629
   let selfDuplicate = false;
   if (selfCount > 1) {
     selfDuplicate = true;
@@ -758,7 +758,7 @@ async function opBulkImport(uid, payload, env, claims) {
            replaced: replace, existing: existing, removedPersons: removedPersons, removedRelations: removedRelations };
 }
 
-/* ---------- 11) العمليّة: person.delete (شاهدة) ---------- */
+/* ---------- 11) \u0627\u0644\u0639\u0645\u0644\u064A\u0651\u0629: person.delete (\u0634\u0627\u0647\u062F\u0629) ---------- */
 async function opPersonDelete(uid, payload, env) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
@@ -771,7 +771,7 @@ async function opPersonDelete(uid, payload, env) {
   const ex = await fsGet(token, "groups/" + groupId + "/persons/" + pid);
   if (!ex) throw new Error("person not found");
   const now = new Date().toISOString();
-  // v39: صلاته تُشطب معه (كانت تبقى معلّقةً بشخصٍ محذوف)
+  // v39: \u0635\u0644\u0627\u062A\u0647 \u062A\u064F\u0634\u0637\u0628 \u0645\u0639\u0647 (\u0643\u0627\u0646\u062A \u062A\u0628\u0642\u0649 \u0645\u0639\u0644\u0651\u0642\u0629\u064B \u0628\u0634\u062E\u0635\u064D \u0645\u062D\u0630\u0648\u0641)
   const relW = [];
   try {
     const rs = [].concat(await fsQuerySub(token, "groups/" + groupId, "relations", [["from", "EQUAL", pid]], 200), await fsQuerySub(token, "groups/" + groupId, "relations", [["to", "EQUAL", pid]], 200));
@@ -789,7 +789,7 @@ async function opPersonDelete(uid, payload, env) {
   return { personId: pid, deleted: true };
 }
 
-/* ---------- 12) العمليّة: relation.remove (شاهدة) ---------- */
+/* ---------- 12) \u0627\u0644\u0639\u0645\u0644\u064A\u0651\u0629: relation.remove (\u0634\u0627\u0647\u062F\u0629) ---------- */
 async function opRelationRemove(uid, payload, env) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
@@ -810,7 +810,7 @@ async function opRelationRemove(uid, payload, env) {
   return { relationId: relId, deleted: true };
 }
 
-/* ---------- 13) العمليّة: relation.update (تغيير نوع صلةٍ في مكانها — إنهاء الزواج §٨-٥) ---------- */
+/* ---------- 13) \u0627\u0644\u0639\u0645\u0644\u064A\u0651\u0629: relation.update (\u062A\u063A\u064A\u064A\u0631 \u0646\u0648\u0639 \u0635\u0644\u0629\u064D \u0641\u064A \u0645\u0643\u0627\u0646\u0647\u0627 \u2014 \u0625\u0646\u0647\u0627\u0621 \u0627\u0644\u0632\u0648\u0627\u062C \u00A7\u0668-\u0665) ---------- */
 async function opRelationUpdate(uid, payload, env) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
@@ -837,7 +837,7 @@ async function opRelationUpdate(uid, payload, env) {
   return { relationId: relId, type: type, updated: true };
 }
 
-/* ---------- 14) my.groups — عائلات هذا الحساب (من الفهرس) ---------- */
+/* ---------- 14) my.groups \u2014 \u0639\u0627\u0626\u0644\u0627\u062A \u0647\u0630\u0627 \u0627\u0644\u062D\u0633\u0627\u0628 (\u0645\u0646 \u0627\u0644\u0641\u0647\u0631\u0633) ---------- */
 async function opMyGroups(uid, payload, env) {
   const sa = JSON.parse(env.SA_JSON);
   const token = await getAccessToken(sa);
@@ -845,21 +845,21 @@ async function opMyGroups(uid, payload, env) {
   const out = [];
   for (const d of docs) {
     const gid = d.name.split("/").pop();
-    // تحقّق حيّ من العضوية (قد تكون أُلغيت)
+    // \u062A\u062D\u0642\u0651\u0642 \u062D\u064A\u0651 \u0645\u0646 \u0627\u0644\u0639\u0636\u0648\u064A\u0629 (\u0642\u062F \u062A\u0643\u0648\u0646 \u0623\u064F\u0644\u063A\u064A\u062A)
     const m = await fsGet(token, "groups/" + gid + "/members/" + uid);
     if (!m) continue;
     const g = await fsGet(token, "groups/" + gid);
-    if (!g || fbool(g, "deleted")) continue;            // محذوفة
-    // عدٌّ لا قراءة: (الكلّ − المحذوف) بقراءتين بدل قراءة كلّ شخص
+    if (!g || fbool(g, "deleted")) continue;            // \u0645\u062D\u0630\u0648\u0641\u0629
+    // \u0639\u062F\u064C\u0651 \u0644\u0627 \u0642\u0631\u0627\u0621\u0629: (\u0627\u0644\u0643\u0644\u0651 \u2212 \u0627\u0644\u0645\u062D\u0630\u0648\u0641) \u0628\u0642\u0631\u0627\u0621\u062A\u064A\u0646 \u0628\u062F\u0644 \u0642\u0631\u0627\u0621\u0629 \u0643\u0644\u0651 \u0634\u062E\u0635
     const personCount = Math.max(0, (await fsCount(token, "groups/" + gid, "persons")) - (await fsCount(token, "groups/" + gid, "persons", ["deleted", true])));
     const created = g.fields && g.fields.createdTs && g.fields.createdTs.timestampValue;
-    out.push({ groupId: gid, name: fstr(g, "name") || fstr(d, "name") || "عائلتي", role: fstr(m, "role"),
+    out.push({ groupId: gid, name: fstr(g, "name") || fstr(d, "name") || "\u0639\u0627\u0626\u0644\u062A\u064A", role: fstr(m, "role"),
                personCount: personCount, createdTs: created || null });
   }
   return { groups: out };
 }
 
-/* ---------- 15) account.index — يفهرس مجموعاتٍ عضوٌ فيها سلفاً (ترقيةٌ لما رُفع قبل v9) ---------- */
+/* ---------- 15) account.index \u2014 \u064A\u0641\u0647\u0631\u0633 \u0645\u062C\u0645\u0648\u0639\u0627\u062A\u064D \u0639\u0636\u0648\u064C \u0641\u064A\u0647\u0627 \u0633\u0644\u0641\u0627\u064B (\u062A\u0631\u0642\u064A\u0629\u064C \u0644\u0645\u0627 \u0631\u064F\u0641\u0639 \u0642\u0628\u0644 v9) ---------- */
 async function opAccountIndex(uid, payload, env) {
   const sa = JSON.parse(env.SA_JSON);
   const token = await getAccessToken(sa);
@@ -867,7 +867,7 @@ async function opAccountIndex(uid, payload, env) {
   const now = new Date().toISOString(); const writes = []; const done = [];
   for (const gid of ids) {
     const m = await fsGet(token, "groups/" + gid + "/members/" + uid);
-    if (!m) continue;                       // ليس عضواً ⇒ لا فهرسة
+    if (!m) continue;                       // \u0644\u064A\u0633 \u0639\u0636\u0648\u0627\u064B \u21D2 \u0644\u0627 \u0641\u0647\u0631\u0633\u0629
     const g = await fsGet(token, "groups/" + gid);
     writes.push(indexWrite(uid, gid, fstr(g, "name"), fstr(m, "role") || "viewer", now));
     done.push(gid);
@@ -876,15 +876,15 @@ async function opAccountIndex(uid, payload, env) {
   return { indexed: done };
 }
 
-/* ---------- 16) account.adopt — نقل عضويّات هويّةٍ سابقة (مجهولة) إلى الحالية ----------
-   حين يرتبط حساب Google بهويّةٍ أخرى سلفاً، يدخل الجهاز بها؛ فيُقدِّم رمز هويّته
-   القديمة (برهان امتلاكها) لتُنسَخ عضويّاتها إلى الهويّة الحاليّة بنفس الأدوار. */
+/* ---------- 16) account.adopt \u2014 \u0646\u0642\u0644 \u0639\u0636\u0648\u064A\u0651\u0627\u062A \u0647\u0648\u064A\u0651\u0629\u064D \u0633\u0627\u0628\u0642\u0629 (\u0645\u062C\u0647\u0648\u0644\u0629) \u0625\u0644\u0649 \u0627\u0644\u062D\u0627\u0644\u064A\u0629 ----------
+   \u062D\u064A\u0646 \u064A\u0631\u062A\u0628\u0637 \u062D\u0633\u0627\u0628 Google \u0628\u0647\u0648\u064A\u0651\u0629\u064D \u0623\u062E\u0631\u0649 \u0633\u0644\u0641\u0627\u064B\u060C \u064A\u062F\u062E\u0644 \u0627\u0644\u062C\u0647\u0627\u0632 \u0628\u0647\u0627\u061B \u0641\u064A\u064F\u0642\u062F\u0650\u0651\u0645 \u0631\u0645\u0632 \u0647\u0648\u064A\u0651\u062A\u0647
+   \u0627\u0644\u0642\u062F\u064A\u0645\u0629 (\u0628\u0631\u0647\u0627\u0646 \u0627\u0645\u062A\u0644\u0627\u0643\u0647\u0627) \u0644\u062A\u064F\u0646\u0633\u064E\u062E \u0639\u0636\u0648\u064A\u0651\u0627\u062A\u0647\u0627 \u0625\u0644\u0649 \u0627\u0644\u0647\u0648\u064A\u0651\u0629 \u0627\u0644\u062D\u0627\u0644\u064A\u0651\u0629 \u0628\u0646\u0641\u0633 \u0627\u0644\u0623\u062F\u0648\u0627\u0631. */
 async function opAccountAdopt(uid, payload, env, claims) {
   const sa = JSON.parse(env.SA_JSON);
   const token = await getAccessToken(sa);
   const fromToken = payload && payload.fromToken;
   if (!fromToken) throw new Error("fromToken required");
-  const fromClaims = await verifyIdToken(fromToken);   // يثبت امتلاك الهويّة القديمة
+  const fromClaims = await verifyIdToken(fromToken);   // \u064A\u062B\u0628\u062A \u0627\u0645\u062A\u0644\u0627\u0643 \u0627\u0644\u0647\u0648\u064A\u0651\u0629 \u0627\u0644\u0642\u062F\u064A\u0645\u0629
   const fromUid = fromClaims.sub;
   if (fromUid === uid) return { adopted: [] };
   const ids = (payload && Array.isArray(payload.groupIds)) ? payload.groupIds.slice(0, 50) : [];
@@ -902,17 +902,17 @@ async function opAccountAdopt(uid, payload, env, claims) {
       fields: Object.assign({ role: { stringValue: role }, joinedTs: { timestampValue: now },
                 adoptedFrom: { stringValue: fromUid } }, memberIdFields(claims)) } });
     writes.push(indexWrite(uid, gid, fstr(g, "name"), keep ? fstr(mine, "role") : role, now));
-    // الهويّة القديمة لنفس الشخص: تُزال حتّى لا تظهر في «الأعضاء» عضواً ثانياً (أو مالكاً ثانياً)
+    // \u0627\u0644\u0647\u0648\u064A\u0651\u0629 \u0627\u0644\u0642\u062F\u064A\u0645\u0629 \u0644\u0646\u0641\u0633 \u0627\u0644\u0634\u062E\u0635: \u062A\u064F\u0632\u0627\u0644 \u062D\u062A\u0651\u0649 \u0644\u0627 \u062A\u0638\u0647\u0631 \u0641\u064A \u00AB\u0627\u0644\u0623\u0639\u0636\u0627\u0621\u00BB \u0639\u0636\u0648\u0627\u064B \u062B\u0627\u0646\u064A\u0627\u064B (\u0623\u0648 \u0645\u0627\u0644\u0643\u0627\u064B \u062B\u0627\u0646\u064A\u0627\u064B)
     writes.push({ delete: DOC_ROOT + "/groups/" + gid + "/members/" + fromUid });
     writes.push({ delete: DOC_ROOT + "/accounts/" + fromUid + "/groups/" + gid });
     adopted.push(gid);
   }
   if (writes.length) await commitChunks(token, writes);
-  for (const gid of adopted.slice(0, 8)) { try { await famChatSync(token, gid); } catch (e) {} }   // v39: محادثة العائلة تعرف هويّتي الجديدة فوراً
+  for (const gid of adopted.slice(0, 8)) { try { await famChatSync(token, gid); } catch (e) {} }   // v39: \u0645\u062D\u0627\u062F\u062B\u0629 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u062A\u0639\u0631\u0641 \u0647\u0648\u064A\u0651\u062A\u064A \u0627\u0644\u062C\u062F\u064A\u062F\u0629 \u0641\u0648\u0631\u0627\u064B
   return { adopted: adopted, fromUid: fromUid };
 }
 
-/* قيمة Firestore REST → JS (أرقام فقط لما نحتاجه هنا) */
+/* \u0642\u064A\u0645\u0629 Firestore REST \u2192 JS (\u0623\u0631\u0642\u0627\u0645 \u0641\u0642\u0637 \u0644\u0645\u0627 \u0646\u062D\u062A\u0627\u062C\u0647 \u0647\u0646\u0627) */
 function fsNum(v) {
   if (!v) return null;
   if (v.integerValue !== undefined) return Number(v.integerValue);
@@ -920,9 +920,9 @@ function fsNum(v) {
   return null;
 }
 
-/* ---------- 17) contacts.sync — «آخر تواصل» الخاصّ بالمستخدم (بين أجهزته فقط) ----------
+/* ---------- 17) contacts.sync \u2014 \u00AB\u0622\u062E\u0631 \u062A\u0648\u0627\u0635\u0644\u00BB \u0627\u0644\u062E\u0627\u0635\u0651 \u0628\u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 (\u0628\u064A\u0646 \u0623\u062C\u0647\u0632\u062A\u0647 \u0641\u0642\u0637) ----------
    accounts/{uid}/contacts/{gid} = { last: { personId: msTimestamp } }
-   الدمج = الأحدث لكلّ شخص (لا يُمحى تواصلٌ سُجّل على أيّ جهاز). أيّ عضوٍ (حتّى المشاهد). */
+   \u0627\u0644\u062F\u0645\u062C = \u0627\u0644\u0623\u062D\u062F\u062B \u0644\u0643\u0644\u0651 \u0634\u062E\u0635 (\u0644\u0627 \u064A\u064F\u0645\u062D\u0649 \u062A\u0648\u0627\u0635\u0644\u064C \u0633\u064F\u062C\u0651\u0644 \u0639\u0644\u0649 \u0623\u064A\u0651 \u062C\u0647\u0627\u0632). \u0623\u064A\u0651 \u0639\u0636\u0648\u064D (\u062D\u062A\u0651\u0649 \u0627\u0644\u0645\u0634\u0627\u0647\u062F). */
 async function opContactsSync(uid, payload, env) {
   const sa = JSON.parse(env.SA_JSON);
   const token = await getAccessToken(sa);
@@ -949,9 +949,9 @@ async function opContactsSync(uid, payload, env) {
   return { last: merged, changed: changed };
 }
 
-/* ---------- 18) group.delete — المالك يحذف العائلة من الخادم ----------
-   حذفٌ ناعم: تُوسَم العائلة محذوفة، وتُزال كلّ العضويّات وفهارسها ⇒ لا يقرؤها أحد بعدها
-   (قواعد الأمان تشترط العضوية)، ولا تقبل روابط دعوتها. النسخ المحلّية على الأجهزة لا تُمسّ. */
+/* ---------- 18) group.delete \u2014 \u0627\u0644\u0645\u0627\u0644\u0643 \u064A\u062D\u0630\u0641 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u0645\u0646 \u0627\u0644\u062E\u0627\u062F\u0645 ----------
+   \u062D\u0630\u0641\u064C \u0646\u0627\u0639\u0645: \u062A\u064F\u0648\u0633\u064E\u0645 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u0645\u062D\u0630\u0648\u0641\u0629\u060C \u0648\u062A\u064F\u0632\u0627\u0644 \u0643\u0644\u0651 \u0627\u0644\u0639\u0636\u0648\u064A\u0651\u0627\u062A \u0648\u0641\u0647\u0627\u0631\u0633\u0647\u0627 \u21D2 \u0644\u0627 \u064A\u0642\u0631\u0624\u0647\u0627 \u0623\u062D\u062F \u0628\u0639\u062F\u0647\u0627
+   (\u0642\u0648\u0627\u0639\u062F \u0627\u0644\u0623\u0645\u0627\u0646 \u062A\u0634\u062A\u0631\u0637 \u0627\u0644\u0639\u0636\u0648\u064A\u0629)\u060C \u0648\u0644\u0627 \u062A\u0642\u0628\u0644 \u0631\u0648\u0627\u0628\u0637 \u062F\u0639\u0648\u062A\u0647\u0627. \u0627\u0644\u0646\u0633\u062E \u0627\u0644\u0645\u062D\u0644\u0651\u064A\u0629 \u0639\u0644\u0649 \u0627\u0644\u0623\u062C\u0647\u0632\u0629 \u0644\u0627 \u062A\u064F\u0645\u0633\u0651. */
 async function opGroupDelete(uid, payload, env) {
   const sa = JSON.parse(env.SA_JSON);
   const token = await getAccessToken(sa);
@@ -969,7 +969,7 @@ async function opGroupDelete(uid, payload, env) {
     writes.push({ delete: d.name });
     writes.push({ delete: DOC_ROOT + "/accounts/" + mu + "/groups/" + gid });
   }
-  // v39: المجموعات الفرعيّة (الأشخاص، الصلات، الصور…) كانت تبقى إلى الأبد — تُحذف بالـCron
+  // v39: \u0627\u0644\u0645\u062C\u0645\u0648\u0639\u0627\u062A \u0627\u0644\u0641\u0631\u0639\u064A\u0651\u0629 (\u0627\u0644\u0623\u0634\u062E\u0627\u0635\u060C \u0627\u0644\u0635\u0644\u0627\u062A\u060C \u0627\u0644\u0635\u0648\u0631\u2026) \u0643\u0627\u0646\u062A \u062A\u0628\u0642\u0649 \u0625\u0644\u0649 \u0627\u0644\u0623\u0628\u062F \u2014 \u062A\u064F\u062D\u0630\u0641 \u0628\u0627\u0644\u0640Cron
   const pj = "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   writes.push({ update: { name: DOC_ROOT + "/purge/" + pj, fields: { kind: { stringValue: "family" }, uid: { stringValue: "__deleted__" }, gid: { stringValue: gid }, cid: { nullValue: null }, ts: { integerValue: String(Date.now()) } } } });
   await commitChunks(token, writes);
@@ -977,7 +977,7 @@ async function opGroupDelete(uid, payload, env) {
   return { groupId: gid, deleted: true, membersRemoved: members.length };
 }
 
-/* ---------- 19) group.leave — غير المالك يغادر العائلة ---------- */
+/* ---------- 19) group.leave \u2014 \u063A\u064A\u0631 \u0627\u0644\u0645\u0627\u0644\u0643 \u064A\u063A\u0627\u062F\u0631 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 ---------- */
 async function opGroupLeave(uid, payload, env) {
   const sa = JSON.parse(env.SA_JSON);
   const token = await getAccessToken(sa);
@@ -985,7 +985,7 @@ async function opGroupLeave(uid, payload, env) {
   if (!gid) throw new Error("groupId required");
   const me = await fsGet(token, "groups/" + gid + "/members/" + uid);
   if (!me) return { groupId: gid, left: true };
-  if (fstr(me, "role") === "owner") throw new Error("the owner can't leave — delete the family instead");
+  if (fstr(me, "role") === "owner") throw new Error("the owner can't leave \u2014 delete the family instead");
   await fsCommit(token, [
     { delete: DOC_ROOT + "/groups/" + gid + "/members/" + uid },
     { delete: DOC_ROOT + "/accounts/" + uid + "/groups/" + gid },
@@ -994,7 +994,7 @@ async function opGroupLeave(uid, payload, env) {
   return { groupId: gid, left: true };
 }
 
-/* ---------- 20) review.list — المراجعات المعلّقة لعائلة (المالك والمحرّر) ---------- */
+/* ---------- 20) review.list \u2014 \u0627\u0644\u0645\u0631\u0627\u062C\u0639\u0627\u062A \u0627\u0644\u0645\u0639\u0644\u0651\u0642\u0629 \u0644\u0639\u0627\u0626\u0644\u0629 (\u0627\u0644\u0645\u0627\u0644\u0643 \u0648\u0627\u0644\u0645\u062D\u0631\u0651\u0631) ---------- */
 async function opReviewList(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const groupId = payload && payload.groupId;
@@ -1008,9 +1008,9 @@ async function opReviewList(uid, payload, env) {
   return { items: items };
 }
 
-/* ---------- 21) photo.set — صورة شخص (مصغَّرة على الجهاز) في groups/{gid}/photos/{pid} ----------
-   خدمة التخزين تتطلّب خطّة Blaze (محجوبة للسودان) ⇒ الصورة المصغَّرة نصّاً في Firestore. */
-/* معرّفٌ آمن كجزءٍ من مسار Firestore: بلا «/» ولا «..» */
+/* ---------- 21) photo.set \u2014 \u0635\u0648\u0631\u0629 \u0634\u062E\u0635 (\u0645\u0635\u063A\u064E\u0651\u0631\u0629 \u0639\u0644\u0649 \u0627\u0644\u062C\u0647\u0627\u0632) \u0641\u064A groups/{gid}/photos/{pid} ----------
+   \u062E\u062F\u0645\u0629 \u0627\u0644\u062A\u062E\u0632\u064A\u0646 \u062A\u062A\u0637\u0644\u0651\u0628 \u062E\u0637\u0651\u0629 Blaze (\u0645\u062D\u062C\u0648\u0628\u0629 \u0644\u0644\u0633\u0648\u062F\u0627\u0646) \u21D2 \u0627\u0644\u0635\u0648\u0631\u0629 \u0627\u0644\u0645\u0635\u063A\u064E\u0651\u0631\u0629 \u0646\u0635\u0651\u0627\u064B \u0641\u064A Firestore. */
+/* \u0645\u0639\u0631\u0651\u0641\u064C \u0622\u0645\u0646 \u0643\u062C\u0632\u0621\u064D \u0645\u0646 \u0645\u0633\u0627\u0631 Firestore: \u0628\u0644\u0627 \u00AB/\u00BB \u0648\u0644\u0627 \u00AB..\u00BB */
 function segOk(x) { return typeof x === "string" && x.length > 0 && x.length <= 200 && x.indexOf("/") < 0 && x !== "." && x !== ".."; }
 async function opPhotoSet(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -1020,7 +1020,7 @@ async function opPhotoSet(uid, payload, env) {
   const name = DOC_ROOT + "/groups/" + groupId + "/photos/" + pid;
   const data = payload.data;
   if (data == null) { await fsCommit(token, [{ delete: name }]); return { personId: pid, removed: true }; }
-  const isUrl = typeof data === "string" && /^https:\/\/[^\s"'<>]+$/i.test(data) && data.length <= 2048;   // صورةٌ من الإنترنت: الرابط كما هو
+  const isUrl = typeof data === "string" && /^https:\/\/[^\s"'<>]+$/i.test(data) && data.length <= 2048;   // \u0635\u0648\u0631\u0629\u064C \u0645\u0646 \u0627\u0644\u0625\u0646\u062A\u0631\u0646\u062A: \u0627\u0644\u0631\u0627\u0628\u0637 \u0643\u0645\u0627 \u0647\u0648
   if (typeof data !== "string" || !(isUrl || /^data:image\/(jpeg|png|webp);base64,/.test(data))) throw new Error("bad image");
   if (data.length > 400000) throw new Error("image too large");
   await fsCommit(token, [{ update: { name: name, fields: { data: { stringValue: data },
@@ -1028,7 +1028,7 @@ async function opPhotoSet(uid, payload, env) {
   return { personId: pid, saved: true, size: data.length };
 }
 
-/* ---------- 22) event.set / event.delete — أحداث العائلة (مشتركة مع أعضائها) ---------- */
+/* ---------- 22) event.set / event.delete \u2014 \u0623\u062D\u062F\u0627\u062B \u0627\u0644\u0639\u0627\u0626\u0644\u0629 (\u0645\u0634\u062A\u0631\u0643\u0629 \u0645\u0639 \u0623\u0639\u0636\u0627\u0626\u0647\u0627) ---------- */
 async function opEventSet(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const groupId = payload && payload.groupId, eid = payload && payload.eventId;
@@ -1050,7 +1050,7 @@ async function opEventDelete(uid, payload, env) {
   return { eventId: eid, deleted: true };
 }
 
-/* محرّرٌ/مالك دائماً؛ والمشاهد إن سمح المالك (allowMemberEvents) — ويعدّل/يحذف ما أضافه هو فقط */
+/* \u0645\u062D\u0631\u0651\u0631\u064C/\u0645\u0627\u0644\u0643 \u062F\u0627\u0626\u0645\u0627\u064B\u061B \u0648\u0627\u0644\u0645\u0634\u0627\u0647\u062F \u0625\u0646 \u0633\u0645\u062D \u0627\u0644\u0645\u0627\u0644\u0643 (allowMemberEvents) \u2014 \u0648\u064A\u0639\u062F\u0651\u0644/\u064A\u062D\u0630\u0641 \u0645\u0627 \u0623\u0636\u0627\u0641\u0647 \u0647\u0648 \u0641\u0642\u0637 */
 async function requireEventWriter(token, groupId, eid, uid) {
   const me = await fsGet(token, "groups/" + groupId + "/members/" + uid);
   const role = fstr(me, "role");
@@ -1063,8 +1063,8 @@ async function requireEventWriter(token, groupId, eid, uid) {
   return role;
 }
 
-/* ---------- 24) الأعضاء: member.hello · member.setRole · member.remove · group.settings ---------- */
-// يحدّث اسم المستخدم في عائلاته (يتغيّر حين يربط حساب Google). لا يُنشئ عضويّة.
+/* ---------- 24) \u0627\u0644\u0623\u0639\u0636\u0627\u0621: member.hello \u00B7 member.setRole \u00B7 member.remove \u00B7 group.settings ---------- */
+// \u064A\u062D\u062F\u0651\u062B \u0627\u0633\u0645 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u0641\u064A \u0639\u0627\u0626\u0644\u0627\u062A\u0647 (\u064A\u062A\u063A\u064A\u0651\u0631 \u062D\u064A\u0646 \u064A\u0631\u0628\u0637 \u062D\u0633\u0627\u0628 Google). \u0644\u0627 \u064A\u064F\u0646\u0634\u0626 \u0639\u0636\u0648\u064A\u0651\u0629.
 async function opMemberHello(uid, payload, env, claims) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const ids = (payload && Array.isArray(payload.groupIds)) ? payload.groupIds.filter(segOk).slice(0, 30) : [];
@@ -1080,10 +1080,10 @@ async function opMemberHello(uid, payload, env, claims) {
     updated.push(gid);
   }
   if (writes.length) await fsCommit(token, writes);
-  for (const gid of updated.slice(0, 6)) { try { await famChatSync(token, gid); } catch (e) {} }   // v39: اسمي في محادثة العائلة
+  for (const gid of updated.slice(0, 6)) { try { await famChatSync(token, gid); } catch (e) {} }   // v39: \u0627\u0633\u0645\u064A \u0641\u064A \u0645\u062D\u0627\u062F\u062B\u0629 \u0627\u0644\u0639\u0627\u0626\u0644\u0629
   return { updated };
 }
-// v39: المالك يرفع المنع عن عضوٍ أزاله (ليعود بالرابط)
+// v39: \u0627\u0644\u0645\u0627\u0644\u0643 \u064A\u0631\u0641\u0639 \u0627\u0644\u0645\u0646\u0639 \u0639\u0646 \u0639\u0636\u0648\u064D \u0623\u0632\u0627\u0644\u0647 (\u0644\u064A\u0639\u0648\u062F \u0628\u0627\u0644\u0631\u0627\u0628\u0637)
 async function opMemberUnban(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const gid = payload && payload.groupId, target = payload && payload.uid;
@@ -1092,7 +1092,7 @@ async function opMemberUnban(uid, payload, env) {
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/groups/" + gid }, updateMask: { fieldPaths: [] }, updateTransforms: [{ fieldPath: "banned", removeAllFromArray: { values: [{ stringValue: target }] } }] }]);
   return { groupId: gid, uid: target, unbanned: true };
 }
-// v66 (C114): قائمة المُزالين للمالك — كان من أُزيل مرّةً لا يعود بأيّ رابطٍ جديد («تعذّر الانضمام») ولا زرّ لرفع المنع
+// v66 (C114): \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0645\u064F\u0632\u0627\u0644\u064A\u0646 \u0644\u0644\u0645\u0627\u0644\u0643 \u2014 \u0643\u0627\u0646 \u0645\u0646 \u0623\u064F\u0632\u064A\u0644 \u0645\u0631\u0651\u0629\u064B \u0644\u0627 \u064A\u0639\u0648\u062F \u0628\u0623\u064A\u0651 \u0631\u0627\u0628\u0637\u064D \u062C\u062F\u064A\u062F (\u00AB\u062A\u0639\u0630\u0651\u0631 \u0627\u0644\u0627\u0646\u0636\u0645\u0627\u0645\u00BB) \u0648\u0644\u0627 \u0632\u0631\u0651 \u0644\u0631\u0641\u0639 \u0627\u0644\u0645\u0646\u0639
 async function opMemberBanned(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const gid = payload && payload.groupId;
@@ -1108,9 +1108,9 @@ async function opMemberBanned(uid, payload, env) {
   }));
   return { banned: out };
 }
-// v62 (C106): ربط شخصٍ في الشجرة بحساب سوا — المرحلة ١: «هذا أنا» على الخادم (groups/{g}/members/{uid}.personId)
-//   العضو يربط نفسه بشخص (أو يفكّ الربط بـ personId:null) · المالك يفكّ ربط غيره إن كان خطأً (target).
-//   شخصٌ واحد لكلّ حساب، وحسابٌ واحد لكلّ شخص في الشجرة نفسها.
+// v62 (C106): \u0631\u0628\u0637 \u0634\u062E\u0635\u064D \u0641\u064A \u0627\u0644\u0634\u062C\u0631\u0629 \u0628\u062D\u0633\u0627\u0628 \u0633\u0648\u0627 \u2014 \u0627\u0644\u0645\u0631\u062D\u0644\u0629 \u0661: \u00AB\u0647\u0630\u0627 \u0623\u0646\u0627\u00BB \u0639\u0644\u0649 \u0627\u0644\u062E\u0627\u062F\u0645 (groups/{g}/members/{uid}.personId)
+//   \u0627\u0644\u0639\u0636\u0648 \u064A\u0631\u0628\u0637 \u0646\u0641\u0633\u0647 \u0628\u0634\u062E\u0635 (\u0623\u0648 \u064A\u0641\u0643\u0651 \u0627\u0644\u0631\u0628\u0637 \u0628\u0640 personId:null) \u00B7 \u0627\u0644\u0645\u0627\u0644\u0643 \u064A\u0641\u0643\u0651 \u0631\u0628\u0637 \u063A\u064A\u0631\u0647 \u0625\u0646 \u0643\u0627\u0646 \u062E\u0637\u0623\u064B (target).
+//   \u0634\u062E\u0635\u064C \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u062D\u0633\u0627\u0628\u060C \u0648\u062D\u0633\u0627\u0628\u064C \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u0634\u062E\u0635 \u0641\u064A \u0627\u0644\u0634\u062C\u0631\u0629 \u0646\u0641\u0633\u0647\u0627.
 async function opFamClaim(uid, payload, env) {
   if (!codeRate(uid, "famclaim", 30)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -1120,10 +1120,10 @@ async function opFamClaim(uid, payload, env) {
   const me = await fsGet(token, "groups/" + gid + "/members/" + uid);
   if (!me) throw new Error("not a member");
   const myRole = fstr(me, "role");
-  // C156: التعريف من داخل العائلة — المشاهد لا يربط نفسه بشخصٍ في الشجرة (كان يكفي اختيار اسمٍ أو تشابهه)؛
-  //       يربطه محرّرٌ بطلب «هل هذا أنت؟» أو بدعوةٍ باسمه. فكّ ربط نفسه متاحٌ للجميع.
+  // C156: \u0627\u0644\u062A\u0639\u0631\u064A\u0641 \u0645\u0646 \u062F\u0627\u062E\u0644 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u2014 \u0627\u0644\u0645\u0634\u0627\u0647\u062F \u0644\u0627 \u064A\u0631\u0628\u0637 \u0646\u0641\u0633\u0647 \u0628\u0634\u062E\u0635\u064D \u0641\u064A \u0627\u0644\u0634\u062C\u0631\u0629 (\u0643\u0627\u0646 \u064A\u0643\u0641\u064A \u0627\u062E\u062A\u064A\u0627\u0631 \u0627\u0633\u0645\u064D \u0623\u0648 \u062A\u0634\u0627\u0628\u0647\u0647)\u061B
+  //       \u064A\u0631\u0628\u0637\u0647 \u0645\u062D\u0631\u0651\u0631\u064C \u0628\u0637\u0644\u0628 \u00AB\u0647\u0644 \u0647\u0630\u0627 \u0623\u0646\u062A\u061F\u00BB \u0623\u0648 \u0628\u062F\u0639\u0648\u0629\u064D \u0628\u0627\u0633\u0645\u0647. \u0641\u0643\u0651 \u0631\u0628\u0637 \u0646\u0641\u0633\u0647 \u0645\u062A\u0627\u062D\u064C \u0644\u0644\u062C\u0645\u064A\u0639.
   if (target === uid && pid !== null && myRole !== "owner" && myRole !== "editor") throw new Error("ask_family");
-  if (target !== uid) {   // فكّ ربط غيري: للمالك والمحرّر، وإلى لا شيء فقط (C156: كان للمالك وحده)
+  if (target !== uid) {   // \u0641\u0643\u0651 \u0631\u0628\u0637 \u063A\u064A\u0631\u064A: \u0644\u0644\u0645\u0627\u0644\u0643 \u0648\u0627\u0644\u0645\u062D\u0631\u0651\u0631\u060C \u0648\u0625\u0644\u0649 \u0644\u0627 \u0634\u064A\u0621 \u0641\u0642\u0637 (C156: \u0643\u0627\u0646 \u0644\u0644\u0645\u0627\u0644\u0643 \u0648\u062D\u062F\u0647)
     if ((myRole !== "owner" && myRole !== "editor") || pid !== null) throw new Error("only the owner can unlink others");
     const t0 = await fsGet(token, "groups/" + gid + "/members/" + target);
     if (!t0) throw new Error("not a member");
@@ -1140,8 +1140,8 @@ async function opFamClaim(uid, payload, env) {
   stat("fam:claim");
   return { personId: pid };
 }
-// v63 (C107): المرحلة ٢ — المحرّر يربط قريباً بحسابه (برمز سوا أو من جهات اتّصاله) ⇒ طلب موافقة يصل صاحبَ الحساب إشعاراً
-//   famreq/{gid~pid~uid} · القبول يضمّه عضواً «مشاهداً» (إن لم يكن) ويربطه بالشخص · الرفض يحذف الطلب. لا ربط بلا موافقة.
+// v63 (C107): \u0627\u0644\u0645\u0631\u062D\u0644\u0629 \u0662 \u2014 \u0627\u0644\u0645\u062D\u0631\u0651\u0631 \u064A\u0631\u0628\u0637 \u0642\u0631\u064A\u0628\u0627\u064B \u0628\u062D\u0633\u0627\u0628\u0647 (\u0628\u0631\u0645\u0632 \u0633\u0648\u0627 \u0623\u0648 \u0645\u0646 \u062C\u0647\u0627\u062A \u0627\u062A\u0651\u0635\u0627\u0644\u0647) \u21D2 \u0637\u0644\u0628 \u0645\u0648\u0627\u0641\u0642\u0629 \u064A\u0635\u0644 \u0635\u0627\u062D\u0628\u064E \u0627\u0644\u062D\u0633\u0627\u0628 \u0625\u0634\u0639\u0627\u0631\u0627\u064B
+//   famreq/{gid~pid~uid} \u00B7 \u0627\u0644\u0642\u0628\u0648\u0644 \u064A\u0636\u0645\u0651\u0647 \u0639\u0636\u0648\u0627\u064B \u00AB\u0645\u0634\u0627\u0647\u062F\u0627\u064B\u00BB (\u0625\u0646 \u0644\u0645 \u064A\u0643\u0646) \u0648\u064A\u0631\u0628\u0637\u0647 \u0628\u0627\u0644\u0634\u062E\u0635 \u00B7 \u0627\u0644\u0631\u0641\u0636 \u064A\u062D\u0630\u0641 \u0627\u0644\u0637\u0644\u0628. \u0644\u0627 \u0631\u0628\u0637 \u0628\u0644\u0627 \u0645\u0648\u0627\u0641\u0642\u0629.
 const FAMREQ_TTL = 14 * 86400000;
 function famReqId(gid, pid, u) { return gid + "~" + pid + "~" + u; }
 async function opFamLinkReq(uid, payload, env, claims, ctx) {
@@ -1154,13 +1154,13 @@ async function opFamLinkReq(uid, payload, env, claims, ctx) {
   if (!g || fbool(g, "deleted")) throw new Error("family not found");
   if (!pd || fbool(pd, "deleted")) throw new Error("person not found");
   let t = null;
-  if (p.code) t = await codeTarget(token, p.code);   // يحترم «إخفاء رمزي»
-  else if (p.byPhone) {   // v64 (C109): الرقم المحفوظ للشخص في الشجرة نفسها — لا رقمٌ يرسله العميل
+  if (p.code) t = await codeTarget(token, p.code);   // \u064A\u062D\u062A\u0631\u0645 \u00AB\u0625\u062E\u0641\u0627\u0621 \u0631\u0645\u0632\u064A\u00BB
+  else if (p.byPhone) {   // v64 (C109): \u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u0645\u062D\u0641\u0648\u0638 \u0644\u0644\u0634\u062E\u0635 \u0641\u064A \u0627\u0644\u0634\u062C\u0631\u0629 \u0646\u0641\u0633\u0647\u0627 \u2014 \u0644\u0627 \u0631\u0642\u0645\u064C \u064A\u0631\u0633\u0644\u0647 \u0627\u0644\u0639\u0645\u064A\u0644
     t = await phoneOwner(token, personPhone(pd));
     if (!t) return { found: false };
   }
   else if (p.uid && segOk(String(p.uid))) {
-    // جهة اتّصال، أو عضوٌ في العائلة نفسها (من شاشة الأعضاء)
+    // \u062C\u0647\u0629 \u0627\u062A\u0651\u0635\u0627\u0644\u060C \u0623\u0648 \u0639\u0636\u0648\u064C \u0641\u064A \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u0646\u0641\u0633\u0647\u0627 (\u0645\u0646 \u0634\u0627\u0634\u0629 \u0627\u0644\u0623\u0639\u0636\u0627\u0621)
     const okRel = (await sharesContact(token, uid, String(p.uid))) || !!(await fsGet(token, "groups/" + gid + "/members/" + String(p.uid)).catch(() => null));
     if (!okRel) throw new Error("not a contact");
     const acc = await fsGet(token, "accounts/" + p.uid).catch(() => null);
@@ -1169,30 +1169,30 @@ async function opFamLinkReq(uid, payload, env, claims, ctx) {
   if (!t) return { found: false };
   if (t.uid === uid) throw new Error("use this is me");
   const ms = await fsList(token, "groups/" + gid + "/members");
-  // C156: «تغيير الحساب المربوط» (غيّر قريبك حسابه أو رقمه) — الربط القديم يبقى حتّى يوافق صاحب الحساب الجديد
+  // C156: \u00AB\u062A\u063A\u064A\u064A\u0631 \u0627\u0644\u062D\u0633\u0627\u0628 \u0627\u0644\u0645\u0631\u0628\u0648\u0637\u00BB (\u063A\u064A\u0651\u0631 \u0642\u0631\u064A\u0628\u0643 \u062D\u0633\u0627\u0628\u0647 \u0623\u0648 \u0631\u0642\u0645\u0647) \u2014 \u0627\u0644\u0631\u0628\u0637 \u0627\u0644\u0642\u062F\u064A\u0645 \u064A\u0628\u0642\u0649 \u062D\u062A\u0651\u0649 \u064A\u0648\u0627\u0641\u0642 \u0635\u0627\u062D\u0628 \u0627\u0644\u062D\u0633\u0627\u0628 \u0627\u0644\u062C\u062F\u064A\u062F
   const holder = ms.find(d => fstr(d, "personId") === pid);
   if (holder && holder.name.split("/").pop() === t.uid) throw new Error("already this account");
   if (holder && !p.replace) throw new Error("person taken");
   const tm = ms.find(d => d.name.split("/").pop() === t.uid);
   if (tm && fstr(tm, "personId")) throw new Error("already linked");
   if (fsArr(g, "banned").indexOf(t.uid) >= 0) throw new Error("removed from this family");
-  // من حظرني: لا يصله شيء ولا أخبر المرسل
+  // \u0645\u0646 \u062D\u0638\u0631\u0646\u064A: \u0644\u0627 \u064A\u0635\u0644\u0647 \u0634\u064A\u0621 \u0648\u0644\u0627 \u0623\u062E\u0628\u0631 \u0627\u0644\u0645\u0631\u0633\u0644
   if (await blockedBy(token, t.uid, uid).catch(() => false)) return { sent: true, name: t.name || null };
   const me = await myName(token, uid, claims), now = Date.now();
-  const pname = fstr(pd, "local_name") || "", gname = fstr(g, "name") || "عائلتي";
+  const pname = fstr(pd, "local_name") || "", gname = fstr(g, "name") || "\u0639\u0627\u0626\u0644\u062A\u064A";
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/famreq/" + famReqId(gid, pid, t.uid), fields: {
     gid: { stringValue: gid }, pid: { stringValue: pid }, uid: { stringValue: t.uid }, by: { stringValue: uid },
     byName: { stringValue: String(me || "").slice(0, 80) }, gname: { stringValue: gname.slice(0, 80) }, pname: { stringValue: pname.slice(0, 80) },
     replace: { booleanValue: !!holder }, ts: { integerValue: String(now) } } } }]);
-  const job = pushTo(token, [t.uid], strData({ t: "famreq", title: "طلب ربط في شجرة العائلة",
-    body: (me || "قريبك") + " يقول إنك «" + pname + "» في شجرة «" + gname + "» — هل هذا أنت؟", ts: now })).catch(e => console.log("push:", e && e.message));
+  const job = pushTo(token, [t.uid], strData({ t: "famreq", title: "\u0637\u0644\u0628 \u0631\u0628\u0637 \u0641\u064A \u0634\u062C\u0631\u0629 \u0627\u0644\u0639\u0627\u0626\u0644\u0629",
+    body: (me || "\u0642\u0631\u064A\u0628\u0643") + " \u064A\u0642\u0648\u0644 \u0625\u0646\u0643 \u00AB" + pname + "\u00BB \u0641\u064A \u0634\u062C\u0631\u0629 \u00AB" + gname + "\u00BB \u2014 \u0647\u0644 \u0647\u0630\u0627 \u0623\u0646\u062A\u061F", ts: now })).catch(e => console.log("push:", e && e.message));
   if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
   await sigTo(token, [t.uid], "famreq");
   stat("fam:linkreq");
   return { sent: true, name: t.name || null };
 }
-// v64 (C109): المرحلة ٤ — اقتراح الربط بالأرقام الموثَّقة. يُطابَق رقم الشخص المحفوظ في الشجرة (contacts.phone)
-//   مع phones/{رقم} لحسابٍ موثَّق الرقم ويقبل الإيجاد (findable) — بالقواعد نفسها لـ find.phone. للمحرّرين فقط.
+// v64 (C109): \u0627\u0644\u0645\u0631\u062D\u0644\u0629 \u0664 \u2014 \u0627\u0642\u062A\u0631\u0627\u062D \u0627\u0644\u0631\u0628\u0637 \u0628\u0627\u0644\u0623\u0631\u0642\u0627\u0645 \u0627\u0644\u0645\u0648\u062B\u064E\u0651\u0642\u0629. \u064A\u064F\u0637\u0627\u0628\u064E\u0642 \u0631\u0642\u0645 \u0627\u0644\u0634\u062E\u0635 \u0627\u0644\u0645\u062D\u0641\u0648\u0638 \u0641\u064A \u0627\u0644\u0634\u062C\u0631\u0629 (contacts.phone)
+//   \u0645\u0639 phones/{\u0631\u0642\u0645} \u0644\u062D\u0633\u0627\u0628\u064D \u0645\u0648\u062B\u064E\u0651\u0642 \u0627\u0644\u0631\u0642\u0645 \u0648\u064A\u0642\u0628\u0644 \u0627\u0644\u0625\u064A\u062C\u0627\u062F (findable) \u2014 \u0628\u0627\u0644\u0642\u0648\u0627\u0639\u062F \u0646\u0641\u0633\u0647\u0627 \u0644\u0640 find.phone. \u0644\u0644\u0645\u062D\u0631\u0651\u0631\u064A\u0646 \u0641\u0642\u0637.
 function personPhone(pd) {
   try { const c = pd && pd.fields && pd.fields.contacts && pd.fields.contacts.mapValue && pd.fields.contacts.mapValue.fields; const v = c && c.phone; return cleanPhone(v && (v.stringValue || v.integerValue)); } catch (e) { return null; }
 }
@@ -1258,10 +1258,10 @@ async function opFamLinkRespond(uid, payload, env, claims) {
   const ms = await fsList(token, "groups/" + gid + "/members");
   const old = ms.filter(d => fstr(d, "personId") === pid && d.name.split("/").pop() !== uid);
   if (old.length && !fbool(rq, "replace")) throw new Error("person taken");
-  const gname = fstr(g, "name") || "عائلتي", nowIso = new Date().toISOString();
+  const gname = fstr(g, "name") || "\u0639\u0627\u0626\u0644\u062A\u064A", nowIso = new Date().toISOString();
   const mine = ms.find(d => d.name.split("/").pop() === uid);
   const role = mine ? fstr(mine, "role") : "viewer";
-  const w = old.map(d => ({ update: { name: d.name, fields: {} }, updateMask: { fieldPaths: ["personId", "personTs"] } }));   // C156: يُفكّ الحساب القديم
+  const w = old.map(d => ({ update: { name: d.name, fields: {} }, updateMask: { fieldPaths: ["personId", "personTs"] } }));   // C156: \u064A\u064F\u0641\u0643\u0651 \u0627\u0644\u062D\u0633\u0627\u0628 \u0627\u0644\u0642\u062F\u064A\u0645
   if (!mine) {
     w.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + uid,
       fields: Object.assign({ role: { stringValue: "viewer" }, joinedTs: { timestampValue: nowIso }, invitedBy: { stringValue: fstr(rq, "by") },
@@ -1275,7 +1275,7 @@ async function opFamLinkRespond(uid, payload, env, claims) {
   if (!mine) { try { await famChatSync(token, gid); } catch (e) {} }
   const by = fstr(rq, "by");
   if (by) {
-    await pushTo(token, [by], strData({ t: "famok", title: "تمّ الربط ✓", body: (await myName(token, uid, claims) || "قريبك") + " أكّد أنّه «" + (fstr(pd, "local_name") || "") + "» في «" + gname + "»", ts: Date.now() })).catch(() => {});
+    await pushTo(token, [by], strData({ t: "famok", title: "\u062A\u0645\u0651 \u0627\u0644\u0631\u0628\u0637 \u2713", body: (await myName(token, uid, claims) || "\u0642\u0631\u064A\u0628\u0643") + " \u0623\u0643\u0651\u062F \u0623\u0646\u0651\u0647 \u00AB" + (fstr(pd, "local_name") || "") + "\u00BB \u0641\u064A \u00AB" + gname + "\u00BB", ts: Date.now() })).catch(() => {});
   }
   stat("fam:linkok");
   return { ok: true, groupId: gid, name: gname, role: role, personId: pid, joined: !mine };
@@ -1314,9 +1314,9 @@ async function opMemberRemove(uid, payload, env) {
   await fsCommit(token, [
     { delete: DOC_ROOT + "/groups/" + gid + "/members/" + target },
     { delete: DOC_ROOT + "/accounts/" + target + "/groups/" + gid },
-    // v39: يُمنع من العودة برابط دعوةٍ ما زال صالحاً (يزول المنع بدعوةٍ من المالك عبر member.unban أو بحذف الدعوات)
+    // v39: \u064A\u064F\u0645\u0646\u0639 \u0645\u0646 \u0627\u0644\u0639\u0648\u062F\u0629 \u0628\u0631\u0627\u0628\u0637 \u062F\u0639\u0648\u0629\u064D \u0645\u0627 \u0632\u0627\u0644 \u0635\u0627\u0644\u062D\u0627\u064B (\u064A\u0632\u0648\u0644 \u0627\u0644\u0645\u0646\u0639 \u0628\u062F\u0639\u0648\u0629\u064D \u0645\u0646 \u0627\u0644\u0645\u0627\u0644\u0643 \u0639\u0628\u0631 member.unban \u0623\u0648 \u0628\u062D\u0630\u0641 \u0627\u0644\u062F\u0639\u0648\u0627\u062A)
     { update: { name: DOC_ROOT + "/groups/" + gid, fields: { bannedNames: { mapValue: { fields: { [target]: { stringValue: String(fstr(m, "name") || "").slice(0, 60) } } } } } },
-      updateMask: { fieldPaths: [fp("bannedNames", target)] },   // v66: اسمه في قائمة «المُزالون» عند المالك
+      updateMask: { fieldPaths: [fp("bannedNames", target)] },   // v66: \u0627\u0633\u0645\u0647 \u0641\u064A \u0642\u0627\u0626\u0645\u0629 \u00AB\u0627\u0644\u0645\u064F\u0632\u0627\u0644\u0648\u0646\u00BB \u0639\u0646\u062F \u0627\u0644\u0645\u0627\u0644\u0643
       updateTransforms: [{ fieldPath: "banned", appendMissingElements: { values: [{ stringValue: target }] } }] },
   ]);
   try { await famChatSync(token, gid); } catch (e) {}
@@ -1333,9 +1333,9 @@ async function opGroupSettings(uid, payload, env) {
   return { groupId: gid, allowMemberEvents: v };
 }
 
-/* ---------- 25) جهات الاتّصال: people.list · people.invite · people.accept · people.remove ----------
-   جهة الاتّصال = من يشاركك عائلةً على السحابة + من أضفته برابطٍ شخصيّ (accounts/{uid}/people/{other}).
-   people.list يكتب أيضاً قائمة الصلاحيّة في Realtime Database: acl/{أنا}/{هو} = true ⇒ يرى حضوري. */
+/* ---------- 25) \u062C\u0647\u0627\u062A \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644: people.list \u00B7 people.invite \u00B7 people.accept \u00B7 people.remove ----------
+   \u062C\u0647\u0629 \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 = \u0645\u0646 \u064A\u0634\u0627\u0631\u0643\u0643 \u0639\u0627\u0626\u0644\u0629\u064B \u0639\u0644\u0649 \u0627\u0644\u0633\u062D\u0627\u0628\u0629 + \u0645\u0646 \u0623\u0636\u0641\u062A\u0647 \u0628\u0631\u0627\u0628\u0637\u064D \u0634\u062E\u0635\u064A\u0651 (accounts/{uid}/people/{other}).
+   people.list \u064A\u0643\u062A\u0628 \u0623\u064A\u0636\u0627\u064B \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0635\u0644\u0627\u062D\u064A\u0651\u0629 \u0641\u064A Realtime Database: acl/{\u0623\u0646\u0627}/{\u0647\u0648} = true \u21D2 \u064A\u0631\u0649 \u062D\u0636\u0648\u0631\u064A. */
 async function rtdbPatch(token, updates) {
   const res = await fetch(RTDB_URL + "/.json?access_token=" + encodeURIComponent(token), {
     method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updates) });
@@ -1356,10 +1356,10 @@ async function peopleOf(token, uid, opts) {
   for (const d of idx) {
     const gid = d.name.split("/").pop();
     const ms = await fsList(token, "groups/" + gid + "/members");
-    if (!ms.some(m => m.name.split("/").pop() === uid)) continue;          // لم أعد عضواً
-    const hidden = new Set(ms.map(m => fstr(m, "adoptedFrom")).filter(Boolean));   // هويّةٌ قديمة لنفس الشخص
-    const fam = { groupId: gid, name: fstr(d, "name") || "عائلتي" };
-    // حدّ ٥٠ طلباً فرعيّاً لكلّ طلب: نزامن محادثات أوّل ٦ عائلات فقط في كلّ استدعاء (والعضويّة تتحدّث أيضاً عند كلّ انضمام/إزالة)
+    if (!ms.some(m => m.name.split("/").pop() === uid)) continue;          // \u0644\u0645 \u0623\u0639\u062F \u0639\u0636\u0648\u0627\u064B
+    const hidden = new Set(ms.map(m => fstr(m, "adoptedFrom")).filter(Boolean));   // \u0647\u0648\u064A\u0651\u0629\u064C \u0642\u062F\u064A\u0645\u0629 \u0644\u0646\u0641\u0633 \u0627\u0644\u0634\u062E\u0635
+    const fam = { groupId: gid, name: fstr(d, "name") || "\u0639\u0627\u0626\u0644\u062A\u064A" };
+    // \u062D\u062F\u0651 \u0665\u0660 \u0637\u0644\u0628\u0627\u064B \u0641\u0631\u0639\u064A\u0651\u0627\u064B \u0644\u0643\u0644\u0651 \u0637\u0644\u0628: \u0646\u0632\u0627\u0645\u0646 \u0645\u062D\u0627\u062F\u062B\u0627\u062A \u0623\u0648\u0651\u0644 \u0666 \u0639\u0627\u0626\u0644\u0627\u062A \u0641\u0642\u0637 \u0641\u064A \u0643\u0644\u0651 \u0627\u0633\u062A\u062F\u0639\u0627\u0621 (\u0648\u0627\u0644\u0639\u0636\u0648\u064A\u0651\u0629 \u062A\u062A\u062D\u062F\u0651\u062B \u0623\u064A\u0636\u0627\u064B \u0639\u0646\u062F \u0643\u0644\u0651 \u0627\u0646\u0636\u0645\u0627\u0645/\u0625\u0632\u0627\u0644\u0629)
     if (opts && opts.famChats && (opts.synced = (opts.synced || 0) + 1) <= 6) { try { await famChatSync(token, gid, ms); } catch (e) {} }
     for (const m of ms) { const u = m.name.split("/").pop(); if (!hidden.has(u)) add(u, fstr(m, "name"), fbool(m, "anon"), "family", fam, fstr(m, "phone")); }
   }
@@ -1369,7 +1369,7 @@ async function peopleOf(token, uid, opts) {
 async function opPeopleList(uid, payload, env, claims) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const list = await peopleOf(token, uid, { famChats: true });
-  // الصلاحيّة: قائمتي كاملةً (من حُذف يفقد رؤية حضوري) + سطري عند كلٍّ منهم
+  // \u0627\u0644\u0635\u0644\u0627\u062D\u064A\u0651\u0629: \u0642\u0627\u0626\u0645\u062A\u064A \u0643\u0627\u0645\u0644\u0629\u064B (\u0645\u0646 \u062D\u064F\u0630\u0641 \u064A\u0641\u0642\u062F \u0631\u0624\u064A\u0629 \u062D\u0636\u0648\u0631\u064A) + \u0633\u0637\u0631\u064A \u0639\u0646\u062F \u0643\u0644\u064D\u0651 \u0645\u0646\u0647\u0645
   const updates = { ["acl/" + uid]: Object.fromEntries(list.map(p => [p.uid, true])) };
   for (const p of list) updates["acl/" + p.uid + "/" + uid] = true;
   let aclOk = true;
@@ -1409,7 +1409,7 @@ async function opPeopleAccept(uid, payload, env, claims) {
   await sigTo(token, [other], "reqok");
   return { uid: other, name: fstr(inv, "name") || null };
 }
-// v34: معاينة الرابط قبل القبول — التطبيق يسأل «أضِفه؟ / انضمّ؟» ولا يُنفَّذ الرابط وحده
+// v34: \u0645\u0639\u0627\u064A\u0646\u0629 \u0627\u0644\u0631\u0627\u0628\u0637 \u0642\u0628\u0644 \u0627\u0644\u0642\u0628\u0648\u0644 \u2014 \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u064A\u0633\u0623\u0644 \u00AB\u0623\u0636\u0650\u0641\u0647\u061F / \u0627\u0646\u0636\u0645\u0651\u061F\u00BB \u0648\u0644\u0627 \u064A\u064F\u0646\u0641\u064E\u0651\u0630 \u0627\u0644\u0631\u0627\u0628\u0637 \u0648\u062D\u062F\u0647
 async function opPeoplePeek(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const t = payload && payload.token;
@@ -1445,23 +1445,23 @@ async function opPeopleRemove(uid, payload, env) {
     { delete: DOC_ROOT + "/accounts/" + uid + "/people/" + other },
     { delete: DOC_ROOT + "/accounts/" + other + "/people/" + uid },
   ]);
-  // v33: يتوقّف فوراً عن رؤية حضوري والاتّصال بي (كان ينتظر people.list التالي). إن جمعتنا عائلة يعيدها people.list
+  // v33: \u064A\u062A\u0648\u0642\u0651\u0641 \u0641\u0648\u0631\u0627\u064B \u0639\u0646 \u0631\u0624\u064A\u0629 \u062D\u0636\u0648\u0631\u064A \u0648\u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 \u0628\u064A (\u0643\u0627\u0646 \u064A\u0646\u062A\u0638\u0631 people.list \u0627\u0644\u062A\u0627\u0644\u064A). \u0625\u0646 \u062C\u0645\u0639\u062A\u0646\u0627 \u0639\u0627\u0626\u0644\u0629 \u064A\u0639\u064A\u062F\u0647\u0627 people.list
   try { await rtdbPatch(token, { ["acl/" + uid + "/" + other]: null, ["acl/" + other + "/" + uid]: null }); } catch (e) {}
-  return { uid: other, removed: true };   // إن بقيتما في عائلةٍ واحدة يبقى جهةَ اتّصال
+  return { uid: other, removed: true };   // \u0625\u0646 \u0628\u0642\u064A\u062A\u0645\u0627 \u0641\u064A \u0639\u0627\u0626\u0644\u0629\u064D \u0648\u0627\u062D\u062F\u0629 \u064A\u0628\u0642\u0649 \u062C\u0647\u0629\u064E \u0627\u062A\u0651\u0635\u0627\u0644
 }
 
-/* ---------- 26) المحادثات (C2) ----------
+/* ---------- 26) \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0627\u062A (C2) ----------
    chats/{cid}: { type: family|dm|group|saved, members[], names{}, name, familyGroupId, createdTs, createdBy,
                   last{id,by,type,text,ts}, updatedTs, cnt, readCnt{uid:n}, reads{uid:ts}, delivered{uid:ts}, pinned, disappear }
-   chats/{cid}/days/{YYYYMMDD}: { msgs: { [msgId]: رسالة } } — كلّ رسائل اليوم في وثيقةٍ واحدة (قراءةٌ واحدة لفتح المحادثة)،
-   والتعديل حقلٌ بحقل (msgs.`id`.…) فلا يتعارض إرسالان متزامنان.
-   المعرّفات: fam_<groupId> · dm_<uidأصغر>_<uidأكبر> · sv_<uid> · grp_<…> (C3). */
+   chats/{cid}/days/{YYYYMMDD}: { msgs: { [msgId]: \u0631\u0633\u0627\u0644\u0629 } } \u2014 \u0643\u0644\u0651 \u0631\u0633\u0627\u0626\u0644 \u0627\u0644\u064A\u0648\u0645 \u0641\u064A \u0648\u062B\u064A\u0642\u0629\u064D \u0648\u0627\u062D\u062F\u0629 (\u0642\u0631\u0627\u0621\u0629\u064C \u0648\u0627\u062D\u062F\u0629 \u0644\u0641\u062A\u062D \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629)\u060C
+   \u0648\u0627\u0644\u062A\u0639\u062F\u064A\u0644 \u062D\u0642\u0644\u064C \u0628\u062D\u0642\u0644 (msgs.`id`.\u2026) \u0641\u0644\u0627 \u064A\u062A\u0639\u0627\u0631\u0636 \u0625\u0631\u0633\u0627\u0644\u0627\u0646 \u0645\u062A\u0632\u0627\u0645\u0646\u0627\u0646.
+   \u0627\u0644\u0645\u0639\u0631\u0651\u0641\u0627\u062A: fam_<groupId> \u00B7 dm_<uid\u0623\u0635\u063A\u0631>_<uid\u0623\u0643\u0628\u0631> \u00B7 sv_<uid> \u00B7 grp_<\u2026> (C3). */
 const fp = (...segs) => segs.map(s => "`" + String(s).replace(/`/g, "") + "`").join(".");
 const MSG_ID = /^[A-Za-z0-9_]{6,40}$/;
 const MEDIA_ID = /^[A-Za-z0-9_]{6,40}$/;
 const MEDIA_TYPES = ["voice", "image", "video", "file"];
-const MSG_TYPES = ["text", "sticker", "contact", "voice", "image", "video", "file", "poll", "bill", "fund", "tasks", "system", "location"];   // v38: موقع
-// v35: وثيقة اليوم حدّها ١ ميغابايت — المحادثة المزدحمة تكتب بعد ٨٥٠ ألف حرف في جزءٍ تالٍ «YYYYMMDD-2» (العميل يقرأ الأجزاء كأيّام)
+const MSG_TYPES = ["text", "sticker", "contact", "voice", "image", "video", "file", "poll", "bill", "fund", "tasks", "system", "location"];   // v38: \u0645\u0648\u0642\u0639
+// v35: \u0648\u062B\u064A\u0642\u0629 \u0627\u0644\u064A\u0648\u0645 \u062D\u062F\u0651\u0647\u0627 \u0661 \u0645\u064A\u063A\u0627\u0628\u0627\u064A\u062A \u2014 \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629 \u0627\u0644\u0645\u0632\u062F\u062D\u0645\u0629 \u062A\u0643\u062A\u0628 \u0628\u0639\u062F \u0668\u0665\u0660 \u0623\u0644\u0641 \u062D\u0631\u0641 \u0641\u064A \u062C\u0632\u0621\u064D \u062A\u0627\u0644\u064D \u00ABYYYYMMDD-2\u00BB (\u0627\u0644\u0639\u0645\u064A\u0644 \u064A\u0642\u0631\u0623 \u0627\u0644\u0623\u062C\u0632\u0627\u0621 \u0643\u0623\u064A\u0651\u0627\u0645)
 const DAY_REF = /^\d{8}(-\d{1,3})?$/, SHARD_MAX = 850000;
 const tooBig = (e) => /maximum allowed size|exceeds the maximum|too large|INVALID_ARGUMENT.*size/i.test(String((e && e.message) || e));
 function shardOf(c, ts, len, bump) {
@@ -1484,7 +1484,7 @@ async function requireChatMember(token, cid, uid) {
 async function rtdbSetChatMembers(token, cid, members) {
   try { await rtdbPatch(token, { ["chatm/" + cid]: members.length ? Object.fromEntries(members.map(u => [u, true])) : null }); } catch (e) {}
 }
-/* محادثة العائلة: أعضاؤها = أعضاء العائلة (بلا الهويّات القديمة). تُستدعى عند كلّ تغيّرٍ في العضويّة وفي people.list */
+/* \u0645\u062D\u0627\u062F\u062B\u0629 \u0627\u0644\u0639\u0627\u0626\u0644\u0629: \u0623\u0639\u0636\u0627\u0624\u0647\u0627 = \u0623\u0639\u0636\u0627\u0621 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 (\u0628\u0644\u0627 \u0627\u0644\u0647\u0648\u064A\u0651\u0627\u062A \u0627\u0644\u0642\u062F\u064A\u0645\u0629). \u062A\u064F\u0633\u062A\u062F\u0639\u0649 \u0639\u0646\u062F \u0643\u0644\u0651 \u062A\u063A\u064A\u0651\u0631\u064D \u0641\u064A \u0627\u0644\u0639\u0636\u0648\u064A\u0651\u0629 \u0648\u0641\u064A people.list */
 async function famChatSync(token, gid, knownMembers) {
   const g = await fsGet(token, "groups/" + gid);
   const ms = knownMembers || await fsList(token, "groups/" + gid + "/members");
@@ -1497,9 +1497,9 @@ async function famChatSync(token, gid, knownMembers) {
   const sortObj = o => JSON.stringify(Object.keys(o || {}).sort().map(k => [k, o[k]]));
   const same = cur && JSON.stringify(fsArr(cur, "members").slice().sort()) === JSON.stringify(members)
     && sortObj(fsToJs((cur.fields || {}).names || { nullValue: null })) === sortObj(names)
-    && fstr(cur, "name") === (fstr(g, "name") || "عائلتي");
+    && fstr(cur, "name") === (fstr(g, "name") || "\u0639\u0627\u0626\u0644\u062A\u064A");
   if (same) return { cid, changed: false };
-  const fields = { type: { stringValue: "family" }, familyGroupId: { stringValue: gid }, name: { stringValue: fstr(g, "name") || "عائلتي" },
+  const fields = { type: { stringValue: "family" }, familyGroupId: { stringValue: gid }, name: { stringValue: fstr(g, "name") || "\u0639\u0627\u0626\u0644\u062A\u064A" },
                    members: toFsValue(members), names: toFsValue(names) };
   const mask = ["type", "familyGroupId", "name", "members", "names"];
   if (!cur) { fields.createdTs = { integerValue: String(Date.now()) }; fields.updatedTs = { integerValue: String(Date.now()) }; fields.cnt = { integerValue: "0" }; mask.push("createdTs", "updatedTs", "cnt"); }
@@ -1537,7 +1537,7 @@ async function opChatOpen(uid, payload, env, claims) {
   if (!(await sharesContact(token, uid, to))) throw new Error("not a contact");
   const other = await fsGet(token, "accounts/" + uid + "/people/" + to);
   let otherName = other ? fstr(other, "name") : null;
-  if (!otherName) {   // من عائلةٍ مشتركة: الاسم من وثيقة العضو
+  if (!otherName) {   // \u0645\u0646 \u0639\u0627\u0626\u0644\u0629\u064D \u0645\u0634\u062A\u0631\u0643\u0629: \u0627\u0644\u0627\u0633\u0645 \u0645\u0646 \u0648\u062B\u064A\u0642\u0629 \u0627\u0644\u0639\u0636\u0648
     for (const d of (await fsList(token, "accounts/" + uid + "/groups")).slice(0, 20)) {
       const m = await fsGet(token, "groups/" + d.name.split("/").pop() + "/members/" + to); if (m && fstr(m, "name")) { otherName = fstr(m, "name"); break; }
     }
@@ -1548,19 +1548,19 @@ async function opChatOpen(uid, payload, env, claims) {
   await rtdbSetChatMembers(token, cid, [uid, to]);
   return { cid };
 }
-/* ---------- v36: المحادثات السرّيّة (تشفيرٌ بين الطرفين) ----------
-   الخادم لا يرى المحتوى: يحفظ المفاتيح العامّة لأجهزة الأعضاء ويمرّر النصّ المشفّر كما وصل.
-   chats/{cid}.e2e = { on: true, devs: { uid: devId }, keys: { devId: { u: uid, k: مفتاح P-256 العامّ (٦٥ بايت base64), ts } } }
-   - كلّ عضوٍ يربط جهازاً واحداً (devs). مفتاح الجهاز لا يتغيّر بعد تسجيله (keys إلحاقٌ فقط) ⇒ الرسائل القديمة تبقى قابلةً للفكّ.
-   - الرسالة: { id, type, enc: { v, d: جهاز المرسل, iv, ct, k: { devId: مفتاح الرسالة مغلّفاً لذلك الجهاز } }, reply: { id, day }, extra: { mid, viewOnce } } */
+/* ---------- v36: \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0627\u062A \u0627\u0644\u0633\u0631\u0651\u064A\u0651\u0629 (\u062A\u0634\u0641\u064A\u0631\u064C \u0628\u064A\u0646 \u0627\u0644\u0637\u0631\u0641\u064A\u0646) ----------
+   \u0627\u0644\u062E\u0627\u062F\u0645 \u0644\u0627 \u064A\u0631\u0649 \u0627\u0644\u0645\u062D\u062A\u0648\u0649: \u064A\u062D\u0641\u0638 \u0627\u0644\u0645\u0641\u0627\u062A\u064A\u062D \u0627\u0644\u0639\u0627\u0645\u0651\u0629 \u0644\u0623\u062C\u0647\u0632\u0629 \u0627\u0644\u0623\u0639\u0636\u0627\u0621 \u0648\u064A\u0645\u0631\u0651\u0631 \u0627\u0644\u0646\u0635\u0651 \u0627\u0644\u0645\u0634\u0641\u0651\u0631 \u0643\u0645\u0627 \u0648\u0635\u0644.
+   chats/{cid}.e2e = { on: true, devs: { uid: devId }, keys: { devId: { u: uid, k: \u0645\u0641\u062A\u0627\u062D P-256 \u0627\u0644\u0639\u0627\u0645\u0651 (\u0666\u0665 \u0628\u0627\u064A\u062A base64), ts } } }
+   - \u0643\u0644\u0651 \u0639\u0636\u0648\u064D \u064A\u0631\u0628\u0637 \u062C\u0647\u0627\u0632\u0627\u064B \u0648\u0627\u062D\u062F\u0627\u064B (devs). \u0645\u0641\u062A\u0627\u062D \u0627\u0644\u062C\u0647\u0627\u0632 \u0644\u0627 \u064A\u062A\u063A\u064A\u0651\u0631 \u0628\u0639\u062F \u062A\u0633\u062C\u064A\u0644\u0647 (keys \u0625\u0644\u062D\u0627\u0642\u064C \u0641\u0642\u0637) \u21D2 \u0627\u0644\u0631\u0633\u0627\u0626\u0644 \u0627\u0644\u0642\u062F\u064A\u0645\u0629 \u062A\u0628\u0642\u0649 \u0642\u0627\u0628\u0644\u0629\u064B \u0644\u0644\u0641\u0643\u0651.
+   - \u0627\u0644\u0631\u0633\u0627\u0644\u0629: { id, type, enc: { v, d: \u062C\u0647\u0627\u0632 \u0627\u0644\u0645\u0631\u0633\u0644, iv, ct, k: { devId: \u0645\u0641\u062A\u0627\u062D \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0645\u063A\u0644\u0651\u0641\u0627\u064B \u0644\u0630\u0644\u0643 \u0627\u0644\u062C\u0647\u0627\u0632 } }, reply: { id, day }, extra: { mid, viewOnce } } */
 const E2E_DEV = /^[A-Za-z0-9]{16,24}$/, E2E_B64 = /^[A-Za-z0-9+/]+={0,2}$/;
-const E2E_TYPES = ["text", "sticker", "contact", "voice", "image", "video", "file", "location", "tasks"];   // C164: قائمة المهامّ في السرّيّة (العنوان والمهامّ داخل enc)
+const E2E_TYPES = ["text", "sticker", "contact", "voice", "image", "video", "file", "location", "tasks"];   // C164: \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0645\u0647\u0627\u0645\u0651 \u0641\u064A \u0627\u0644\u0633\u0631\u0651\u064A\u0651\u0629 (\u0627\u0644\u0639\u0646\u0648\u0627\u0646 \u0648\u0627\u0644\u0645\u0647\u0627\u0645\u0651 \u062F\u0627\u062E\u0644 enc)
 function e2eOf(c) { const v = c && c.fields && c.fields.e2e; const e = v ? fsToJs(v) : null; return e && e.on ? e : null; }
 function e2ePubOk(k) {
   k = String(k || ""); if (k.length !== 88 || !E2E_B64.test(k)) return false;
   try { const b = atob(k); return b.length === 65 && b.charCodeAt(0) === 4; } catch (e) { return false; }
 }
-// معرّف الجهاز مشتقٌّ من مفتاحه (أوّل ١٢ بايت من SHA-256 بالست عشريّ): لا ينتحل أحدٌ معرّف جهاز غيره بمفتاحٍ آخر
+// \u0645\u0639\u0631\u0651\u0641 \u0627\u0644\u062C\u0647\u0627\u0632 \u0645\u0634\u062A\u0642\u064C\u0651 \u0645\u0646 \u0645\u0641\u062A\u0627\u062D\u0647 (\u0623\u0648\u0651\u0644 \u0661\u0662 \u0628\u0627\u064A\u062A \u0645\u0646 SHA-256 \u0628\u0627\u0644\u0633\u062A \u0639\u0634\u0631\u064A\u0651): \u0644\u0627 \u064A\u0646\u062A\u062D\u0644 \u0623\u062D\u062F\u064C \u0645\u0639\u0631\u0651\u0641 \u062C\u0647\u0627\u0632 \u063A\u064A\u0631\u0647 \u0628\u0645\u0641\u062A\u0627\u062D\u064D \u0622\u062E\u0631
 async function e2eDevOf(k) {
   const raw = Uint8Array.from(atob(k), ch => ch.charCodeAt(0));
   const h = new Uint8Array(await crypto.subtle.digest("SHA-256", raw));
@@ -1592,7 +1592,7 @@ function cleanEncMsg(m, uid, ts, e) {
   if (!m || !MSG_ID.test(String(m.id || ""))) throw new Error("bad message id");
   const type = m.type || "text";
   if (E2E_TYPES.indexOf(type) < 0) throw new Error("bad type for a secret chat");
-  const out = { id: m.id, by: uid, ts: ts, type: type, enc: cleanEnc(m.enc, uid, e) };   // لا نصّ ظاهر: ما ليس داخل enc يُهمَل
+  const out = { id: m.id, by: uid, ts: ts, type: type, enc: cleanEnc(m.enc, uid, e) };   // \u0644\u0627 \u0646\u0635\u0651 \u0638\u0627\u0647\u0631: \u0645\u0627 \u0644\u064A\u0633 \u062F\u0627\u062E\u0644 enc \u064A\u064F\u0647\u0645\u064E\u0644
   if (m.reply && MSG_ID.test(String(m.reply.id || ""))) out.reply = { id: m.reply.id, day: DAY_REF.test(String(m.reply.day || "")) ? String(m.reply.day) : null, e2e: true };
   if (m.fwd) out.fwd = true;
   if (Array.isArray(m.mentions)) out.mentions = m.mentions.filter(x => segOk(String(x))).slice(0, 50);
@@ -1615,7 +1615,7 @@ async function e2eNames(token, uid, to, me) {
   }
   return { [uid]: me.name.stringValue || null, [to]: otherName || null };
 }
-// محادثةٌ سرّيّة مع شخص: معرّفٌ جديد كلّ مرّة (sdm_…)، مرتبطةٌ بهذا الجهاز. الطرف الآخر يفعّلها على جهازه (e2e.join).
+// \u0645\u062D\u0627\u062F\u062B\u0629\u064C \u0633\u0631\u0651\u064A\u0651\u0629 \u0645\u0639 \u0634\u062E\u0635: \u0645\u0639\u0631\u0651\u0641\u064C \u062C\u062F\u064A\u062F \u0643\u0644\u0651 \u0645\u0631\u0651\u0629 (sdm_\u2026)\u060C \u0645\u0631\u062A\u0628\u0637\u0629\u064C \u0628\u0647\u0630\u0627 \u0627\u0644\u062C\u0647\u0627\u0632. \u0627\u0644\u0637\u0631\u0641 \u0627\u0644\u0622\u062E\u0631 \u064A\u0641\u0639\u0651\u0644\u0647\u0627 \u0639\u0644\u0649 \u062C\u0647\u0627\u0632\u0647 (e2e.join).
 async function opE2eDm(uid, payload, env, claims) {
   if (!codeRate(uid, "e2e", 20)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -1623,7 +1623,7 @@ async function opE2eDm(uid, payload, env, claims) {
   if (!segOk(to) || to === uid) throw new Error("to required");
   const dk = await e2eDevKey(payload);
   if (!(await sharesContact(token, uid, to))) throw new Error("not a contact");
-  if (await blockedBy(token, to, uid)) throw new Error("not a contact");   // لا نخبره أنّه محظور
+  if (await blockedBy(token, to, uid)) throw new Error("not a contact");   // \u0644\u0627 \u0646\u062E\u0628\u0631\u0647 \u0623\u0646\u0651\u0647 \u0645\u062D\u0638\u0648\u0631
   const now = Date.now(), cid = "sdm_" + crypto.randomUUID().replace(/-/g, "").slice(0, 20);
   const names = await e2eNames(token, uid, to, memberIdFields(claims));
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { type: { stringValue: "dm" }, members: toFsValue([uid, to].sort()),
@@ -1631,13 +1631,13 @@ async function opE2eDm(uid, payload, env, claims) {
     e2e: toFsValue({ on: true, devs: { [uid]: dk.d }, keys: { [dk.d]: { u: uid, k: dk.k, ts: now } } }) } }, currentDocument: { exists: false } }]);
   await rtdbSetChatMembers(token, cid, [uid, to]);
   await sysMsg(token, cid, uid, "e2e_on", {});
-  try {   // إشعارٌ بالدعوة (بلا محتوى)
+  try {   // \u0625\u0634\u0639\u0627\u0631\u064C \u0628\u0627\u0644\u062F\u0639\u0648\u0629 (\u0628\u0644\u0627 \u0645\u062D\u062A\u0648\u0649)
     const c = await chatDoc(token, cid);
-    if (c) await notifyChat(token, c, cid, uid, { id: "e2einv", type: "text", text: "🔒 دعاك إلى محادثة سرّيّة", ts: now });
+    if (c) await notifyChat(token, c, cid, uid, { id: "e2einv", type: "text", text: "\uD83D\uDD12 \u062F\u0639\u0627\u0643 \u0625\u0644\u0649 \u0645\u062D\u0627\u062F\u062B\u0629 \u0633\u0631\u0651\u064A\u0651\u0629", ts: now });
   } catch (e) { console.log("e2e invite push:", e && e.message); }
   return { cid };
 }
-// تفعيل المحادثة السرّيّة على هذا الجهاز (أوّل مرّة، أو نقلها من جهازٍ آخر ⇒ «تغيّر رمز الأمان» يظهر للجميع)
+// \u062A\u0641\u0639\u064A\u0644 \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629 \u0627\u0644\u0633\u0631\u0651\u064A\u0651\u0629 \u0639\u0644\u0649 \u0647\u0630\u0627 \u0627\u0644\u062C\u0647\u0627\u0632 (\u0623\u0648\u0651\u0644 \u0645\u0631\u0651\u0629\u060C \u0623\u0648 \u0646\u0642\u0644\u0647\u0627 \u0645\u0646 \u062C\u0647\u0627\u0632\u064D \u0622\u062E\u0631 \u21D2 \u00AB\u062A\u063A\u064A\u0651\u0631 \u0631\u0645\u0632 \u0627\u0644\u0623\u0645\u0627\u0646\u00BB \u064A\u0638\u0647\u0631 \u0644\u0644\u062C\u0645\u064A\u0639)
 async function opE2eJoin(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const cid = payload && payload.cid;
@@ -1666,7 +1666,7 @@ function cleanMsg(m, uid, ts) {
   if (type === "contact" && m.contact && segOk(String(m.contact.uid || ""))) out.contact = { uid: m.contact.uid, name: String(m.contact.name || "").slice(0, 80) };
   if (Array.isArray(m.mentions)) out.mentions = m.mentions.filter(x => segOk(String(x))).slice(0, 50);
   if (m.extra && typeof m.extra === "object") {
-    // الصورة المصغّرة (≤ ٦٠٠٠ حرف) تُستثنى من قصّ النصوص — بقيّة الحقول تمرّ بـcapVal
+    // \u0627\u0644\u0635\u0648\u0631\u0629 \u0627\u0644\u0645\u0635\u063A\u0651\u0631\u0629 (\u2264 \u0666\u0660\u0660\u0660 \u062D\u0631\u0641) \u062A\u064F\u0633\u062A\u062B\u0646\u0649 \u0645\u0646 \u0642\u0635\u0651 \u0627\u0644\u0646\u0635\u0648\u0635 \u2014 \u0628\u0642\u064A\u0651\u0629 \u0627\u0644\u062D\u0642\u0648\u0644 \u062A\u0645\u0631\u0651 \u0628\u0640capVal
     const thumb = typeof m.extra.thumb === "string" && /^data:image\/(jpeg|png|webp);base64,/.test(m.extra.thumb) && m.extra.thumb.length <= 6000 ? m.extra.thumb : null;
     const rest = Object.assign({}, m.extra); delete rest.thumb;
     out.extra = capVal(rest);
@@ -1674,29 +1674,29 @@ function cleanMsg(m, uid, ts) {
     if (MEDIA_TYPES.indexOf(type) >= 0 && !MEDIA_ID.test(String(out.extra.mid || ""))) throw new Error("media id required");
   }
   if (MEDIA_TYPES.indexOf(type) >= 0 && !(out.extra && out.extra.mid)) throw new Error("media id required");
-  if (type === "location") {   // v38: إحداثيّاتٌ صحيحة فقط، وتسميةٌ قصيرة
+  if (type === "location") {   // v38: \u0625\u062D\u062F\u0627\u062B\u064A\u0651\u0627\u062A\u064C \u0635\u062D\u064A\u062D\u0629 \u0641\u0642\u0637\u060C \u0648\u062A\u0633\u0645\u064A\u0629\u064C \u0642\u0635\u064A\u0631\u0629
     const lat = Number(out.extra && out.extra.lat), lng = Number(out.extra && out.extra.lng);
     if (!(lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180)) throw new Error("bad location");
     out.extra = { lat: Math.round(lat * 1e6) / 1e6, lng: Math.round(lng * 1e6) / 1e6, acc: Math.min(99999, Math.max(0, Math.round(Number(out.extra.acc) || 0))) || null, label: String(out.extra.label || "").slice(0, 120) || null };
     delete out.text;
   }
-  // v33: «مرّة واحدة» لا تترك أثراً — لا صورة مصغّرة ولا نصّ الرسالة الصوتيّة
+  // v33: \u00AB\u0645\u0631\u0651\u0629 \u0648\u0627\u062D\u062F\u0629\u00BB \u0644\u0627 \u062A\u062A\u0631\u0643 \u0623\u062B\u0631\u0627\u064B \u2014 \u0644\u0627 \u0635\u0648\u0631\u0629 \u0645\u0635\u063A\u0651\u0631\u0629 \u0648\u0644\u0627 \u0646\u0635\u0651 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0627\u0644\u0635\u0648\u062A\u064A\u0651\u0629
   if (out.extra && out.extra.viewOnce) { delete out.extra.thumb; delete out.extra.transcript; }
-  // v33: سقفٌ للرسالة كلّها — رسالةٌ واحدة ضخمة كانت تملأ وثيقة اليوم (١ ميغابايت) فتتعطّل المحادثة حتّى منتصف الليل
+  // v33: \u0633\u0642\u0641\u064C \u0644\u0644\u0631\u0633\u0627\u0644\u0629 \u0643\u0644\u0651\u0647\u0627 \u2014 \u0631\u0633\u0627\u0644\u0629\u064C \u0648\u0627\u062D\u062F\u0629 \u0636\u062E\u0645\u0629 \u0643\u0627\u0646\u062A \u062A\u0645\u0644\u0623 \u0648\u062B\u064A\u0642\u0629 \u0627\u0644\u064A\u0648\u0645 (\u0661 \u0645\u064A\u063A\u0627\u0628\u0627\u064A\u062A) \u0641\u062A\u062A\u0639\u0637\u0651\u0644 \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629 \u062D\u062A\u0651\u0649 \u0645\u0646\u062A\u0635\u0641 \u0627\u0644\u0644\u064A\u0644
   if (JSON.stringify(out).length > 16000) throw new Error("message too large");
   if (out.text === undefined && type === "text") throw new Error("empty message");
   return out;
 }
 function previewOf(msg) {
   if (msg.type === "text" || msg.type === "sticker") return (msg.text || "").slice(0, 120);
-  return "";   // العميل يترجم النوع (🎤 رسالة صوتيّة…)
+  return "";   // \u0627\u0644\u0639\u0645\u064A\u0644 \u064A\u062A\u0631\u062C\u0645 \u0627\u0644\u0646\u0648\u0639 (\uD83C\uDFA4 \u0631\u0633\u0627\u0644\u0629 \u0635\u0648\u062A\u064A\u0651\u0629\u2026)
 }
 async function opChatSend(uid, payload, env, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const cid = payload && payload.cid;
   const c = await requireChatMember(token, cid, uid);
   const type = fstr(c, "type");
-  const other = type === "dm" ? fsArr(c, "members").find(x => x !== uid) : null;   // C55: فحص الحظر يُقرأ بالتوازي أدناه
+  const other = type === "dm" ? fsArr(c, "members").find(x => x !== uid) : null;   // C55: \u0641\u062D\u0635 \u0627\u0644\u062D\u0638\u0631 \u064A\u064F\u0642\u0631\u0623 \u0628\u0627\u0644\u062A\u0648\u0627\u0632\u064A \u0623\u062F\u0646\u0627\u0647
   if (type === "group" && fbool(c, "adminsOnly")) {
     if (fsArr(c, "admins").indexOf(uid) < 0) throw new Error("only admins can send here");
   }
@@ -1704,18 +1704,18 @@ async function opChatSend(uid, payload, env, ctx) {
   const msg = e2e ? cleanEncMsg(payload.msg, uid, ts, e2e) : cleanMsg(payload.msg, uid, ts);
   let sh = shardOf(c, ts, JSON.stringify(msg).length + 200), day = sh.key;
   const metaP = msg.extra && msg.extra.mid ? fsGet(token, "chats/" + cid + "/media/" + msg.extra.mid) : Promise.resolve(undefined);   // C55
-  // v33: معرّف الرسالة لا يُعاد استعماله — كان أيّ عضوٍ يستبدل رسالة غيره (أو رسالة نظام) بإرسال المعرّف نفسه.
-  //      المعرّف نفسه من المرسل نفسه = إعادة محاولة ⇒ لا نكتب ثانيةً ولا نرسل إشعاراً مكرّراً.
-  //      الاقتباس في الردّ يُؤخذ من الرسالة الأصليّة لا ممّا كتبه المرسل (إن كانت من اليوم أو من يومٍ أرسله العميل)
+  // v33: \u0645\u0639\u0631\u0651\u0641 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0644\u0627 \u064A\u064F\u0639\u0627\u062F \u0627\u0633\u062A\u0639\u0645\u0627\u0644\u0647 \u2014 \u0643\u0627\u0646 \u0623\u064A\u0651 \u0639\u0636\u0648\u064D \u064A\u0633\u062A\u0628\u062F\u0644 \u0631\u0633\u0627\u0644\u0629 \u063A\u064A\u0631\u0647 (\u0623\u0648 \u0631\u0633\u0627\u0644\u0629 \u0646\u0638\u0627\u0645) \u0628\u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u0645\u0639\u0631\u0651\u0641 \u0646\u0641\u0633\u0647.
+  //      \u0627\u0644\u0645\u0639\u0631\u0651\u0641 \u0646\u0641\u0633\u0647 \u0645\u0646 \u0627\u0644\u0645\u0631\u0633\u0644 \u0646\u0641\u0633\u0647 = \u0625\u0639\u0627\u062F\u0629 \u0645\u062D\u0627\u0648\u0644\u0629 \u21D2 \u0644\u0627 \u0646\u0643\u062A\u0628 \u062B\u0627\u0646\u064A\u0629\u064B \u0648\u0644\u0627 \u0646\u0631\u0633\u0644 \u0625\u0634\u0639\u0627\u0631\u0627\u064B \u0645\u0643\u0631\u0651\u0631\u0627\u064B.
+  //      \u0627\u0644\u0627\u0642\u062A\u0628\u0627\u0633 \u0641\u064A \u0627\u0644\u0631\u062F\u0651 \u064A\u064F\u0624\u062E\u0630 \u0645\u0646 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0627\u0644\u0623\u0635\u0644\u064A\u0651\u0629 \u0644\u0627 \u0645\u0645\u0651\u0627 \u0643\u062A\u0628\u0647 \u0627\u0644\u0645\u0631\u0633\u0644 (\u0625\u0646 \u0643\u0627\u0646\u062A \u0645\u0646 \u0627\u0644\u064A\u0648\u0645 \u0623\u0648 \u0645\u0646 \u064A\u0648\u0645\u064D \u0623\u0631\u0633\u0644\u0647 \u0627\u0644\u0639\u0645\u064A\u0644)
   const rday = msg.reply && DAY_REF.test(String((payload.msg.reply || {}).day || "")) ? String(payload.msg.reply.day) : day;
-  // C55: ثلاث قراءاتٍ بالتوازي بدل ثلاث رحلاتٍ متتالية: الحظر · بيانات الوسيط · رسائل اليوم
+  // C55: \u062B\u0644\u0627\u062B \u0642\u0631\u0627\u0621\u0627\u062A\u064D \u0628\u0627\u0644\u062A\u0648\u0627\u0632\u064A \u0628\u062F\u0644 \u062B\u0644\u0627\u062B \u0631\u062D\u0644\u0627\u062A\u064D \u0645\u062A\u062A\u0627\u0644\u064A\u0629: \u0627\u0644\u062D\u0638\u0631 \u00B7 \u0628\u064A\u0627\u0646\u0627\u062A \u0627\u0644\u0648\u0633\u064A\u0637 \u00B7 \u0631\u0633\u0627\u0626\u0644 \u0627\u0644\u064A\u0648\u0645
   const [pr, meta, peek] = await Promise.all([other ? fsGet(token, "accounts/" + other + "/chatprefs/main") : Promise.resolve(null), metaP,
     dayPeek(token, cid, day, [msg.id].concat(msg.reply && rday === day ? [msg.reply.id] : []))]);
-  if (other) {   // الحظر: الطرف الآخر حظرني ⇒ لا تصل (ولا نخبر المرسل — كما في واتساب تبقى ✓ واحدة)
+  if (other) {   // \u0627\u0644\u062D\u0638\u0631: \u0627\u0644\u0637\u0631\u0641 \u0627\u0644\u0622\u062E\u0631 \u062D\u0638\u0631\u0646\u064A \u21D2 \u0644\u0627 \u062A\u0635\u0644 (\u0648\u0644\u0627 \u0646\u062E\u0628\u0631 \u0627\u0644\u0645\u0631\u0633\u0644 \u2014 \u0643\u0645\u0627 \u0641\u064A \u0648\u0627\u062A\u0633\u0627\u0628 \u062A\u0628\u0642\u0649 \u2713 \u0648\u0627\u062D\u062F\u0629)
     const blocked = pr && fstr(pr, "data") ? (JSON.parse(fstr(pr, "data")).blocked || []) : [];
     if (blocked.indexOf(uid) >= 0) return { ts: Date.now(), day: null, blocked: true };
   }
-  if (msg.extra && msg.extra.mid) {   // الوسيط رفعه المرسل نفسه في هذه المحادثة واكتمل
+  if (msg.extra && msg.extra.mid) {   // \u0627\u0644\u0648\u0633\u064A\u0637 \u0631\u0641\u0639\u0647 \u0627\u0644\u0645\u0631\u0633\u0644 \u0646\u0641\u0633\u0647 \u0641\u064A \u0647\u0630\u0647 \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629 \u0648\u0627\u0643\u062A\u0645\u0644
     if (!meta || fstr(meta, "by") !== uid || !fbool(meta, "done")) throw new Error("media not uploaded");
     msg.extra.size = fsInt(meta, "size"); msg.extra.mime = fstr(meta, "mime") || msg.extra.mime || null;
   }
@@ -1723,12 +1723,12 @@ async function opChatSend(uid, payload, env, ctx) {
     if (peek[msg.id].by !== uid) throw new Error("message id taken");
     return { ts: peek[msg.id].ts || ts, day, id: msg.id, dup: true };
   }
-  if (msg.reply && !e2e) {   // v36: في السرّيّة الاقتباس داخل النصّ المشفّر — الخادم لا يقرؤه
+  if (msg.reply && !e2e) {   // v36: \u0641\u064A \u0627\u0644\u0633\u0631\u0651\u064A\u0651\u0629 \u0627\u0644\u0627\u0642\u062A\u0628\u0627\u0633 \u062F\u0627\u062E\u0644 \u0627\u0644\u0646\u0635\u0651 \u0627\u0644\u0645\u0634\u0641\u0651\u0631 \u2014 \u0627\u0644\u062E\u0627\u062F\u0645 \u0644\u0627 \u064A\u0642\u0631\u0624\u0647
     const orig = rday === day ? peek[msg.reply.id] : (await dayPeek(token, cid, rday, [msg.reply.id]))[msg.reply.id];
     if (orig && !orig.del) msg.reply = { id: msg.reply.id, by: orig.by || null, text: String(orig.text || previewOf(orig) || "").slice(0, 200), day: rday };
     else if (orig && orig.del) msg.reply = { id: msg.reply.id, by: orig.by || null, text: "", day: rday, del: true };
     else if (payload.msg.reply.day) msg.reply = { id: msg.reply.id, by: null, text: "", day: rday, missing: true };
-    else msg.reply.unv = true;   // عميلٌ قديم لم يرسل يوم الأصل ⇒ يبقى نصّه موسوماً «غير متحقَّق» (العميل الجديد يرسل اليوم دائماً)
+    else msg.reply.unv = true;   // \u0639\u0645\u064A\u0644\u064C \u0642\u062F\u064A\u0645 \u0644\u0645 \u064A\u0631\u0633\u0644 \u064A\u0648\u0645 \u0627\u0644\u0623\u0635\u0644 \u21D2 \u064A\u0628\u0642\u0649 \u0646\u0635\u0651\u0647 \u0645\u0648\u0633\u0648\u0645\u0627\u064B \u00AB\u063A\u064A\u0631 \u0645\u062A\u062D\u0642\u064E\u0651\u0642\u00BB (\u0627\u0644\u0639\u0645\u064A\u0644 \u0627\u0644\u062C\u062F\u064A\u062F \u064A\u0631\u0633\u0644 \u0627\u0644\u064A\u0648\u0645 \u062F\u0627\u0626\u0645\u0627\u064B)
   }
   const dis = fsInt(c, "disappear");
   if (dis > 0) msg.exp = ts + dis * 1000;
@@ -1746,15 +1746,15 @@ async function opChatSend(uid, payload, env, ctx) {
       currentDocument: { exists: true } },
   ]);
   try { await fsCommit(token, sendWrites(sh)); }
-  catch (e) {   // امتلأ الجزء (تعديلات وتفاعلات كبّرته) ⇒ الجزء التالي
+  catch (e) {   // \u0627\u0645\u062A\u0644\u0623 \u0627\u0644\u062C\u0632\u0621 (\u062A\u0639\u062F\u064A\u0644\u0627\u062A \u0648\u062A\u0641\u0627\u0639\u0644\u0627\u062A \u0643\u0628\u0651\u0631\u062A\u0647) \u21D2 \u0627\u0644\u062C\u0632\u0621 \u0627\u0644\u062A\u0627\u0644\u064A
     if (!tooBig(e)) throw e;
     sh = shardOf(c, ts, JSON.stringify(msg).length + 200, sh.n); day = sh.key;
     await fsCommit(token, sendWrites(sh));
   }
-  // الإشعارات بعد الردّ (waitUntil) فلا ينتظرها المرسل
+  // \u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062A \u0628\u0639\u062F \u0627\u0644\u0631\u062F\u0651 (waitUntil) \u0641\u0644\u0627 \u064A\u0646\u062A\u0638\u0631\u0647\u0627 \u0627\u0644\u0645\u0631\u0633\u0644
   const job = notifyChat(token, c, cid, uid, msg).catch(e => console.log("push:", e && e.message));
   if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
-  if (msg.type === "tasks" && !msg.enc) {   // C173: فهرس «مهامّي»/التذكير + «أُسند إليك»
+  if (msg.type === "tasks" && !msg.enc) {   // C173: \u0641\u0647\u0631\u0633 \u00AB\u0645\u0647\u0627\u0645\u0651\u064A\u00BB/\u0627\u0644\u062A\u0630\u0643\u064A\u0631 + \u00AB\u0623\u064F\u0633\u0646\u062F \u0625\u0644\u064A\u0643\u00BB
     const tj = (async () => { await fsCommit(token, [taskIdxWrite(c, cid, day, msg.id, msg)]); await taskAssignPush(token, c, cid, uid, msg, null); })().catch(e => console.log("tasks:", e && e.message));
     if (ctx && ctx.waitUntil) ctx.waitUntil(tj); else await tj;
   }
@@ -1767,7 +1767,7 @@ async function dayMsg(token, cid, day, id) {
   if (!v) throw new Error("message not found");
   return fsToJs(v);
 }
-// v33: قراءة رسائل بعينها من وثيقة يوم (قناع حقول — لا تُنزَّل الوثيقة كلّها)
+// v33: \u0642\u0631\u0627\u0621\u0629 \u0631\u0633\u0627\u0626\u0644 \u0628\u0639\u064A\u0646\u0647\u0627 \u0645\u0646 \u0648\u062B\u064A\u0642\u0629 \u064A\u0648\u0645 (\u0642\u0646\u0627\u0639 \u062D\u0642\u0648\u0644 \u2014 \u0644\u0627 \u062A\u064F\u0646\u0632\u064E\u0651\u0644 \u0627\u0644\u0648\u062B\u064A\u0642\u0629 \u0643\u0644\u0651\u0647\u0627)
 async function dayPeek(token, cid, day, ids) {
   ids = [...new Set(ids.filter(id => MSG_ID.test(String(id || ""))))];
   if (!ids.length) return {};
@@ -1780,8 +1780,8 @@ async function dayPeek(token, cid, day, ids) {
   const out = {}; for (const id of ids) if (f[id]) out[id] = fsToJs(f[id]);
   return out;
 }
-/* ---------- الوسائط (C4): chats/{cid}/media/{mid} (وصف) + media/{mid}/c/{i} (قطع base64 ≤ ٧٠٠ ألف حرف)
-   يكتبها الجهاز مباشرةً (قواعد Firestore: عضوٌ ومالكها)، ويحذفها الخادم: حذفٌ للجميع · مشاهدة مرّة · انتهاء الأجل. */
+/* ---------- \u0627\u0644\u0648\u0633\u0627\u0626\u0637 (C4): chats/{cid}/media/{mid} (\u0648\u0635\u0641) + media/{mid}/c/{i} (\u0642\u0637\u0639 base64 \u2264 \u0667\u0660\u0660 \u0623\u0644\u0641 \u062D\u0631\u0641)
+   \u064A\u0643\u062A\u0628\u0647\u0627 \u0627\u0644\u062C\u0647\u0627\u0632 \u0645\u0628\u0627\u0634\u0631\u0629\u064B (\u0642\u0648\u0627\u0639\u062F Firestore: \u0639\u0636\u0648\u064C \u0648\u0645\u0627\u0644\u0643\u0647\u0627)\u060C \u0648\u064A\u062D\u0630\u0641\u0647\u0627 \u0627\u0644\u062E\u0627\u062F\u0645: \u062D\u0630\u0641\u064C \u0644\u0644\u062C\u0645\u064A\u0639 \u00B7 \u0645\u0634\u0627\u0647\u062F\u0629 \u0645\u0631\u0651\u0629 \u00B7 \u0627\u0646\u062A\u0647\u0627\u0621 \u0627\u0644\u0623\u062C\u0644. */
 async function deleteMedia(token, cid, mid) {
   if (!MEDIA_ID.test(String(mid || ""))) return 0;
   const base = "chats/" + cid + "/media/" + mid;
@@ -1790,8 +1790,8 @@ async function deleteMedia(token, cid, mid) {
   await commitChunks(token, writes);
   return chunks.length;
 }
-/* v35: حجز الرفع — الجهاز يطلب الإذن قبل رفع أيّ وسيط (القواعد ترفض وسيطاً بلا حجز في mediaq).
-   حدٌّ يوميّ لكلّ مستخدم، وما لم يُرسَل خلال ٢٤ ساعة يحذفه الـCron (كانت الرفعات المتروكة تبقى إلى الأبد = تخزينٌ مجّانيّ بلا حدّ). */
+/* v35: \u062D\u062C\u0632 \u0627\u0644\u0631\u0641\u0639 \u2014 \u0627\u0644\u062C\u0647\u0627\u0632 \u064A\u0637\u0644\u0628 \u0627\u0644\u0625\u0630\u0646 \u0642\u0628\u0644 \u0631\u0641\u0639 \u0623\u064A\u0651 \u0648\u0633\u064A\u0637 (\u0627\u0644\u0642\u0648\u0627\u0639\u062F \u062A\u0631\u0641\u0636 \u0648\u0633\u064A\u0637\u0627\u064B \u0628\u0644\u0627 \u062D\u062C\u0632 \u0641\u064A mediaq).
+   \u062D\u062F\u064C\u0651 \u064A\u0648\u0645\u064A\u0651 \u0644\u0643\u0644\u0651 \u0645\u0633\u062A\u062E\u062F\u0645\u060C \u0648\u0645\u0627 \u0644\u0645 \u064A\u064F\u0631\u0633\u064E\u0644 \u062E\u0644\u0627\u0644 \u0662\u0664 \u0633\u0627\u0639\u0629 \u064A\u062D\u0630\u0641\u0647 \u0627\u0644\u0640Cron (\u0643\u0627\u0646\u062A \u0627\u0644\u0631\u0641\u0639\u0627\u062A \u0627\u0644\u0645\u062A\u0631\u0648\u0643\u0629 \u062A\u0628\u0642\u0649 \u0625\u0644\u0649 \u0627\u0644\u0623\u0628\u062F = \u062A\u062E\u0632\u064A\u0646\u064C \u0645\u062C\u0651\u0627\u0646\u064A\u0651 \u0628\u0644\u0627 \u062D\u062F\u0651). */
 const MEDIA_DAY_MAX = 300 * 1024 * 1024;
 async function opMediaBegin(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -1808,7 +1808,7 @@ async function opMediaBegin(uid, payload, env) {
   ]);
   return { ok: true, left: MEDIA_DAY_MAX - used - size };
 }
-// الـCron: رفعاتٌ حُجزت ولم تُرسل خلال ٢٤ ساعة ⇒ تُحذف مع قطعها
+// \u0627\u0644\u0640Cron: \u0631\u0641\u0639\u0627\u062A\u064C \u062D\u064F\u062C\u0632\u062A \u0648\u0644\u0645 \u062A\u064F\u0631\u0633\u0644 \u062E\u0644\u0627\u0644 \u0662\u0664 \u0633\u0627\u0639\u0629 \u21D2 \u062A\u064F\u062D\u0630\u0641 \u0645\u0639 \u0642\u0637\u0639\u0647\u0627
 async function mediaGc(env, max) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
@@ -1835,10 +1835,10 @@ async function opMediaViewed(uid, payload, env) {
   if (all) { f.gone = { booleanValue: true }; mask.push(fp("msgs", id, "gone"), fp("msgs", id, "extra", "thumb"), fp("msgs", id, "extra", "transcript"), fp("msgs", id, "enc")); }
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day, fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: f } } } } } } },
     updateMask: { fieldPaths: mask } }]);
-  if (all) await deleteMedia(token, cid, m.extra.mid);   // شاهده الجميع ⇒ يُحذف الوسيط نهائيّاً
+  if (all) await deleteMedia(token, cid, m.extra.mid);   // \u0634\u0627\u0647\u062F\u0647 \u0627\u0644\u062C\u0645\u064A\u0639 \u21D2 \u064A\u064F\u062D\u0630\u0641 \u0627\u0644\u0648\u0633\u064A\u0637 \u0646\u0647\u0627\u0626\u064A\u0651\u0627\u064B
   return { gone: all };
 }
-// v61: المحظور في الخاصّة لا يغيّر شيئاً فيها (تعديل · تفاعل · تثبيت · إعدادات) — كان الحظر في الإرسال وحده
+// v61: \u0627\u0644\u0645\u062D\u0638\u0648\u0631 \u0641\u064A \u0627\u0644\u062E\u0627\u0635\u0651\u0629 \u0644\u0627 \u064A\u063A\u064A\u0651\u0631 \u0634\u064A\u0626\u0627\u064B \u0641\u064A\u0647\u0627 (\u062A\u0639\u062F\u064A\u0644 \u00B7 \u062A\u0641\u0627\u0639\u0644 \u00B7 \u062A\u062B\u0628\u064A\u062A \u00B7 \u0625\u0639\u062F\u0627\u062F\u0627\u062A) \u2014 \u0643\u0627\u0646 \u0627\u0644\u062D\u0638\u0631 \u0641\u064A \u0627\u0644\u0625\u0631\u0633\u0627\u0644 \u0648\u062D\u062F\u0647
 async function dmBlocked(token, c, uid) {
   if (fstr(c, "type") !== "dm") return false;
   const other = fsArr(c, "members").find(u => u !== uid);
@@ -1854,7 +1854,7 @@ async function opChatEdit(uid, payload, env) {
   if (m.type && m.type !== "text") throw new Error("only text can be edited");   // v61
   if (await dmBlocked(token, c, uid)) return { edited: Date.now(), blocked: true };
   const e2e = e2eOf(c);
-  if (e2e) {   // v36: التعديل في السرّيّة نصٌّ مشفّرٌ جديد للرسالة نفسها
+  if (e2e) {   // v36: \u0627\u0644\u062A\u0639\u062F\u064A\u0644 \u0641\u064A \u0627\u0644\u0633\u0631\u0651\u064A\u0651\u0629 \u0646\u0635\u064C\u0651 \u0645\u0634\u0641\u0651\u0631\u064C \u062C\u062F\u064A\u062F \u0644\u0644\u0631\u0633\u0627\u0644\u0629 \u0646\u0641\u0633\u0647\u0627
     if (m.type !== "text") throw new Error("only text can be edited");
     const enc = cleanEnc(payload.enc, uid, e2e), now2 = Date.now();
     await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day,
@@ -1868,7 +1868,7 @@ async function opChatEdit(uid, payload, env) {
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day,
     fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { text: { stringValue: text }, edited: { integerValue: String(now) } } } } } } } } },
     updateMask: { fieldPaths: [fp("msgs", id, "text"), fp("msgs", id, "edited")] } }]);
-  // v61: معاينة قائمة المحادثات تتبع التعديل إن كانت آخر رسالة
+  // v61: \u0645\u0639\u0627\u064A\u0646\u0629 \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0627\u062A \u062A\u062A\u0628\u0639 \u0627\u0644\u062A\u0639\u062F\u064A\u0644 \u0625\u0646 \u0643\u0627\u0646\u062A \u0622\u062E\u0631 \u0631\u0633\u0627\u0644\u0629
   const lf = c.fields && c.fields.last && c.fields.last.mapValue && c.fields.last.mapValue.fields;
   if (lf && lf.id && lf.id.stringValue === id) await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { last: { mapValue: { fields: { text: { stringValue: text.slice(0, 200) } } } } } },
     updateMask: { fieldPaths: ["last.text"] } }]).catch(() => {});
@@ -1882,7 +1882,7 @@ async function opChatDelete(uid, payload, env) {
   const admin = fstr(c, "type") === "group" && fsArr(c, "admins").indexOf(uid) >= 0;
   if (m.by !== uid && !admin) throw new Error("only the sender can delete for everyone");
   if (m.extra && m.extra.mid) { try { await deleteMedia(token, cid, m.extra.mid); } catch (e) {} }
-  // الحذف للجميع: يبقى أثرٌ «حُذفت هذه الرسالة» بلا محتوى (والوسائط تُحذف في C4)
+  // \u0627\u0644\u062D\u0630\u0641 \u0644\u0644\u062C\u0645\u064A\u0639: \u064A\u0628\u0642\u0649 \u0623\u062B\u0631\u064C \u00AB\u062D\u064F\u0630\u0641\u062A \u0647\u0630\u0647 \u0627\u0644\u0631\u0633\u0627\u0644\u0629\u00BB \u0628\u0644\u0627 \u0645\u062D\u062A\u0648\u0649 (\u0648\u0627\u0644\u0648\u0633\u0627\u0626\u0637 \u062A\u064F\u062D\u0630\u0641 \u0641\u064A C4)
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day,
     fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { del: { booleanValue: true }, delBy: { stringValue: uid } } } } } } } } },
     updateMask: { fieldPaths: [fp("msgs", id, "del"), fp("msgs", id, "delBy"), fp("msgs", id, "text"), fp("msgs", id, "extra"), fp("msgs", id, "reply"), fp("msgs", id, "contact"), fp("msgs", id, "re"),
@@ -1899,7 +1899,7 @@ async function opChatReact(uid, payload, env) {
   const c = await requireChatMember(token, cid, uid);
   if (!DAY_REF.test(String(day || "")) || !MSG_ID.test(String(id || ""))) throw new Error("bad message ref");
   if (await dmBlocked(token, c, uid)) return { ok: true };   // v61
-  const target = (await dayPeek(token, cid, day, [id]))[id];   // v33: لا تفاعل مع رسالةٍ غير موجودة أو محذوفة
+  const target = (await dayPeek(token, cid, day, [id]))[id];   // v33: \u0644\u0627 \u062A\u0641\u0627\u0639\u0644 \u0645\u0639 \u0631\u0633\u0627\u0644\u0629\u064D \u063A\u064A\u0631 \u0645\u0648\u062C\u0648\u062F\u0629 \u0623\u0648 \u0645\u062D\u0630\u0648\u0641\u0629
   if (!target || !target.by || target.del) throw new Error("message not found");
   const emoji = payload.emoji ? String(payload.emoji).slice(0, 16) : null;
   const f = emoji ? { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { re: { mapValue: { fields: { [uid]: { stringValue: emoji } } } } } } } } } } } : {};
@@ -1911,14 +1911,14 @@ async function opChatPin(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const cid = payload && payload.cid;
   const c = await requireChatMember(token, cid, uid);
-  // v33: «المشرفون فقط يعدّلون معلومات المجموعة» يشمل التثبيت
+  // v33: \u00AB\u0627\u0644\u0645\u0634\u0631\u0641\u0648\u0646 \u0641\u0642\u0637 \u064A\u0639\u062F\u0651\u0644\u0648\u0646 \u0645\u0639\u0644\u0648\u0645\u0627\u062A \u0627\u0644\u0645\u062C\u0645\u0648\u0639\u0629\u00BB \u064A\u0634\u0645\u0644 \u0627\u0644\u062A\u062B\u0628\u064A\u062A
   if (fstr(c, "type") === "group" && (fbool(c, "infoAdminsOnly") || fbool(c, "adminsOnly")) && fsArr(c, "admins").indexOf(uid) < 0) throw new Error("only admins can change this");
   if (await dmBlocked(token, c, uid)) throw new Error("blocked");   // v61
   const id = payload.id && MSG_ID.test(String(payload.id)) ? String(payload.id) : null;
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { pinned: id ? { stringValue: id } : { nullValue: null } } }, updateMask: { fieldPaths: ["pinned"] } }]);
   return { pinned: id };
 }
-// «وصلت/قُرئت»: كلّ مستخدمٍ يكتب حقوله فقط (delivered.me · reads.me · readCnt.me). حتّى ٣٠ محادثة في طلبٍ واحد.
+// \u00AB\u0648\u0635\u0644\u062A/\u0642\u064F\u0631\u0626\u062A\u00BB: \u0643\u0644\u0651 \u0645\u0633\u062A\u062E\u062F\u0645\u064D \u064A\u0643\u062A\u0628 \u062D\u0642\u0648\u0644\u0647 \u0641\u0642\u0637 (delivered.me \u00B7 reads.me \u00B7 readCnt.me). \u062D\u062A\u0651\u0649 \u0663\u0660 \u0645\u062D\u0627\u062F\u062B\u0629 \u0641\u064A \u0637\u0644\u0628\u064D \u0648\u0627\u062D\u062F.
 async function opChatMark(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const marks = (payload && Array.isArray(payload.marks)) ? payload.marks.slice(0, 30) : [];
@@ -1931,7 +1931,7 @@ async function opChatMark(uid, payload, env) {
     if (Number.isFinite(mk.rc)) { fields.readCnt = { mapValue: { fields: { [uid]: { integerValue: String(Math.floor(mk.rc)) } } } }; mask.push(fp("readCnt", uid)); }
     if (mask.length) writes.push({ update: { name: DOC_ROOT + "/chats/" + mk.cid, fields }, updateMask: { fieldPaths: mask }, currentDocument: { exists: true } });
   }
-  // v33: العضويّة بقراءةٍ واحدة لكلّ المحادثات (batchGet بقناع members) — كان غير العضو يكتب حقوله في أيّ محادثة
+  // v33: \u0627\u0644\u0639\u0636\u0648\u064A\u0651\u0629 \u0628\u0642\u0631\u0627\u0621\u0629\u064D \u0648\u0627\u062D\u062F\u0629 \u0644\u0643\u0644\u0651 \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0627\u062A (batchGet \u0628\u0642\u0646\u0627\u0639 members) \u2014 \u0643\u0627\u0646 \u063A\u064A\u0631 \u0627\u0644\u0639\u0636\u0648 \u064A\u0643\u062A\u0628 \u062D\u0642\u0648\u0644\u0647 \u0641\u064A \u0623\u064A\u0651 \u0645\u062D\u0627\u062F\u062B\u0629
   if (!writes.length) return { marked: 0 };
   const names = [...new Set(writes.map(w => w.update.name))];
   const ok = new Set();
@@ -1951,7 +1951,7 @@ async function opChatSettings(uid, payload, env) {
   const c = await requireChatMember(token, cid, uid);
   if (fstr(c, "type") === "group" && fsArr(c, "admins").indexOf(uid) < 0) throw new Error("only admins can change this");
   if (await dmBlocked(token, c, uid)) throw new Error("blocked");   // v61
-  // v33: محادثة العائلة — المالك والمحرّرون فقط (كان أيّ عضوٍ يشغّلها)
+  // v33: \u0645\u062D\u0627\u062F\u062B\u0629 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u2014 \u0627\u0644\u0645\u0627\u0644\u0643 \u0648\u0627\u0644\u0645\u062D\u0631\u0651\u0631\u0648\u0646 \u0641\u0642\u0637 (\u0643\u0627\u0646 \u0623\u064A\u0651 \u0639\u0636\u0648\u064D \u064A\u0634\u063A\u0651\u0644\u0647\u0627)
   if (/^fam_/.test(cid)) {
     const mem = await fsGet(token, "groups/" + cid.slice(4) + "/members/" + uid).catch(() => null);
     if (["owner", "editor"].indexOf(fstr(mem, "role")) < 0) throw new Error("only family editors can change this");
@@ -1962,9 +1962,9 @@ async function opChatSettings(uid, payload, env) {
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { disappear: { integerValue: String(dis) }, disappearBy: { stringValue: uid }, disOn: { booleanValue: true } } }, updateMask: { fieldPaths: ["disappear", "disappearBy", "disOn"] } }]);
   return { disappear: dis };
 }
-// إعداداتي في المحادثات تتزامن بين أجهزتي: أرشفة، تثبيت، كتم، قفل، مجلّدات، سمات، نغمات، مميّزة، محذوفة عندي، محظورون
+// \u0625\u0639\u062F\u0627\u062F\u0627\u062A\u064A \u0641\u064A \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0627\u062A \u062A\u062A\u0632\u0627\u0645\u0646 \u0628\u064A\u0646 \u0623\u062C\u0647\u0632\u062A\u064A: \u0623\u0631\u0634\u0641\u0629\u060C \u062A\u062B\u0628\u064A\u062A\u060C \u0643\u062A\u0645\u060C \u0642\u0641\u0644\u060C \u0645\u062C\u0644\u0651\u062F\u0627\u062A\u060C \u0633\u0645\u0627\u062A\u060C \u0646\u063A\u0645\u0627\u062A\u060C \u0645\u0645\u064A\u0651\u0632\u0629\u060C \u0645\u062D\u0630\u0648\u0641\u0629 \u0639\u0646\u062F\u064A\u060C \u0645\u062D\u0638\u0648\u0631\u0648\u0646
 const PREF_KEYS = ["archived", "pinned", "muted", "locked", "folders", "folderOf", "themes", "tones", "starred", "hidden", "blocked", "drafts", "cleared", "broadcasts", "nick"];
-// التسميات: حتّى ٣٠٠ جهة اتّصال، كلّ اسم ≤ ٤٠ حرفاً
+// \u0627\u0644\u062A\u0633\u0645\u064A\u0627\u062A: \u062D\u062A\u0651\u0649 \u0663\u0660\u0660 \u062C\u0647\u0629 \u0627\u062A\u0651\u0635\u0627\u0644\u060C \u0643\u0644\u0651 \u0627\u0633\u0645 \u2264 \u0664\u0660 \u062D\u0631\u0641\u0627\u064B
 function capNick(v) {
   const o = {}; let n = 0;
   if (v && typeof v === "object" && !Array.isArray(v)) for (const k in v) {
@@ -1986,19 +1986,19 @@ async function opChatPrefs(uid, payload, env) {
     if (json.length > 200000) throw new Error("prefs too large");
     await fsCommit(token, [{ update: { name: DOC_ROOT + "/" + path, fields: { data: { stringValue: json }, ts: { integerValue: String(Date.now()) } } } }]);
   }
-  // الحظر يُنفَّذ أيضاً في قواعد RTDB (blk/{أنا}/{هو}): لا يرى حضوري، ولا يتّصل بي، ولا يرنّ صندوقي
+  // \u0627\u0644\u062D\u0638\u0631 \u064A\u064F\u0646\u0641\u064E\u0651\u0630 \u0623\u064A\u0636\u0627\u064B \u0641\u064A \u0642\u0648\u0627\u0639\u062F RTDB (blk/{\u0623\u0646\u0627}/{\u0647\u0648}): \u0644\u0627 \u064A\u0631\u0649 \u062D\u0636\u0648\u0631\u064A\u060C \u0648\u0644\u0627 \u064A\u062A\u0651\u0635\u0644 \u0628\u064A\u060C \u0648\u0644\u0627 \u064A\u0631\u0646\u0651 \u0635\u0646\u062F\u0648\u0642\u064A
   const bl = Array.isArray(data.blocked) ? data.blocked.filter(x => segOk(String(x))).slice(0, 500) : [];
   if ((set && "blocked" in set) || bl.length) {
     try { await rtdbPatch(token, { ["blk/" + uid]: bl.length ? Object.fromEntries(bl.map(x => [x, true])) : null }); } catch (e) { console.log("blk:", e && e.message); }
-    if (set && "blocked" in set && bl.length) { try { await momStrip(token, uid, bl); } catch (e) { console.log("momStrip:", e && e.message); } }   // C133b: المحظور لا يرى لحظاتي السابقة
+    if (set && "blocked" in set && bl.length) { try { await momStrip(token, uid, bl); } catch (e) { console.log("momStrip:", e && e.message); } }   // C133b: \u0627\u0644\u0645\u062D\u0638\u0648\u0631 \u0644\u0627 \u064A\u0631\u0649 \u0644\u062D\u0638\u0627\u062A\u064A \u0627\u0644\u0633\u0627\u0628\u0642\u0629
   }
   return { prefs: data };
 }
-/* تنظيف الرسائل المؤقّتة (Cron كلّ ١٥ دقيقة): محادثاتٌ فيها disappear > 0 ⇒ يُحذف ما انتهى أجله */
+/* \u062A\u0646\u0638\u064A\u0641 \u0627\u0644\u0631\u0633\u0627\u0626\u0644 \u0627\u0644\u0645\u0624\u0642\u0651\u062A\u0629 (Cron \u0643\u0644\u0651 \u0661\u0665 \u062F\u0642\u064A\u0642\u0629): \u0645\u062D\u0627\u062F\u062B\u0627\u062A\u064C \u0641\u064A\u0647\u0627 disappear > 0 \u21D2 \u064A\u064F\u062D\u0630\u0641 \u0645\u0627 \u0627\u0646\u062A\u0647\u0649 \u0623\u062C\u0644\u0647 */
 async function cleanupDisappearing(env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
-  // v35: يمرّ على كلّ المحادثات بالدور (مؤشّرٌ محفوظ في meta/cleanup) — كان يعالج أوّل ١٠ محادثات فقط إلى الأبد.
-  //      disOn: كلّ محادثةٍ شُغّلت فيها المؤقّتة (ولو أُطفئت بعدها، لأنّ رسائلها القديمة ما زال لها أجل) حتّى لا يبقى فيها ما له أجل.
+  // v35: \u064A\u0645\u0631\u0651 \u0639\u0644\u0649 \u0643\u0644\u0651 \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0627\u062A \u0628\u0627\u0644\u062F\u0648\u0631 (\u0645\u0624\u0634\u0651\u0631\u064C \u0645\u062D\u0641\u0648\u0638 \u0641\u064A meta/cleanup) \u2014 \u0643\u0627\u0646 \u064A\u0639\u0627\u0644\u062C \u0623\u0648\u0651\u0644 \u0661\u0660 \u0645\u062D\u0627\u062F\u062B\u0627\u062A \u0641\u0642\u0637 \u0625\u0644\u0649 \u0627\u0644\u0623\u0628\u062F.
+  //      disOn: \u0643\u0644\u0651 \u0645\u062D\u0627\u062F\u062B\u0629\u064D \u0634\u064F\u063A\u0651\u0644\u062A \u0641\u064A\u0647\u0627 \u0627\u0644\u0645\u0624\u0642\u0651\u062A\u0629 (\u0648\u0644\u0648 \u0623\u064F\u0637\u0641\u0626\u062A \u0628\u0639\u062F\u0647\u0627\u060C \u0644\u0623\u0646\u0651 \u0631\u0633\u0627\u0626\u0644\u0647\u0627 \u0627\u0644\u0642\u062F\u064A\u0645\u0629 \u0645\u0627 \u0632\u0627\u0644 \u0644\u0647\u0627 \u0623\u062C\u0644) \u062D\u062A\u0651\u0649 \u0644\u0627 \u064A\u0628\u0642\u0649 \u0641\u064A\u0647\u0627 \u0645\u0627 \u0644\u0647 \u0623\u062C\u0644.
   const q = (where, extra) => fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
     body: JSON.stringify({ structuredQuery: Object.assign({ from: [{ collectionId: "chats" }], where, limit: 10 }, extra || {}) }) })
     .then(r => r.json()).then(b => (b || []).filter(r => r.document).map(r => r.document)).catch(() => []);
@@ -2006,7 +2006,7 @@ async function cleanupDisappearing(env) {
   const cur = fstr(metaDoc, "disCur") || "";
   const eq = { fieldFilter: { field: { fieldPath: "disOn" }, op: "EQUAL", value: { booleanValue: true } } };
   const rows = await q(eq, Object.assign({ orderBy: [{ field: { fieldPath: "__name__" }, direction: "ASCENDING" }] }, cur ? { startAt: { values: [{ referenceValue: cur }], before: false } } : {}));
-  // المحادثات القديمة (قبل v35) بلا disOn: مرورٌ واحد على كلّ المحادثات (٥٠ في كلّ دورة) يضمّ ما فيه المؤقّتة إلى الدور، ثمّ يتوقّف
+  // \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0627\u062A \u0627\u0644\u0642\u062F\u064A\u0645\u0629 (\u0642\u0628\u0644 v35) \u0628\u0644\u0627 disOn: \u0645\u0631\u0648\u0631\u064C \u0648\u0627\u062D\u062F \u0639\u0644\u0649 \u0643\u0644\u0651 \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0627\u062A (\u0665\u0660 \u0641\u064A \u0643\u0644\u0651 \u062F\u0648\u0631\u0629) \u064A\u0636\u0645\u0651 \u0645\u0627 \u0641\u064A\u0647 \u0627\u0644\u0645\u0624\u0642\u0651\u062A\u0629 \u0625\u0644\u0649 \u0627\u0644\u062F\u0648\u0631\u060C \u062B\u0645\u0651 \u064A\u062A\u0648\u0642\u0651\u0641
   let legacy = [], legCur = fstr(metaDoc, "legCur") || "", legDone = fbool(metaDoc, "legDone");
   if (!legDone) {
     const all = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
@@ -2022,10 +2022,10 @@ async function cleanupDisappearing(env) {
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/meta/cleanup", fields: { disCur: { stringValue: rows.length === 10 ? rows[rows.length - 1].name : "" }, disTs: { integerValue: String(Date.now()) },
     legCur: { stringValue: legCur }, legDone: { booleanValue: legDone } } },
     updateMask: { fieldPaths: ["disCur", "disTs", "legCur", "legDone"] } }]).catch(() => {});
-  legacy = [];   // تُعالَج في دورها التالي (صار لها disOn)
+  legacy = [];   // \u062A\u064F\u0639\u0627\u0644\u064E\u062C \u0641\u064A \u062F\u0648\u0631\u0647\u0627 \u0627\u0644\u062A\u0627\u0644\u064A (\u0635\u0627\u0631 \u0644\u0647\u0627 disOn)
   const now = Date.now(); let removed = 0;
-  // v33: لا يُحذف إلّا ما له أجلٌ (exp) انقضى — كان اليوم كلّه يُحذف بحسب عمره، فتشغيل «المؤقّتة» يمسح التاريخ القديم كلّه.
-  //      الوسائط أوّلاً (حتّى ٥ لكلّ يوم في الدورة)، ولا تُحذف رسالةٌ قبل وسيطها؛ ما بقي يكمل في الدورة التالية.
+  // v33: \u0644\u0627 \u064A\u064F\u062D\u0630\u0641 \u0625\u0644\u0651\u0627 \u0645\u0627 \u0644\u0647 \u0623\u062C\u0644\u064C (exp) \u0627\u0646\u0642\u0636\u0649 \u2014 \u0643\u0627\u0646 \u0627\u0644\u064A\u0648\u0645 \u0643\u0644\u0651\u0647 \u064A\u064F\u062D\u0630\u0641 \u0628\u062D\u0633\u0628 \u0639\u0645\u0631\u0647\u060C \u0641\u062A\u0634\u063A\u064A\u0644 \u00AB\u0627\u0644\u0645\u0624\u0642\u0651\u062A\u0629\u00BB \u064A\u0645\u0633\u062D \u0627\u0644\u062A\u0627\u0631\u064A\u062E \u0627\u0644\u0642\u062F\u064A\u0645 \u0643\u0644\u0651\u0647.
+  //      \u0627\u0644\u0648\u0633\u0627\u0626\u0637 \u0623\u0648\u0651\u0644\u0627\u064B (\u062D\u062A\u0651\u0649 \u0665 \u0644\u0643\u0644\u0651 \u064A\u0648\u0645 \u0641\u064A \u0627\u0644\u062F\u0648\u0631\u0629)\u060C \u0648\u0644\u0627 \u062A\u064F\u062D\u0630\u0641 \u0631\u0633\u0627\u0644\u0629\u064C \u0642\u0628\u0644 \u0648\u0633\u064A\u0637\u0647\u0627\u061B \u0645\u0627 \u0628\u0642\u064A \u064A\u0643\u0645\u0644 \u0641\u064A \u0627\u0644\u062F\u0648\u0631\u0629 \u0627\u0644\u062A\u0627\u0644\u064A\u0629.
   for (const c of rows.concat(legacy)) {
     const cid = c.name.split("/").pop();
     const days = await fsList(token, "chats/" + cid + "/days");
@@ -2036,7 +2036,7 @@ async function cleanupDisappearing(env) {
       const gone = ids.filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && m.exp < now; });
       pending += ids.filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && m.exp >= now; }).length;
       if (!gone.length) continue;
-      pending += gone.length;   // ما لم يُحذف في هذه الدورة يُحسب حتّى يُحذف
+      pending += gone.length;   // \u0645\u0627 \u0644\u0645 \u064A\u064F\u062D\u0630\u0641 \u0641\u064A \u0647\u0630\u0647 \u0627\u0644\u062F\u0648\u0631\u0629 \u064A\u064F\u062D\u0633\u0628 \u062D\u062A\u0651\u0649 \u064A\u064F\u062D\u0630\u0641
       let budget = LIM(env).dis; const ready = [];
       for (const id of gone) {
         const m = fsToJs(msgs[id]), mid = m && m.extra && m.extra.mid;
@@ -2054,15 +2054,15 @@ async function cleanupDisappearing(env) {
       if (last && ready.indexOf(last.id) >= 0) await fsCommit(token, [{ update: { name: c.name, fields: { last: { mapValue: { fields: { del: { booleanValue: true }, text: { stringValue: "" } } } } } },
         updateMask: { fieldPaths: ["last.del", "last.text"] } }]).catch(() => {});
     }
-    // المؤقّتة مطفأة ولم يبقَ ما له أجل ⇒ تخرج من الدور
+    // \u0627\u0644\u0645\u0624\u0642\u0651\u062A\u0629 \u0645\u0637\u0641\u0623\u0629 \u0648\u0644\u0645 \u064A\u0628\u0642\u064E \u0645\u0627 \u0644\u0647 \u0623\u062C\u0644 \u21D2 \u062A\u062E\u0631\u062C \u0645\u0646 \u0627\u0644\u062F\u0648\u0631
     if (!fsInt(c, "disappear") && pending <= 0) await fsCommit(token, [{ update: { name: c.name, fields: {} }, updateMask: { fieldPaths: ["disOn"] } }]).catch(() => {});
   }
   return { chats: rows.length + legacy.length, removed };
 }
 
-/* ---------- 27) المجموعات (C3) ----------
-   grp_<id>: { type: "group", name, desc, members[], admins[], names{}, adminsOnly, infoAdminsOnly, createdBy, createdTs, … }
-   رسائل النظام (type: "system"): extra.ev = created|added|removed|left|joined|admin|unadmin|renamed|desc|adminsOnly */
+/* ---------- 27) \u0627\u0644\u0645\u062C\u0645\u0648\u0639\u0627\u062A (C3) ----------
+   grp_<id>: { type: "group", name, desc, members[], admins[], names{}, adminsOnly, infoAdminsOnly, createdBy, createdTs, \u2026 }
+   \u0631\u0633\u0627\u0626\u0644 \u0627\u0644\u0646\u0638\u0627\u0645 (type: "system"): extra.ev = created|added|removed|left|joined|admin|unadmin|renamed|desc|adminsOnly */
 async function contactSet(token, uid) {
   const list = await peopleOf(token, uid);
   const m = {}; list.forEach(p => { m[p.uid] = p.name || null; });
@@ -2076,7 +2076,7 @@ async function sysMsg(token, cid, uid, ev, extra) {
     { update: { name: DOC_ROOT + "/chats/" + cid, fields: { last: toFsValue({ id, by: uid, type: "system", text: "", ts, day, ev }), updatedTs: { integerValue: String(ts) } } },
       updateMask: { fieldPaths: ["last", "updatedTs"] }, currentDocument: { exists: true } },
   ];
-  // v35: رسالة النظام تذهب إلى جزء اليوم الحاليّ (من وثيقة المحادثة) — قراءةٌ واحدة فقط إن امتلأ الجزء الأوّل
+  // v35: \u0631\u0633\u0627\u0644\u0629 \u0627\u0644\u0646\u0638\u0627\u0645 \u062A\u0630\u0647\u0628 \u0625\u0644\u0649 \u062C\u0632\u0621 \u0627\u0644\u064A\u0648\u0645 \u0627\u0644\u062D\u0627\u0644\u064A\u0651 (\u0645\u0646 \u0648\u062B\u064A\u0642\u0629 \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629) \u2014 \u0642\u0631\u0627\u0621\u0629\u064C \u0648\u0627\u062D\u062F\u0629 \u0641\u0642\u0637 \u0625\u0646 \u0627\u0645\u062A\u0644\u0623 \u0627\u0644\u062C\u0632\u0621 \u0627\u0644\u0623\u0648\u0651\u0644
   try { await fsCommit(token, w(dayKey(ts))); }
   catch (e) {
     if (!tooBig(e)) throw e;
@@ -2092,7 +2092,7 @@ async function requireGroupAdmin(token, cid, uid) {
 }
 async function writeMembers(token, cid, members, admins, names, banned) {
   const fields = { members: toFsValue(members), admins: toFsValue(admins), names: toFsValue(names) }, mask = ["members", "admins", "names"];
-  if (banned) { fields.banned = toFsValue(banned.slice(-500)); mask.push("banned"); }   // v33: المُزالون لا يعودون برابط الدعوة
+  if (banned) { fields.banned = toFsValue(banned.slice(-500)); mask.push("banned"); }   // v33: \u0627\u0644\u0645\u064F\u0632\u0627\u0644\u0648\u0646 \u0644\u0627 \u064A\u0639\u0648\u062F\u0648\u0646 \u0628\u0631\u0627\u0628\u0637 \u0627\u0644\u062F\u0639\u0648\u0629
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields },
     updateMask: { fieldPaths: mask }, currentDocument: { exists: true } }]);
   await rtdbSetChatMembers(token, cid, members);
@@ -2103,12 +2103,12 @@ async function opGroupCreate2(uid, payload, env, claims) {
   if (!name) throw new Error("name required");
   const want = Array.isArray(payload.members) ? payload.members.filter(x => segOk(String(x)) && x !== uid).slice(0, 100) : [];
   const contacts = await contactSet(token, uid);
-  const blk = await blockedSet(token, want.filter(u => u in contacts), uid);   // v61: من حظرني لا أضيفه إلى مجموعة
+  const blk = await blockedSet(token, want.filter(u => u in contacts), uid);   // v61: \u0645\u0646 \u062D\u0638\u0631\u0646\u064A \u0644\u0627 \u0623\u0636\u064A\u0641\u0647 \u0625\u0644\u0649 \u0645\u062C\u0645\u0648\u0639\u0629
   const members = [uid].concat(want.filter(u => (u in contacts) && !blk.has(u)));
   const names = { [uid]: memberIdFields(claims).name.stringValue || null };
   members.forEach(u => { if (u !== uid) names[u] = contacts[u]; });
   const cid = "grp_" + crypto.randomUUID().replace(/-/g, "").slice(0, 20), now = Date.now();
-  const dk = payload.e2e ? await e2eDevKey(payload.e2e) : null;   // v36: مجموعةٌ سرّيّة
+  const dk = payload.e2e ? await e2eDevKey(payload.e2e) : null;   // v36: \u0645\u062C\u0645\u0648\u0639\u0629\u064C \u0633\u0631\u0651\u064A\u0651\u0629
   const gf = {
     type: { stringValue: "group" }, name: { stringValue: name }, desc: { stringValue: String(payload.desc || "").slice(0, 500) },
     members: toFsValue(members), admins: toFsValue([uid]), names: toFsValue(names), createdBy: { stringValue: uid },
@@ -2125,7 +2125,7 @@ async function opGroupUpdate(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const cid = payload && payload.cid;
   const c = await requireChatMember(token, cid, uid);
-  // C159: محادثة العائلة — صورتها وحدها، لمالك العائلة ومحرّريها (الاسم والأعضاء يتبعان العائلة)
+  // C159: \u0645\u062D\u0627\u062F\u062B\u0629 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u2014 \u0635\u0648\u0631\u062A\u0647\u0627 \u0648\u062D\u062F\u0647\u0627\u060C \u0644\u0645\u0627\u0644\u0643 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u0648\u0645\u062D\u0631\u0651\u0631\u064A\u0647\u0627 (\u0627\u0644\u0627\u0633\u0645 \u0648\u0627\u0644\u0623\u0639\u0636\u0627\u0621 \u064A\u062A\u0628\u0639\u0627\u0646 \u0627\u0644\u0639\u0627\u0626\u0644\u0629)
   if (fstr(c, "type") === "family") {
     if (payload.photo == null || Object.keys(payload).some(k => k !== "cid" && k !== "photo")) throw new Error("family chat follows the family");
     const fm = await fsGet(token, "groups/" + fstr(c, "familyGroupId") + "/members/" + uid).catch(() => null);
@@ -2139,7 +2139,7 @@ async function opGroupUpdate(uid, payload, env) {
     if (payload.name != null) { const n = String(payload.name).trim().slice(0, 80); if (!n) throw new Error("name required"); fields.name = { stringValue: n }; mask.push("name"); }
     if (payload.desc != null) { fields.desc = { stringValue: String(payload.desc).slice(0, 500) }; mask.push("desc"); }
   }
-  // C155: صورة المجموعة ⇒ avatars/{cid} (كصور الحسابات ≤ ٢٠ ألف حرف) + photoTs في المحادثة
+  // C155: \u0635\u0648\u0631\u0629 \u0627\u0644\u0645\u062C\u0645\u0648\u0639\u0629 \u21D2 avatars/{cid} (\u0643\u0635\u0648\u0631 \u0627\u0644\u062D\u0633\u0627\u0628\u0627\u062A \u2264 \u0662\u0660 \u0623\u0644\u0641 \u062D\u0631\u0641) + photoTs \u0641\u064A \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629
   let gphoto;
   if (payload.photo != null) {
     if (fbool(c, "infoAdminsOnly") && !isAdmin) throw new Error("only admins can do this");
@@ -2178,7 +2178,7 @@ async function opGroupMembers(uid, payload, env) {
   const removed = remove.filter(u => members.indexOf(u) >= 0);
   members = members.filter(u => removed.indexOf(u) < 0); admins = admins.filter(u => removed.indexOf(u) < 0);
   if (!added.length && !removed.length) return { added, removed };
-  let banned = fsArr(c, "banned").filter(u => added.indexOf(u) < 0);   // إضافة المشرف تلغي المنع
+  let banned = fsArr(c, "banned").filter(u => added.indexOf(u) < 0);   // \u0625\u0636\u0627\u0641\u0629 \u0627\u0644\u0645\u0634\u0631\u0641 \u062A\u0644\u063A\u064A \u0627\u0644\u0645\u0646\u0639
   removed.forEach(u => { if (banned.indexOf(u) < 0) banned.push(u); });
   await writeMembers(token, cid, members, admins, names, banned);
   if (added.length) await sysMsg(token, cid, uid, "added", { who: added });
@@ -2205,7 +2205,7 @@ async function opGroupLeave2(uid, payload, env) {
   if (fstr(c, "type") !== "group") throw new Error("not a group");
   const members = fsArr(c, "members").filter(u => u !== uid);
   let admins = fsArr(c, "admins").filter(u => u !== uid);
-  if (!admins.length && members.length) admins = [members[0]];   // المشرف الأخير يغادر ⇒ أقدم عضو يصير مشرفاً
+  if (!admins.length && members.length) admins = [members[0]];   // \u0627\u0644\u0645\u0634\u0631\u0641 \u0627\u0644\u0623\u062E\u064A\u0631 \u064A\u063A\u0627\u062F\u0631 \u21D2 \u0623\u0642\u062F\u0645 \u0639\u0636\u0648 \u064A\u0635\u064A\u0631 \u0645\u0634\u0631\u0641\u0627\u064B
   const names = fsToJs((c.fields || {}).names || { nullValue: null }) || {};
   await sysMsg(token, cid, uid, "left", {});
   await writeMembers(token, cid, members, admins, names);
@@ -2233,7 +2233,7 @@ async function opGroupJoin(uid, payload, env, claims) {
   if (!c || fbool(c, "deleted")) throw new Error("group not found");
   const members = fsArr(c, "members");
   if (members.indexOf(uid) >= 0) return { cid, already: true, name: fstr(c, "name") };
-  if (fsArr(c, "banned").indexOf(uid) >= 0) throw new Error("removed from this group");   // v33: أزاله مشرف ⇒ لا يعود إلّا بإضافة مشرف
+  if (fsArr(c, "banned").indexOf(uid) >= 0) throw new Error("removed from this group");   // v33: \u0623\u0632\u0627\u0644\u0647 \u0645\u0634\u0631\u0641 \u21D2 \u0644\u0627 \u064A\u0639\u0648\u062F \u0625\u0644\u0651\u0627 \u0628\u0625\u0636\u0627\u0641\u0629 \u0645\u0634\u0631\u0641
   const names = fsToJs((c.fields || {}).names || { nullValue: null }) || {};
   names[uid] = memberIdFields(claims).name.stringValue || null;
   members.push(uid);
@@ -2241,7 +2241,7 @@ async function opGroupJoin(uid, payload, env, claims) {
   await sysMsg(token, cid, uid, "joined", {});
   return { cid, name: fstr(c, "name") };
 }
-/* أدوات المجموعة: تصويت · تعديل استطلاع · دفع حصّة · تبرّع (تعهّد) · مهامّ */
+/* \u0623\u062F\u0648\u0627\u062A \u0627\u0644\u0645\u062C\u0645\u0648\u0639\u0629: \u062A\u0635\u0648\u064A\u062A \u00B7 \u062A\u0639\u062F\u064A\u0644 \u0627\u0633\u062A\u0637\u0644\u0627\u0639 \u00B7 \u062F\u0641\u0639 \u062D\u0635\u0651\u0629 \u00B7 \u062A\u0628\u0631\u0651\u0639 (\u062A\u0639\u0647\u0651\u062F) \u00B7 \u0645\u0647\u0627\u0645\u0651 */
 async function toolMsg(token, payload, uid, wantType) {
   const { cid, day, id } = payload || {};
   const c = await requireChatMember(token, cid, uid);
@@ -2257,10 +2257,10 @@ function nestFields(path, value) {
   for (let i = path.length - 1; i >= 1; i--) v = { mapValue: { fields: { [path[i]]: v } } };
   return { [path[0]]: v };
 }
-/* v35: الاستطلاع المجهول مجهولٌ فعلاً — الصوت يُخزَّن تحت مفتاحٍ مشتقّ (HMAC بسرّ الخادم) لا يُعرف منه صاحبه،
-   وصوتٌ واحد لكلّ عضو كما كان. الجهاز يعرف مفتاحه هو فقط (chat.pollKeys) ليُظهر اختياره. */
-/* v65 (C111): إقرار الجهاز بلا رمز دخول — التطبيق الأصليّ يستلم الإشعار والتطبيق مغلق فلا يملك رمز Firebase.
-   الخادم يوقّع في الإشعار نفسه (HMAC بسرّ الخادم) ما يُسمح بإقراره: «رنّت المكالمة» أو «وصلت الرسالة»؛ فلا يُقرّ أحدٌ عن غيره. */
+/* v35: \u0627\u0644\u0627\u0633\u062A\u0637\u0644\u0627\u0639 \u0627\u0644\u0645\u062C\u0647\u0648\u0644 \u0645\u062C\u0647\u0648\u0644\u064C \u0641\u0639\u0644\u0627\u064B \u2014 \u0627\u0644\u0635\u0648\u062A \u064A\u064F\u062E\u0632\u064E\u0651\u0646 \u062A\u062D\u062A \u0645\u0641\u062A\u0627\u062D\u064D \u0645\u0634\u062A\u0642\u0651 (HMAC \u0628\u0633\u0631\u0651 \u0627\u0644\u062E\u0627\u062F\u0645) \u0644\u0627 \u064A\u064F\u0639\u0631\u0641 \u0645\u0646\u0647 \u0635\u0627\u062D\u0628\u0647\u060C
+   \u0648\u0635\u0648\u062A\u064C \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u0639\u0636\u0648 \u0643\u0645\u0627 \u0643\u0627\u0646. \u0627\u0644\u062C\u0647\u0627\u0632 \u064A\u0639\u0631\u0641 \u0645\u0641\u062A\u0627\u062D\u0647 \u0647\u0648 \u0641\u0642\u0637 (chat.pollKeys) \u0644\u064A\u064F\u0638\u0647\u0631 \u0627\u062E\u062A\u064A\u0627\u0631\u0647. */
+/* v65 (C111): \u0625\u0642\u0631\u0627\u0631 \u0627\u0644\u062C\u0647\u0627\u0632 \u0628\u0644\u0627 \u0631\u0645\u0632 \u062F\u062E\u0648\u0644 \u2014 \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0627\u0644\u0623\u0635\u0644\u064A\u0651 \u064A\u0633\u062A\u0644\u0645 \u0627\u0644\u0625\u0634\u0639\u0627\u0631 \u0648\u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0645\u063A\u0644\u0642 \u0641\u0644\u0627 \u064A\u0645\u0644\u0643 \u0631\u0645\u0632 Firebase.
+   \u0627\u0644\u062E\u0627\u062F\u0645 \u064A\u0648\u0642\u0651\u0639 \u0641\u064A \u0627\u0644\u0625\u0634\u0639\u0627\u0631 \u0646\u0641\u0633\u0647 (HMAC \u0628\u0633\u0631\u0651 \u0627\u0644\u062E\u0627\u062F\u0645) \u0645\u0627 \u064A\u064F\u0633\u0645\u062D \u0628\u0625\u0642\u0631\u0627\u0631\u0647: \u00AB\u0631\u0646\u0651\u062A \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629\u00BB \u0623\u0648 \u00AB\u0648\u0635\u0644\u062A \u0627\u0644\u0631\u0633\u0627\u0644\u0629\u00BB\u061B \u0641\u0644\u0627 \u064A\u064F\u0642\u0631\u0651 \u0623\u062D\u062F\u064C \u0639\u0646 \u063A\u064A\u0631\u0647. */
 let ackHmac = null;
 async function ackSig(env, s) {
   if (!ackHmac) ackHmac = await crypto.subtle.importKey("raw", new TextEncoder().encode((JSON.parse(env.SA_JSON).private_key || "") + "|ack"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
@@ -2268,8 +2268,8 @@ async function ackSig(env, s) {
   let b = ""; for (let i = 0; i < 16; i++) b += sig[i].toString(16).padStart(2, "0");
   return b;
 }
-/* C152: صورة حساب المرسِل لإشعار أندرويد (كإشعارات انستجرام) — بلا رمز دخول (الإشعار يصل والتطبيق مغلق)،
-   لكن برابطٍ موقَّع (ak = HMAC "av|uid") لا يصدر إلّا داخل إشعارٍ من ذلك المرسِل ⇒ لا تعداد للصور. */
+/* C152: \u0635\u0648\u0631\u0629 \u062D\u0633\u0627\u0628 \u0627\u0644\u0645\u0631\u0633\u0650\u0644 \u0644\u0625\u0634\u0639\u0627\u0631 \u0623\u0646\u062F\u0631\u0648\u064A\u062F (\u0643\u0625\u0634\u0639\u0627\u0631\u0627\u062A \u0627\u0646\u0633\u062A\u062C\u0631\u0627\u0645) \u2014 \u0628\u0644\u0627 \u0631\u0645\u0632 \u062F\u062E\u0648\u0644 (\u0627\u0644\u0625\u0634\u0639\u0627\u0631 \u064A\u0635\u0644 \u0648\u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0645\u063A\u0644\u0642)\u060C
+   \u0644\u0643\u0646 \u0628\u0631\u0627\u0628\u0637\u064D \u0645\u0648\u0642\u064E\u0651\u0639 (ak = HMAC "av|uid") \u0644\u0627 \u064A\u0635\u062F\u0631 \u0625\u0644\u0651\u0627 \u062F\u0627\u062E\u0644 \u0625\u0634\u0639\u0627\u0631\u064D \u0645\u0646 \u0630\u0644\u0643 \u0627\u0644\u0645\u0631\u0633\u0650\u0644 \u21D2 \u0644\u0627 \u062A\u0639\u062F\u0627\u062F \u0644\u0644\u0635\u0648\u0631. */
 async function avatarImg(request, env) {
   const q = new URL(request.url).searchParams, u = String(q.get("u") || ""), sg = String(q.get("s") || "");
   if (!segOk(u) || !/^[0-9a-f]{32}$/.test(sg) || sg !== await ackSig(env, "av|" + u)) return new Response("", { status: 403 });
@@ -2285,7 +2285,7 @@ async function deviceAck(request, env) {
   const k = String(b.k || ""), to = String(b.to || ""), sg = String(b.s || "");
   if (!segOk(to) || !/^[0-9a-f]{32}$/.test(sg)) return json({ ok: false }, 400);
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
-  if (k === "r") {   // المكالمة رنّت على جهازه
+  if (k === "r") {   // \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u0631\u0646\u0651\u062A \u0639\u0644\u0649 \u062C\u0647\u0627\u0632\u0647
     const call = String(b.call || "");
     if (!/^[A-Za-z0-9_-]{6,40}$/.test(call) || sg !== await ackSig(env, "r|" + call + "|" + to)) return json({ ok: false }, 403);
     const c = await rtdbGet(token, "calls/" + call).catch(() => null);
@@ -2293,7 +2293,7 @@ async function deviceAck(request, env) {
     stat("ack:ring");
     return json({ ok: true });
   }
-  if (k === "x") {   // C142: «رفض» من إشعار الهاتف والتطبيق مغلق — كان المتّصل يبقى «يرنّ…» حتّى تنتهي المهلة
+  if (k === "x") {   // C142: \u00AB\u0631\u0641\u0636\u00BB \u0645\u0646 \u0625\u0634\u0639\u0627\u0631 \u0627\u0644\u0647\u0627\u062A\u0641 \u0648\u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0645\u063A\u0644\u0642 \u2014 \u0643\u0627\u0646 \u0627\u0644\u0645\u062A\u0651\u0635\u0644 \u064A\u0628\u0642\u0649 \u00AB\u064A\u0631\u0646\u0651\u2026\u00BB \u062D\u062A\u0651\u0649 \u062A\u0646\u062A\u0647\u064A \u0627\u0644\u0645\u0647\u0644\u0629
     const call = String(b.call || "");
     if (!/^[A-Za-z0-9_-]{6,40}$/.test(call) || sg !== await ackSig(env, "r|" + call + "|" + to)) return json({ ok: false }, 403);
     const c = await rtdbGet(token, "calls/" + call).catch(() => null);
@@ -2301,7 +2301,7 @@ async function deviceAck(request, env) {
     stat("ack:decline");
     return json({ ok: true });
   }
-  if (k === "d") {   // الرسالة وصلت جهازه
+  if (k === "d") {   // \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0648\u0635\u0644\u062A \u062C\u0647\u0627\u0632\u0647
     const cid = String(b.cid || ""), ts = Math.floor(Number(b.ts || 0));
     if (!segOk(cid) || !(ts > 0) || sg !== await ackSig(env, "d|" + cid + "|" + to + "|" + ts)) return json({ ok: false }, 403);
     const c = await fsGet(token, "chats/" + cid).catch(() => null);
@@ -2332,7 +2332,7 @@ async function opChatVote(uid, payload, env) {
   if (ex.anonymous) {
     const key = await anonKey(env, uid, cid, id);
     const w = [setPath(cid, day, ["msgs", id, "votes", key], opt == null ? undefined : opt)];
-    if (m.votes && uid in m.votes) w.push(setPath(cid, day, ["msgs", id, "votes", uid], undefined));   // صوتٌ قديم باسمه (قبل v35) يُمحى
+    if (m.votes && uid in m.votes) w.push(setPath(cid, day, ["msgs", id, "votes", uid], undefined));   // \u0635\u0648\u062A\u064C \u0642\u062F\u064A\u0645 \u0628\u0627\u0633\u0645\u0647 (\u0642\u0628\u0644 v35) \u064A\u064F\u0645\u062D\u0649
     await fsCommit(token, w);
     return { ok: true, key };
   }
@@ -2355,7 +2355,7 @@ async function opChatPollEdit(uid, payload, env) {
   const q = String(payload.question || "").slice(0, 300), opts = (Array.isArray(payload.options) ? payload.options : []).map(x => String(x).slice(0, 120)).filter(Boolean).slice(0, 12);
   if (!q || opts.length < 2) throw new Error("question and two options required");
   const old = (m.extra && m.extra.options) || [], votes = m.votes || {}, keep = {};
-  // تبقى أصوات الخيار الذي بقي نصّه كما هو (ولو تغيّر ترتيبه)
+  // \u062A\u0628\u0642\u0649 \u0623\u0635\u0648\u0627\u062A \u0627\u0644\u062E\u064A\u0627\u0631 \u0627\u0644\u0630\u064A \u0628\u0642\u064A \u0646\u0635\u0651\u0647 \u0643\u0645\u0627 \u0647\u0648 (\u0648\u0644\u0648 \u062A\u063A\u064A\u0651\u0631 \u062A\u0631\u062A\u064A\u0628\u0647)
   for (const u in votes) { const t = old[votes[u]]; const ni = opts.indexOf(t); if (ni >= 0) keep[u] = ni; }
   const extra = Object.assign({}, m.extra, { question: q, options: opts, editedAt: Date.now() });
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day,
@@ -2387,20 +2387,20 @@ async function opChatTask(uid, payload, env, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const { c, m, cid, day, id } = await toolMsg(token, payload, uid, "tasks");
   const taskId = String(payload.taskId || "");
-  // C164: في السرّيّة لا يرى الخادم المهامّ (داخل enc) — معرّفٌ سليم فقط، والحالة وحدها (لا ملاحظات نصّيّة ظاهرة)
+  // C164: \u0641\u064A \u0627\u0644\u0633\u0631\u0651\u064A\u0651\u0629 \u0644\u0627 \u064A\u0631\u0649 \u0627\u0644\u062E\u0627\u062F\u0645 \u0627\u0644\u0645\u0647\u0627\u0645\u0651 (\u062F\u0627\u062E\u0644 enc) \u2014 \u0645\u0639\u0631\u0651\u0641\u064C \u0633\u0644\u064A\u0645 \u0641\u0642\u0637\u060C \u0648\u0627\u0644\u062D\u0627\u0644\u0629 \u0648\u062D\u062F\u0647\u0627 (\u0644\u0627 \u0645\u0644\u0627\u062D\u0638\u0627\u062A \u0646\u0635\u0651\u064A\u0651\u0629 \u0638\u0627\u0647\u0631\u0629)
   let task = null;
   if (m.enc) {
     if (!/^[A-Za-z0-9_-]{1,40}$/.test(taskId)) throw new Error("task not found");
     if (payload.note != null) throw new Error("notes are not available in secret chats");
   } else if (!(task = ((m.extra && m.extra.tasks) || []).find(t => t.id === taskId))) throw new Error("task not found");
-  // C173: الصلاحيّات — منشئ القائمة والمشرف: كلّ شيء · المسؤول: حالته وتخلّيه · مهمّة «لأيّ عضو»: يتولّاها أو يُنجزها أيّ عضو
+  // C173: \u0627\u0644\u0635\u0644\u0627\u062D\u064A\u0651\u0627\u062A \u2014 \u0645\u0646\u0634\u0626 \u0627\u0644\u0642\u0627\u0626\u0645\u0629 \u0648\u0627\u0644\u0645\u0634\u0631\u0641: \u0643\u0644\u0651 \u0634\u064A\u0621 \u00B7 \u0627\u0644\u0645\u0633\u0624\u0648\u0644: \u062D\u0627\u0644\u062A\u0647 \u0648\u062A\u062E\u0644\u0651\u064A\u0647 \u00B7 \u0645\u0647\u0645\u0651\u0629 \u00AB\u0644\u0623\u064A\u0651 \u0639\u0636\u0648\u00BB: \u064A\u062A\u0648\u0644\u0651\u0627\u0647\u0627 \u0623\u0648 \u064A\u064F\u0646\u062C\u0632\u0647\u0627 \u0623\u064A\u0651 \u0639\u0636\u0648
   const admin = (fstr(c, "type") === "group" || fstr(c, "type") === "family") && fsArr(c, "admins").indexOf(uid) >= 0;
   const boss = m.by === uid || admin;
   const cur = (m.tstate && m.tstate[taskId]) || {};
   const effOf = (s) => task ? taskEff({ tstate: { [taskId]: s } }, task) : (s.owner || null);
   const eff0 = effOf(cur);
   const next = Object.assign({}, cur, { by: uid, ts: Date.now() });
-  if (payload.owner !== undefined) {   // إعادة إسناد (المنشئ/المشرف) — "" = لأيّ عضو
+  if (payload.owner !== undefined) {   // \u0625\u0639\u0627\u062F\u0629 \u0625\u0633\u0646\u0627\u062F (\u0627\u0644\u0645\u0646\u0634\u0626/\u0627\u0644\u0645\u0634\u0631\u0641) \u2014 "" = \u0644\u0623\u064A\u0651 \u0639\u0636\u0648
     if (!boss) throw new Error("only the creator can reassign");
     const o = String(payload.owner || "");
     if (o && (!segOk(o) || fsArr(c, "members").indexOf(o) < 0)) throw new Error("not a member");
@@ -2415,7 +2415,7 @@ async function opChatTask(uid, payload, env, ctx) {
     else { delete next.doneBy; delete next.doneAt; }
   }
   if (payload.note != null) next.note = String(payload.note).slice(0, 300);
-  if (payload.pct !== undefined) {   // C188: نسبة إنجاز المهمّة 0–100 — يُغيّرها المسؤول (أو المنشئ/المشرف)
+  if (payload.pct !== undefined) {   // C188: \u0646\u0633\u0628\u0629 \u0625\u0646\u062C\u0627\u0632 \u0627\u0644\u0645\u0647\u0645\u0651\u0629 0\u2013100 \u2014 \u064A\u064F\u063A\u064A\u0651\u0631\u0647\u0627 \u0627\u0644\u0645\u0633\u0624\u0648\u0644 (\u0623\u0648 \u0627\u0644\u0645\u0646\u0634\u0626/\u0627\u0644\u0645\u0634\u0631\u0641)
     if (!m.enc && eff0 && eff0 !== uid && !boss) throw new Error("only the assignee can change this task");
     const v = Math.round(Number(payload.pct));
     if (!(v >= 0 && v <= 100)) throw new Error("bad pct");
@@ -2423,23 +2423,23 @@ async function opChatTask(uid, payload, env, ctx) {
   }
   const m2 = Object.assign({}, m, { tstate: Object.assign({}, m.tstate, { [taskId]: next }) });
   await fsCommit(token, [setPath(cid, day, ["msgs", id, "tstate", taskId], next)].concat(m.enc ? [] : [taskIdxWrite(c, cid, day, id, m2)]));
-  // الإشعارات بعد الردّ
+  // \u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062A \u0628\u0639\u062F \u0627\u0644\u0631\u062F\u0651
   const job = (async () => {
-    const names = chatNames(c), who = names[uid] || "سوا", gname = fstr(c, "name") || "سوا";
+    const names = chatNames(c), who = names[uid] || "\u0633\u0648\u0627", gname = fstr(c, "name") || "\u0633\u0648\u0627";
     const eff1 = effOf(next);
     if (eff1 && eff1 !== uid && eff1 !== eff0 && next.status !== "done")
-      await taskPush(token, c, cid, [eff1], "📌 " + who + " أسند إليك مهمّة · " + gname, task ? task.text : "مهمّة مشفّرة 🔒");
+      await taskPush(token, c, cid, [eff1], "\uD83D\uDCCC " + who + " \u0623\u0633\u0646\u062F \u0625\u0644\u064A\u0643 \u0645\u0647\u0645\u0651\u0629 \u00B7 " + gname, task ? task.text : "\u0645\u0647\u0645\u0651\u0629 \u0645\u0634\u0641\u0651\u0631\u0629 \uD83D\uDD12");
     if (payload.status === "done" && cur.status !== "done" && m.by && m.by !== uid) {
       const all = !m.enc && ((m.extra && m.extra.tasks) || []).every(t => ((m2.tstate[t.id] || {}).status) === "done");
-      await taskPush(token, c, cid, [m.by], all ? "🎉 اكتملت قائمة «" + ((m.extra && m.extra.title) || "") + "»" : "✓ " + who + " أنجز مهمّة · " + gname, task ? task.text : "🔒");
+      await taskPush(token, c, cid, [m.by], all ? "\uD83C\uDF89 \u0627\u0643\u062A\u0645\u0644\u062A \u0642\u0627\u0626\u0645\u0629 \u00AB" + ((m.extra && m.extra.title) || "") + "\u00BB" : "\u2713 " + who + " \u0623\u0646\u062C\u0632 \u0645\u0647\u0645\u0651\u0629 \u00B7 " + gname, task ? task.text : "\uD83D\uDD12");
     }
   })().catch(e => console.log("taskpush:", e && e.message));
   if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
   return { ok: true, state: next };
 }
 
-// C173: المهامّ — المسؤول الفعليّ (tstate.owner يغلب assigneeId؛ "" = لأيّ عضو) · فهرس tasklists لشاشة «مهامّي» والتذكير · الإشعارات
-const T_H = 3600000, T_S1 = 15 * T_H, T_S2 = 31 * T_H;   // الموعد يوم (منتصف ليل UTC): تذكير قبله بيوم ضحىً · «تأخّرت» صباح اليوم التالي
+// C173: \u0627\u0644\u0645\u0647\u0627\u0645\u0651 \u2014 \u0627\u0644\u0645\u0633\u0624\u0648\u0644 \u0627\u0644\u0641\u0639\u0644\u064A\u0651 (tstate.owner \u064A\u063A\u0644\u0628 assigneeId\u061B "" = \u0644\u0623\u064A\u0651 \u0639\u0636\u0648) \u00B7 \u0641\u0647\u0631\u0633 tasklists \u0644\u0634\u0627\u0634\u0629 \u00AB\u0645\u0647\u0627\u0645\u0651\u064A\u00BB \u0648\u0627\u0644\u062A\u0630\u0643\u064A\u0631 \u00B7 \u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062A
+const T_H = 3600000, T_S1 = 15 * T_H, T_S2 = 31 * T_H;   // \u0627\u0644\u0645\u0648\u0639\u062F \u064A\u0648\u0645 (\u0645\u0646\u062A\u0635\u0641 \u0644\u064A\u0644 UTC): \u062A\u0630\u0643\u064A\u0631 \u0642\u0628\u0644\u0647 \u0628\u064A\u0648\u0645 \u0636\u062D\u0649\u064B \u00B7 \u00AB\u062A\u0623\u062E\u0651\u0631\u062A\u00BB \u0635\u0628\u0627\u062D \u0627\u0644\u064A\u0648\u0645 \u0627\u0644\u062A\u0627\u0644\u064A
 function taskEff(m, t) { const s = (m.tstate && m.tstate[t.id]) || {}; return s.owner !== undefined && s.owner !== null ? (s.owner || null) : (t.assigneeId || null); }
 function taskRemStage(s, t) { const r = String((s && s.rem) || "").split(":"); return r[0] === String(t.dueAt) ? Number(r[1]) || 0 : 0; }
 function taskRemNext(m) {
@@ -2468,10 +2468,10 @@ async function taskPush(token, c, cid, uids, title, body) {
   if (!to.length) return 0;
   return pushTo(token, to, strData({ t: "task", cid, title, body: String(body || "").slice(0, 300), ts: Date.now() }));
 }
-// إشعار «أُسندت إليك» لمن صار مسؤولاً جديداً (لا المرسل نفسه)
+// \u0625\u0634\u0639\u0627\u0631 \u00AB\u0623\u064F\u0633\u0646\u062F\u062A \u0625\u0644\u064A\u0643\u00BB \u0644\u0645\u0646 \u0635\u0627\u0631 \u0645\u0633\u0624\u0648\u0644\u0627\u064B \u062C\u062F\u064A\u062F\u0627\u064B (\u0644\u0627 \u0627\u0644\u0645\u0631\u0633\u0644 \u0646\u0641\u0633\u0647)
 async function taskAssignPush(token, c, cid, uid, m, before) {
   if (m.enc) return 0;
-  const names = chatNames(c), gname = fstr(c, "name") || "سوا", by = names[uid] || "سوا";
+  const names = chatNames(c), gname = fstr(c, "name") || "\u0633\u0648\u0627", by = names[uid] || "\u0633\u0648\u0627";
   const per = {};
   for (const t of (m.extra && m.extra.tasks) || []) {
     const a = taskEff(m, t); if (!a || a === uid) continue;
@@ -2482,13 +2482,13 @@ async function taskAssignPush(token, c, cid, uid, m, before) {
   let n = 0;
   for (const u of Object.keys(per).slice(0, LIM(notifyChat.env).task)) {
     const l = per[u];
-    n += await taskPush(token, c, cid, [u], "📌 " + by + " أسند إليك " + (l.length > 1 ? l.length + " مهامّ" : "مهمّة") + " · " + gname, l.slice(0, 3).join(" · ") + (l.length > 3 ? " …" : ""));
+    n += await taskPush(token, c, cid, [u], "\uD83D\uDCCC " + by + " \u0623\u0633\u0646\u062F \u0625\u0644\u064A\u0643 " + (l.length > 1 ? l.length + " \u0645\u0647\u0627\u0645\u0651" : "\u0645\u0647\u0645\u0651\u0629") + " \u00B7 " + gname, l.slice(0, 3).join(" \u00B7 ") + (l.length > 3 ? " \u2026" : ""));
   }
   return n;
 }
 function taskEffMap(m) { const o = {}; for (const t of (m.extra && m.extra.tasks) || []) o[t.id] = taskEff(m, t); return o; }
 
-// إضافة مهمّة سريعة من البطاقة — أيّ عضو (غير السرّيّة؛ في السرّيّة يضيف المنشئ/المشرف عبر التعديل المشفّر)
+// \u0625\u0636\u0627\u0641\u0629 \u0645\u0647\u0645\u0651\u0629 \u0633\u0631\u064A\u0639\u0629 \u0645\u0646 \u0627\u0644\u0628\u0637\u0627\u0642\u0629 \u2014 \u0623\u064A\u0651 \u0639\u0636\u0648 (\u063A\u064A\u0631 \u0627\u0644\u0633\u0631\u0651\u064A\u0651\u0629\u061B \u0641\u064A \u0627\u0644\u0633\u0631\u0651\u064A\u0651\u0629 \u064A\u0636\u064A\u0641 \u0627\u0644\u0645\u0646\u0634\u0626/\u0627\u0644\u0645\u0634\u0631\u0641 \u0639\u0628\u0631 \u0627\u0644\u062A\u0639\u062F\u064A\u0644 \u0627\u0644\u0645\u0634\u0641\u0651\u0631)
 async function opChatTaskAdd(uid, payload, env, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const { c, m, cid, day, id } = await toolMsg(token, payload, uid, "tasks");
@@ -2510,7 +2510,7 @@ async function opChatTaskAdd(uid, payload, env, ctx) {
   return { task: t };
 }
 
-// «مهامّي»: القوائم المفتوحة التي أنا منشئها أو مسؤولٌ فيها (غير السرّيّة) — استعلامٌ واحد + عضويّة بقراءةٍ واحدة
+// \u00AB\u0645\u0647\u0627\u0645\u0651\u064A\u00BB: \u0627\u0644\u0642\u0648\u0627\u0626\u0645 \u0627\u0644\u0645\u0641\u062A\u0648\u062D\u0629 \u0627\u0644\u062A\u064A \u0623\u0646\u0627 \u0645\u0646\u0634\u0626\u0647\u0627 \u0623\u0648 \u0645\u0633\u0624\u0648\u0644\u064C \u0641\u064A\u0647\u0627 (\u063A\u064A\u0631 \u0627\u0644\u0633\u0631\u0651\u064A\u0651\u0629) \u2014 \u0627\u0633\u062A\u0639\u0644\u0627\u0645\u064C \u0648\u0627\u062D\u062F + \u0639\u0636\u0648\u064A\u0651\u0629 \u0628\u0642\u0631\u0627\u0621\u0629\u064D \u0648\u0627\u062D\u062F\u0629
 async function opChatMyTasks(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
@@ -2532,7 +2532,7 @@ async function opChatMyTasks(uid, payload, env) {
   return { lists };
 }
 
-// التذكير (من المجدوِل): قائمةٌ واحدة في كلّ تشغيل
+// \u0627\u0644\u062A\u0630\u0643\u064A\u0631 (\u0645\u0646 \u0627\u0644\u0645\u062C\u062F\u0648\u0650\u0644): \u0642\u0627\u0626\u0645\u0629\u064C \u0648\u0627\u062D\u062F\u0629 \u0641\u064A \u0643\u0644\u0651 \u062A\u0634\u063A\u064A\u0644
 async function taskReminders(env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const now = Date.now();
@@ -2547,7 +2547,7 @@ async function taskReminders(env) {
     let c = null, m = null;
     try { c = await fsGet(token, "chats/" + x.cid); m = await dayMsg(token, x.cid, x.day, x.id); } catch (e) {}
     if (!c || !m || m.del) { await fsCommit(token, [{ delete: d.name }]).catch(() => {}); continue; }
-    const names = chatNames(c), gname = fstr(c, "name") || "سوا", ts = Object.assign({}, m.tstate), writes = [];
+    const names = chatNames(c), gname = fstr(c, "name") || "\u0633\u0648\u0627", ts = Object.assign({}, m.tstate), writes = [];
     const soon = {}, late = {}, lateBy = [];
     for (const t of (m.extra && m.extra.tasks) || []) {
       const s = ts[t.id] || {}, a = taskEff(m, t);
@@ -2560,15 +2560,15 @@ async function taskReminders(env) {
     }
     const m2 = Object.assign({}, m, { tstate: ts });
     writes.push(taskIdxWrite(c, x.cid, x.day, x.id, m2));
-    await fsCommit(token, writes).catch(e => console.log("taskrem:", e && e.message));   // أوّلاً: لا تكرار
-    for (const u of Object.keys(soon).slice(0, 8)) sent += await taskPush(token, c, x.cid, [u], "⏰ موعد مهمّتك قريب · " + gname, soon[u].slice(0, 3).join(" · "));
-    for (const u of Object.keys(late).slice(0, 8)) sent += await taskPush(token, c, x.cid, [u], "⚠️ تأخّرت مهمّتك · " + gname, late[u].slice(0, 3).join(" · "));
-    if (lateBy.length && m.by && !late[m.by]) sent += await taskPush(token, c, x.cid, [m.by], "⚠️ تأخّرت مهامّ في «" + ((m.extra && m.extra.title) || "") + "»", lateBy.slice(0, 3).join(" · "));
+    await fsCommit(token, writes).catch(e => console.log("taskrem:", e && e.message));   // \u0623\u0648\u0651\u0644\u0627\u064B: \u0644\u0627 \u062A\u0643\u0631\u0627\u0631
+    for (const u of Object.keys(soon).slice(0, 8)) sent += await taskPush(token, c, x.cid, [u], "\u23F0 \u0645\u0648\u0639\u062F \u0645\u0647\u0645\u0651\u062A\u0643 \u0642\u0631\u064A\u0628 \u00B7 " + gname, soon[u].slice(0, 3).join(" \u00B7 "));
+    for (const u of Object.keys(late).slice(0, 8)) sent += await taskPush(token, c, x.cid, [u], "\u26A0\uFE0F \u062A\u0623\u062E\u0651\u0631\u062A \u0645\u0647\u0645\u0651\u062A\u0643 \u00B7 " + gname, late[u].slice(0, 3).join(" \u00B7 "));
+    if (lateBy.length && m.by && !late[m.by]) sent += await taskPush(token, c, x.cid, [m.by], "\u26A0\uFE0F \u062A\u0623\u062E\u0651\u0631\u062A \u0645\u0647\u0627\u0645\u0651 \u0641\u064A \u00AB" + ((m.extra && m.extra.title) || "") + "\u00BB", lateBy.slice(0, 3).join(" \u00B7 "));
   }
   return { reminders: rows.length, sent };
 }
 
-// C164: تعديل قائمة المهامّ — منشئها أو مشرف المجموعة · تبقى حالة المهامّ التي بقيت · في السرّيّة: محتوى مشفّرٌ جديد للرسالة نفسها
+// C164: \u062A\u0639\u062F\u064A\u0644 \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0645\u0647\u0627\u0645\u0651 \u2014 \u0645\u0646\u0634\u0626\u0647\u0627 \u0623\u0648 \u0645\u0634\u0631\u0641 \u0627\u0644\u0645\u062C\u0645\u0648\u0639\u0629 \u00B7 \u062A\u0628\u0642\u0649 \u062D\u0627\u0644\u0629 \u0627\u0644\u0645\u0647\u0627\u0645\u0651 \u0627\u0644\u062A\u064A \u0628\u0642\u064A\u062A \u00B7 \u0641\u064A \u0627\u0644\u0633\u0631\u0651\u064A\u0651\u0629: \u0645\u062D\u062A\u0648\u0649 \u0645\u0634\u0641\u0651\u0631\u064C \u062C\u062F\u064A\u062F \u0644\u0644\u0631\u0633\u0627\u0644\u0629 \u0646\u0641\u0633\u0647\u0627
 async function opChatTasksEdit(uid, payload, env, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const { c, m, cid, day, id } = await toolMsg(token, payload, uid, "tasks");
@@ -2589,12 +2589,12 @@ async function opChatTasksEdit(uid, payload, env, ctx) {
     text: String(t && t.text || "").slice(0, 300), assigneeId: segOk(String(t && t.assigneeId || "")) ? String(t.assigneeId) : null,
     assigneeName: String(t && t.assigneeName || "").slice(0, 80), dueAt: Number(t && t.dueAt) > 0 ? Number(t.dueAt) : null })).filter(t => t.text.trim());
   if (!title || !tasks.length) throw new Error("title and one task required");
-  // C173: تبقى «أضافها» للمهامّ التي بقيت
+  // C173: \u062A\u0628\u0642\u0649 \u00AB\u0623\u0636\u0627\u0641\u0647\u0627\u00BB \u0644\u0644\u0645\u0647\u0627\u0645\u0651 \u0627\u0644\u062A\u064A \u0628\u0642\u064A\u062A
   const oldT = {}; for (const t of (m.extra && m.extra.tasks) || []) oldT[t.id] = t;
   tasks.forEach(t => { if (oldT[t.id] && oldT[t.id].addedBy) t.addedBy = oldT[t.id].addedBy; });
   const extra = Object.assign({}, m.extra, { title, tasks, editedAt: now });
   const m2 = Object.assign({}, m, { extra });
-  // C173: تغيير المسؤول في التعديل يُلغي التولّي/الإسناد السابق لتلك المهمّة
+  // C173: \u062A\u063A\u064A\u064A\u0631 \u0627\u0644\u0645\u0633\u0624\u0648\u0644 \u0641\u064A \u0627\u0644\u062A\u0639\u062F\u064A\u0644 \u064A\u064F\u0644\u063A\u064A \u0627\u0644\u062A\u0648\u0644\u0651\u064A/\u0627\u0644\u0625\u0633\u0646\u0627\u062F \u0627\u0644\u0633\u0627\u0628\u0642 \u0644\u062A\u0644\u0643 \u0627\u0644\u0645\u0647\u0645\u0651\u0629
   const tsw = [];
   for (const t of tasks) { const o = oldT[t.id], s = (m.tstate || {})[t.id]; if (o && s && s.owner !== undefined && (o.assigneeId || null) !== (t.assigneeId || null)) { m2.tstate = Object.assign({}, m2.tstate, { [t.id]: Object.assign({}, s) }); delete m2.tstate[t.id].owner; tsw.push(fp("msgs", id, "tstate", t.id, "owner")); } }
   await fsCommit(token, [{ update: { name: base, fields: { msgs: { mapValue: { fields: { [id]: { mapValue: { fields: { extra: toFsValue(capVal(extra)), edited: { integerValue: String(now) } } } } } } } } },
@@ -2604,9 +2604,9 @@ async function opChatTasksEdit(uid, payload, env, ctx) {
   return { edited: now };
 }
 
-/* ---------- 28) الإشعارات (C5): Firebase Cloud Messaging (HTTP v1) ----------
-   accounts/{uid}/devices/{id} = { token, ua, ts } — id = بصمة الرمز. الإرسال «بياناتٌ فقط» فيقرّر عامل الخدمة
-   (يُظهر إشعاراً، أو يمرّره للتطبيق المفتوح). المكتومون (chats.mutedBy) لا يصلهم شيء. */
+/* ---------- 28) \u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062A (C5): Firebase Cloud Messaging (HTTP v1) ----------
+   accounts/{uid}/devices/{id} = { token, ua, ts } \u2014 id = \u0628\u0635\u0645\u0629 \u0627\u0644\u0631\u0645\u0632. \u0627\u0644\u0625\u0631\u0633\u0627\u0644 \u00AB\u0628\u064A\u0627\u0646\u0627\u062A\u064C \u0641\u0642\u0637\u00BB \u0641\u064A\u0642\u0631\u0651\u0631 \u0639\u0627\u0645\u0644 \u0627\u0644\u062E\u062F\u0645\u0629
+   (\u064A\u064F\u0638\u0647\u0631 \u0625\u0634\u0639\u0627\u0631\u0627\u064B\u060C \u0623\u0648 \u064A\u0645\u0631\u0651\u0631\u0647 \u0644\u0644\u062A\u0637\u0628\u064A\u0642 \u0627\u0644\u0645\u0641\u062A\u0648\u062D). \u0627\u0644\u0645\u0643\u062A\u0648\u0645\u0648\u0646 (chats.mutedBy) \u0644\u0627 \u064A\u0635\u0644\u0647\u0645 \u0634\u064A\u0621. */
 async function tokenId(t) {
   const h = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t)));
   return "d" + bytesToB64url(h).slice(0, 32).replace(/-/g, "A").replace(/_/g, "B");
@@ -2616,18 +2616,18 @@ async function opPushRegister(uid, payload, env) {
   const t = String((payload && payload.token) || "");
   if (t.length < 20 || t.length > 4096) throw new Error("bad token");
   const id = await tokenId(t);
-  // رمز الجهاز نفسه قد يكون مسجّلاً لحسابٍ آخر سابقاً (تبديل الحساب): يُنقل لهذا الحساب
+  // \u0631\u0645\u0632 \u0627\u0644\u062C\u0647\u0627\u0632 \u0646\u0641\u0633\u0647 \u0642\u062F \u064A\u0643\u0648\u0646 \u0645\u0633\u062C\u0651\u0644\u0627\u064B \u0644\u062D\u0633\u0627\u0628\u064D \u0622\u062E\u0631 \u0633\u0627\u0628\u0642\u0627\u064B (\u062A\u0628\u062F\u064A\u0644 \u0627\u0644\u062D\u0633\u0627\u0628): \u064A\u064F\u0646\u0642\u0644 \u0644\u0647\u0630\u0627 \u0627\u0644\u062D\u0633\u0627\u0628
   if (payload.prevUid && segOk(String(payload.prevUid)) && payload.prevUid !== uid) {
     await fsCommit(token, [{ delete: DOC_ROOT + "/accounts/" + payload.prevUid + "/devices/" + id }]).catch(() => {});
   }
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid + "/devices/" + id, fields: {
     token: { stringValue: t }, ua: { stringValue: String(payload.ua || "").slice(0, 160) }, ts: { integerValue: String(Date.now()) },
-    lang: { stringValue: payload.lang === "en" ? "en" : "ar" },   // v68: لغة إشعارات هذا الجهاز = لغة التطبيق
-    noav: { booleanValue: payload.noav === true },   // C164: «صور المرسلين في الإشعارات» مطفأة على هذا الجهاز
-    // C151: رمز VoIP للآيفون (CallKit) وبيئته
+    lang: { stringValue: payload.lang === "en" ? "en" : "ar" },   // v68: \u0644\u063A\u0629 \u0625\u0634\u0639\u0627\u0631\u0627\u062A \u0647\u0630\u0627 \u0627\u0644\u062C\u0647\u0627\u0632 = \u0644\u063A\u0629 \u0627\u0644\u062A\u0637\u0628\u064A\u0642
+    noav: { booleanValue: payload.noav === true },   // C164: \u00AB\u0635\u0648\u0631 \u0627\u0644\u0645\u0631\u0633\u0644\u064A\u0646 \u0641\u064A \u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062A\u00BB \u0645\u0637\u0641\u0623\u0629 \u0639\u0644\u0649 \u0647\u0630\u0627 \u0627\u0644\u062C\u0647\u0627\u0632
+    // C151: \u0631\u0645\u0632 VoIP \u0644\u0644\u0622\u064A\u0641\u0648\u0646 (CallKit) \u0648\u0628\u064A\u0626\u062A\u0647
     voip: { stringValue: /^[0-9a-f]{40,200}$/i.test(String(payload.voip || "")) ? String(payload.voip) : "" },
     voipEnv: { stringValue: payload.voipEnv === "development" ? "development" : "production" } } } }]);
-  // C60: تنظيف — الأجهزة الأقدم من ٦٠ يوماً أو الزائدة عن الحدّ تُحذف (الرموز القديمة تموت غالباً، والمستخدم العاديّ له جهازٌ أو جهازان)
+  // C60: \u062A\u0646\u0638\u064A\u0641 \u2014 \u0627\u0644\u0623\u062C\u0647\u0632\u0629 \u0627\u0644\u0623\u0642\u062F\u0645 \u0645\u0646 \u0666\u0660 \u064A\u0648\u0645\u0627\u064B \u0623\u0648 \u0627\u0644\u0632\u0627\u0626\u062F\u0629 \u0639\u0646 \u0627\u0644\u062D\u062F\u0651 \u062A\u064F\u062D\u0630\u0641 (\u0627\u0644\u0631\u0645\u0648\u0632 \u0627\u0644\u0642\u062F\u064A\u0645\u0629 \u062A\u0645\u0648\u062A \u063A\u0627\u0644\u0628\u0627\u064B\u060C \u0648\u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u0627\u0644\u0639\u0627\u062F\u064A\u0651 \u0644\u0647 \u062C\u0647\u0627\u0632\u064C \u0623\u0648 \u062C\u0647\u0627\u0632\u0627\u0646)
   try {
     const devs = await devsOf(token, uid), now = Date.now();
     const old = devs.filter((d, i) => d.name.split("/").pop() !== id && (i >= DEV_MAX || now - devTs(d) > DEV_TTL)).slice(0, 20);
@@ -2635,7 +2635,7 @@ async function opPushRegister(uid, payload, env) {
   } catch (e) {}
   return { id };
 }
-// v57: «هل هذا الجهاز ما زال مسجّلاً؟» — يسأله التطبيق عند كلّ فتح (كلّ ٢٠ دقيقة على الأكثر)؛ إن لم يجده الخادم يسجّله فوراً (إصلاحٌ ذاتيّ)
+// v57: \u00AB\u0647\u0644 \u0647\u0630\u0627 \u0627\u0644\u062C\u0647\u0627\u0632 \u0645\u0627 \u0632\u0627\u0644 \u0645\u0633\u062C\u0651\u0644\u0627\u064B\u061F\u00BB \u2014 \u064A\u0633\u0623\u0644\u0647 \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0639\u0646\u062F \u0643\u0644\u0651 \u0641\u062A\u062D (\u0643\u0644\u0651 \u0662\u0660 \u062F\u0642\u064A\u0642\u0629 \u0639\u0644\u0649 \u0627\u0644\u0623\u0643\u062B\u0631)\u061B \u0625\u0646 \u0644\u0645 \u064A\u062C\u062F\u0647 \u0627\u0644\u062E\u0627\u062F\u0645 \u064A\u0633\u062C\u0651\u0644\u0647 \u0641\u0648\u0631\u0627\u064B (\u0625\u0635\u0644\u0627\u062D\u064C \u0630\u0627\u062A\u064A\u0651)
 async function opPushCheck(uid, payload, env) {
   const t = String((payload && payload.token) || "");
   if (t.length < 20 || t.length > 4096) throw new Error("bad token");
@@ -2649,29 +2649,29 @@ async function opPushCheck(uid, payload, env) {
   stat("push:heal");
   return { had: false, healed: true };
 }
-// C56: إشعارٌ تجريبيّ إلى أجهزتي أنا مع نتيجة كلّ جهاز (يكشف أين تنقطع السلسلة: لا جهاز مسجّل · رمزٌ ميّت · خطأ FCM)
+// C56: \u0625\u0634\u0639\u0627\u0631\u064C \u062A\u062C\u0631\u064A\u0628\u064A\u0651 \u0625\u0644\u0649 \u0623\u062C\u0647\u0632\u062A\u064A \u0623\u0646\u0627 \u0645\u0639 \u0646\u062A\u064A\u062C\u0629 \u0643\u0644\u0651 \u062C\u0647\u0627\u0632 (\u064A\u0643\u0634\u0641 \u0623\u064A\u0646 \u062A\u0646\u0642\u0637\u0639 \u0627\u0644\u0633\u0644\u0633\u0644\u0629: \u0644\u0627 \u062C\u0647\u0627\u0632 \u0645\u0633\u062C\u0651\u0644 \u00B7 \u0631\u0645\u0632\u064C \u0645\u064A\u0651\u062A \u00B7 \u062E\u0637\u0623 FCM)
 async function opPushTest(uid, payload, env, ctx) {
   if (!codeRate(uid, "ptest", 12)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const devs = await devsOf(token, uid);
   const now = Date.now(), results = [];
   if (payload && payload.dry) return { devices: devs.length, results: [], tails: devs.slice(0, DEV_MAX).map(d => ({ tail: fstr(d, "token").slice(-8), ua: fstr(d, "ua").slice(0, 60), ts: fsInt(d, "ts") })) };   // v54
-  // C71: «بعد ١٥ ثانية» — ليغلق المستخدم التطبيق ويرى هل يصله الإشعار في الخلفيّة (حالة الشكوى الحقيقيّة)
+  // C71: \u00AB\u0628\u0639\u062F \u0661\u0665 \u062B\u0627\u0646\u064A\u0629\u00BB \u2014 \u0644\u064A\u063A\u0644\u0642 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0648\u064A\u0631\u0649 \u0647\u0644 \u064A\u0635\u0644\u0647 \u0627\u0644\u0625\u0634\u0639\u0627\u0631 \u0641\u064A \u0627\u0644\u062E\u0644\u0641\u064A\u0651\u0629 (\u062D\u0627\u0644\u0629 \u0627\u0644\u0634\u0643\u0648\u0649 \u0627\u0644\u062D\u0642\u064A\u0642\u064A\u0651\u0629)
   if (payload && payload.delay && ctx && ctx.waitUntil) {
     const ms = Math.min(20000, Math.max(5000, Number(payload.delay) || 15000));
     ctx.waitUntil((async () => {
       await new Promise((r) => setTimeout(r, ms));
-      const callTest = payload.kind === "call";   // v55: اختبار «مكالمة» حقيقيّ الشكل (t=call) — يرنّ كما ترنّ المكالمة
+      const callTest = payload.kind === "call";   // v55: \u0627\u062E\u062A\u0628\u0627\u0631 \u00AB\u0645\u0643\u0627\u0644\u0645\u0629\u00BB \u062D\u0642\u064A\u0642\u064A\u0651 \u0627\u0644\u0634\u0643\u0644 (t=call) \u2014 \u064A\u0631\u0646\u0651 \u0643\u0645\u0627 \u062A\u0631\u0646\u0651 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629
       for (const d of devs.slice(0, DEV_MAX)) await fcmSend(token, fstr(d, "token"), (x => x)(strData(callTest
-        ? { t: "call", call: "test_" + Date.now().toString(36), from: uid, type: "audio", title: "سوا — اختبار مكالمة", body: "📞 مكالمة تجريبيّة", ts: Date.now(), ring: "0" }
-        : { t: "test", title: "سوا — إشعار في الخلفيّة ✓", body: "وصل والتطبيق مغلق — الإشعارات والمكالمات ستصلك.", ts: Date.now() })), fstr(d, "lang")).catch(() => {});
+        ? { t: "call", call: "test_" + Date.now().toString(36), from: uid, type: "audio", title: "\u0633\u0648\u0627 \u2014 \u0627\u062E\u062A\u0628\u0627\u0631 \u0645\u0643\u0627\u0644\u0645\u0629", body: "\uD83D\uDCDE \u0645\u0643\u0627\u0644\u0645\u0629 \u062A\u062C\u0631\u064A\u0628\u064A\u0651\u0629", ts: Date.now(), ring: "0" }
+        : { t: "test", title: "\u0633\u0648\u0627 \u2014 \u0625\u0634\u0639\u0627\u0631 \u0641\u064A \u0627\u0644\u062E\u0644\u0641\u064A\u0651\u0629 \u2713", body: "\u0648\u0635\u0644 \u0648\u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0645\u063A\u0644\u0642 \u2014 \u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062A \u0648\u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0633\u062A\u0635\u0644\u0643.", ts: Date.now() })), fstr(d, "lang")).catch(() => {});
       stat("push:test-bg");
     })());
     return { devices: devs.length, queued: true, delay: ms };
   }
   for (const d of devs.slice(0, DEV_MAX)) {
     const dev = fstr(d, "token"), en = fstr(d, "lang") === "en";
-    const tdata = langData({ t: "test", title: "سوا — إشعار تجريبيّ ✓", body: "وصل الإشعار إلى هذا الجهاز. الرسائل والمكالمات ستصلك والتطبيق مغلق.", ts: now }, en);
+    const tdata = langData({ t: "test", title: "\u0633\u0648\u0627 \u2014 \u0625\u0634\u0639\u0627\u0631 \u062A\u062C\u0631\u064A\u0628\u064A\u0651 \u2713", body: "\u0648\u0635\u0644 \u0627\u0644\u0625\u0634\u0639\u0627\u0631 \u0625\u0644\u0649 \u0647\u0630\u0627 \u0627\u0644\u062C\u0647\u0627\u0632. \u0627\u0644\u0631\u0633\u0627\u0626\u0644 \u0648\u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0633\u062A\u0635\u0644\u0643 \u0648\u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0645\u063A\u0644\u0642.", ts: now }, en);
     const res = await fetch("https://fcm.googleapis.com/v1/projects/" + PROJECT_ID + "/messages:send", {
       method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
       body: JSON.stringify({ message: { token: dev, data: strData(tdata),
@@ -2679,7 +2679,7 @@ async function opPushTest(uid, payload, env, ctx) {
         webpush: { headers: { Urgency: "high", TTL: "120" } }, apns: apnsOf(tdata) } }) });
     let err = "";
     if (!res.ok) { const txt = await res.text(); err = (txt.match(/"message":\s*"([^"]{1,160})"/) || [])[1] || ("HTTP " + res.status); if (/UNREGISTERED|registration-token-not-registered|NOT_FOUND/.test(txt)) { await fsCommit(token, [{ delete: d.name }]).catch(() => {}); err = "gone"; } }
-    results.push({ ua: fstr(d, "ua").slice(0, 60), ts: fsInt(d, "ts"), ok: res.ok, err, tail: dev.slice(-8) });   // v54: ليعرف الهاتف «هذا أنا»
+    results.push({ ua: fstr(d, "ua").slice(0, 60), ts: fsInt(d, "ts"), ok: res.ok, err, tail: dev.slice(-8) });   // v54: \u0644\u064A\u0639\u0631\u0641 \u0627\u0644\u0647\u0627\u062A\u0641 \u00AB\u0647\u0630\u0627 \u0623\u0646\u0627\u00BB
   }
   stat("push:test");
   return { devices: devs.length, results };
@@ -2691,48 +2691,48 @@ async function opPushUnregister(uid, payload, env) {
   await fsCommit(token, [{ delete: DOC_ROOT + "/accounts/" + uid + "/devices/" + (await tokenId(t)) }]).catch(() => {});
   return { ok: true };
 }
-// v67 (C123): تطبيق iOS — APNs لا يُظهر رسائل البيانات الصامتة والتطبيق مغلق، فنرفق تنبيهاً مرئيّاً (يتجاهله أندرويد والمتصفّح).
-//   collapse-id: رنّات المكالمة المتكرّرة تحلّ محلّ بعضها بدل تكديس إشعارات · thread-id: يجمع إشعارات المحادثة الواحدة
-// v68: إشعاراتٌ بالإنجليزيّة لمن اختار الإنجليزيّة في التطبيق — النصوص الثابتة تُترجم والأسماء ونصّ الرسالة تبقى كما هي
+// v67 (C123): \u062A\u0637\u0628\u064A\u0642 iOS \u2014 APNs \u0644\u0627 \u064A\u064F\u0638\u0647\u0631 \u0631\u0633\u0627\u0626\u0644 \u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A \u0627\u0644\u0635\u0627\u0645\u062A\u0629 \u0648\u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0645\u063A\u0644\u0642\u060C \u0641\u0646\u0631\u0641\u0642 \u062A\u0646\u0628\u064A\u0647\u0627\u064B \u0645\u0631\u0626\u064A\u0651\u0627\u064B (\u064A\u062A\u062C\u0627\u0647\u0644\u0647 \u0623\u0646\u062F\u0631\u0648\u064A\u062F \u0648\u0627\u0644\u0645\u062A\u0635\u0641\u0651\u062D).
+//   collapse-id: \u0631\u0646\u0651\u0627\u062A \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u0627\u0644\u0645\u062A\u0643\u0631\u0651\u0631\u0629 \u062A\u062D\u0644\u0651 \u0645\u062D\u0644\u0651 \u0628\u0639\u0636\u0647\u0627 \u0628\u062F\u0644 \u062A\u0643\u062F\u064A\u0633 \u0625\u0634\u0639\u0627\u0631\u0627\u062A \u00B7 thread-id: \u064A\u062C\u0645\u0639 \u0625\u0634\u0639\u0627\u0631\u0627\u062A \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629 \u0627\u0644\u0648\u0627\u062D\u062F\u0629
+// v68: \u0625\u0634\u0639\u0627\u0631\u0627\u062A\u064C \u0628\u0627\u0644\u0625\u0646\u062C\u0644\u064A\u0632\u064A\u0651\u0629 \u0644\u0645\u0646 \u0627\u062E\u062A\u0627\u0631 \u0627\u0644\u0625\u0646\u062C\u0644\u064A\u0632\u064A\u0651\u0629 \u0641\u064A \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u2014 \u0627\u0644\u0646\u0635\u0648\u0635 \u0627\u0644\u062B\u0627\u0628\u062A\u0629 \u062A\u064F\u062A\u0631\u062C\u0645 \u0648\u0627\u0644\u0623\u0633\u0645\u0627\u0621 \u0648\u0646\u0635\u0651 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u062A\u0628\u0642\u0649 \u0643\u0645\u0627 \u0647\u064A
 const EN_RULES = [
-  [/^سوا — إشعار تجريبيّ ✓$/, "Sawa — test notification ✓"],
-  [/^وصل الإشعار إلى هذا الجهاز\..*$/, "This device received the notification. Messages and calls will reach you even when the app is closed."],
-  [/^وصل الإشعار إلى هذا الجهاز\.$/, "This device received the notification."],
-  [/^سوا — إشعار في الخلفيّة ✓$/, "Sawa — background notification ✓"],
-  [/^وصل والتطبيق مغلق.*$/, "Received while the app was closed — notifications and calls will reach you."],
-  [/^سوا — اختبار مكالمة$/, "Sawa — call test"], [/^📞 مكالمة تجريبيّة$/, "📞 Test call"],
-  [/^🔒 رسالة مشفّرة$/, "🔒 Encrypted message"], [/^📷 صورة$/, "📷 Photo"], [/^🎥 فيديو$/, "🎥 Video"], [/^🎤 رسالة صوتيّة$/, "🎤 Voice message"],
-  [/^📎 ملفّ$/, "📎 File"], [/^📊 استطلاع$/, "📊 Poll"], [/^🧾 فاتورة$/, "🧾 Bill"], [/^💝 تبرّعات$/, "💝 Fundraiser"], [/^✅ مهامّ$/, "✅ Tasks"],
-  [/^👤 جهة اتّصال$/, "👤 Contact"], [/^📍 موقع$/, "📍 Location"],
-  [/^(.*): 🔒 رسالة مشفّرة$/, "$1: 🔒 Encrypted message"], [/^(.*): 📷 صورة$/, "$1: 📷 Photo"], [/^(.*): 🎥 فيديو$/, "$1: 🎥 Video"], [/^(.*): 🎤 رسالة صوتيّة$/, "$1: 🎤 Voice message"], [/^(.*): 📎 ملفّ$/, "$1: 📎 File"],
-  [/^(.*) أشار إليك في لحظة$/, "$1 mentioned you in a moment"], [/^(.*) أشار إليك في تعليق$/, "$1 mentioned you in a comment"],   // C135
-  [/^(.*) ردّ على تعليقك$/, "$1 replied to your comment"], [/^(.*) تفاعل مع لحظتك$/, "$1 reacted to your moment"], [/^(.*) أعجبه تعليقك$/, "$1 liked your comment"],
-  [/^(.*) أشار إليك في (.*)$/, "$1 mentioned you in $2"], [/^(.*) أشار إليك$/, "$1 mentioned you"],
-  [/^📹 مكالمة فيديو واردة(.*)$/, "📹 Incoming video call$1"], [/^📞 مكالمة صوتيّة واردة(.*)$/, "📞 Incoming voice call$1"],
-  [/^📹 مكالمة فيديو فائتة$/, "📹 Missed video call"], [/^📞 مكالمة فائتة$/, "📞 Missed call"],
-  [/^(📹 |📞 )(.*) يدعوك لمكالمة جماعيّة$/, "$1$2 invites you to a group call"],
-  [/^🎙 (.*) بدأ دردشة صوتيّة — انضمّ متى شئت$/, "🎙 $1 started a voice chat — join anytime"],
-  [/^📅 (.*) دعاك إلى غرفة سوا$/, "📅 $1 invited you to a Sawa room"], [/^📅 (.*) دعاك لمكالمة$/, "📅 $1 invited you to a call"],
-  [/^مكالمة فيديو(.*) — افتح «المكالمات المجدولة»$/, "Video call$1 — open Scheduled calls"], [/^مكالمة صوتيّة(.*) — افتح «المكالمات المجدولة»$/, "Voice call$1 — open Scheduled calls"],
-  [/^⏰ تذكير: غرفة سوا(.*)$/, "⏰ Reminder: Sawa room$1"], [/^⏰ تذكير: مكالمة فيديو(.*)$/, "⏰ Reminder: video call$1"], [/^⏰ تذكير: مكالمة صوتيّة(.*)$/, "⏰ Reminder: voice call$1"],
-  [/^تبدأ بعد (.*) — اضغط للدخول$/, (m, x) => "Starts in " + enMins(x) + " — tap to join"],
-  [/^تبدأ بعد (.*) — من «المكالمات المجدولة» اضغط «ابدأ الآن»$/, (m, x) => "Starts in " + enMins(x) + " — tap Start now in Scheduled calls"],
-  [/^حان الموعد — اضغط للدخول$/, "It's time — tap to join"], [/^حان الموعد — افتح «المكالمات المجدولة» وانضمّ$/, "It's time — open Scheduled calls and join"],
-  [/^طلب تواصل في سوا$/, "Contact request on Sawa"], [/^(.*) يريد التواصل معك$/, "$1 wants to connect with you"],
-  [/^قبل طلب التواصل — يمكنكما المراسلة الآن ✓$/, "Accepted your request — you can chat now ✓"],
-  [/^تأكيد رقم في سوا$/, "Confirm a number on Sawa"], [/^(.*) يطلب منك تأكيد أنّ رقمه (.*)$/, "$1 asks you to confirm their number is $2"],
-  [/^تأكّد رقمك ✓$/, "Your number is confirmed ✓"], [/^أكّد اثنان من معارفك رقمك (.*) — صار بإمكان معارفك إيجادك به$/, "Two contacts confirmed your number $1 — people you know can now find you by it"],
-  [/^طلب ربط في شجرة العائلة$/, "Family tree link request"], [/^(.*) يقول إنك «(.*)» في شجرة «(.*)» — هل هذا أنت؟$/, "$1 says you're “$2” in the “$3” tree — is this you?"],
-  [/^تمّ الربط ✓$/, "Linked ✓"], [/^(.*) أكّد أنّه «(.*)» في «(.*)»$/, "$1 confirmed they're “$2” in “$3”"],
-  [/^لحظة جديدة(.*)$/, "New moment$1"], [/^أوّل لحظة منذ فترة طويلة(.*)$/, "First moment in a long time$1"],   // C153
-  [/^علّق على لحظتك: (.*)$/, "Commented on your moment: $1"], [/^ردّ على تعليقك: (.*)$/, "Replied to your comment: $1"],   // C152
-  [/^أشار إليك في لحظة: (.*)$/, "Mentioned you in a moment: $1"], [/^أشار إليك في تعليق: (.*)$/, "Mentioned you in a comment: $1"],
-  [/^علّق على لحظتك$/, "Commented on your moment"], [/^ردّ على تعليقك$/, "Replied to your comment"], [/^أشار إليك في لحظة$/, "Mentioned you in a moment"], [/^أشار إليك في تعليق$/, "Mentioned you in a comment"],
-  [/^(\S+) أعجبته لحظتك · (.*)$/, "$1 liked your moment · $2"], [/^(\S+) تفاعل مع لحظتك · (.*)$/, "$1 reacted to your moment · $2"],
-  [/^(.*) أعجبته لحظتك$/, "$1 liked your moment"], [/^(.*) علّق على لحظتك$/, "$1 commented on your moment"],
-  [/^قريبك/, "Your relative"], [/^مستخدم سوا/, "A Sawa user"], [/^غرفة سوا$/, "Sawa room"], [/^سوا$/, "Sawa"],
+  [/^\u0633\u0648\u0627 \u2014 \u0625\u0634\u0639\u0627\u0631 \u062A\u062C\u0631\u064A\u0628\u064A\u0651 \u2713$/, "Sawa \u2014 test notification \u2713"],
+  [/^\u0648\u0635\u0644 \u0627\u0644\u0625\u0634\u0639\u0627\u0631 \u0625\u0644\u0649 \u0647\u0630\u0627 \u0627\u0644\u062C\u0647\u0627\u0632\..*$/, "This device received the notification. Messages and calls will reach you even when the app is closed."],
+  [/^\u0648\u0635\u0644 \u0627\u0644\u0625\u0634\u0639\u0627\u0631 \u0625\u0644\u0649 \u0647\u0630\u0627 \u0627\u0644\u062C\u0647\u0627\u0632\.$/, "This device received the notification."],
+  [/^\u0633\u0648\u0627 \u2014 \u0625\u0634\u0639\u0627\u0631 \u0641\u064A \u0627\u0644\u062E\u0644\u0641\u064A\u0651\u0629 \u2713$/, "Sawa \u2014 background notification \u2713"],
+  [/^\u0648\u0635\u0644 \u0648\u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0645\u063A\u0644\u0642.*$/, "Received while the app was closed \u2014 notifications and calls will reach you."],
+  [/^\u0633\u0648\u0627 \u2014 \u0627\u062E\u062A\u0628\u0627\u0631 \u0645\u0643\u0627\u0644\u0645\u0629$/, "Sawa \u2014 call test"], [/^\uD83D\uDCDE \u0645\u0643\u0627\u0644\u0645\u0629 \u062A\u062C\u0631\u064A\u0628\u064A\u0651\u0629$/, "\uD83D\uDCDE Test call"],
+  [/^\uD83D\uDD12 \u0631\u0633\u0627\u0644\u0629 \u0645\u0634\u0641\u0651\u0631\u0629$/, "\uD83D\uDD12 Encrypted message"], [/^\uD83D\uDCF7 \u0635\u0648\u0631\u0629$/, "\uD83D\uDCF7 Photo"], [/^\uD83C\uDFA5 \u0641\u064A\u062F\u064A\u0648$/, "\uD83C\uDFA5 Video"], [/^\uD83C\uDFA4 \u0631\u0633\u0627\u0644\u0629 \u0635\u0648\u062A\u064A\u0651\u0629$/, "\uD83C\uDFA4 Voice message"],
+  [/^\uD83D\uDCCE \u0645\u0644\u0641\u0651$/, "\uD83D\uDCCE File"], [/^\uD83D\uDCCA \u0627\u0633\u062A\u0637\u0644\u0627\u0639$/, "\uD83D\uDCCA Poll"], [/^\uD83E\uDDFE \u0641\u0627\u062A\u0648\u0631\u0629$/, "\uD83E\uDDFE Bill"], [/^\uD83D\uDC9D \u062A\u0628\u0631\u0651\u0639\u0627\u062A$/, "\uD83D\uDC9D Fundraiser"], [/^\u2705 \u0645\u0647\u0627\u0645\u0651$/, "\u2705 Tasks"],
+  [/^\uD83D\uDC64 \u062C\u0647\u0629 \u0627\u062A\u0651\u0635\u0627\u0644$/, "\uD83D\uDC64 Contact"], [/^\uD83D\uDCCD \u0645\u0648\u0642\u0639$/, "\uD83D\uDCCD Location"],
+  [/^(.*): \uD83D\uDD12 \u0631\u0633\u0627\u0644\u0629 \u0645\u0634\u0641\u0651\u0631\u0629$/, "$1: \uD83D\uDD12 Encrypted message"], [/^(.*): \uD83D\uDCF7 \u0635\u0648\u0631\u0629$/, "$1: \uD83D\uDCF7 Photo"], [/^(.*): \uD83C\uDFA5 \u0641\u064A\u062F\u064A\u0648$/, "$1: \uD83C\uDFA5 Video"], [/^(.*): \uD83C\uDFA4 \u0631\u0633\u0627\u0644\u0629 \u0635\u0648\u062A\u064A\u0651\u0629$/, "$1: \uD83C\uDFA4 Voice message"], [/^(.*): \uD83D\uDCCE \u0645\u0644\u0641\u0651$/, "$1: \uD83D\uDCCE File"],
+  [/^(.*) \u0623\u0634\u0627\u0631 \u0625\u0644\u064A\u0643 \u0641\u064A \u0644\u062D\u0638\u0629$/, "$1 mentioned you in a moment"], [/^(.*) \u0623\u0634\u0627\u0631 \u0625\u0644\u064A\u0643 \u0641\u064A \u062A\u0639\u0644\u064A\u0642$/, "$1 mentioned you in a comment"],   // C135
+  [/^(.*) \u0631\u062F\u0651 \u0639\u0644\u0649 \u062A\u0639\u0644\u064A\u0642\u0643$/, "$1 replied to your comment"], [/^(.*) \u062A\u0641\u0627\u0639\u0644 \u0645\u0639 \u0644\u062D\u0638\u062A\u0643$/, "$1 reacted to your moment"], [/^(.*) \u0623\u0639\u062C\u0628\u0647 \u062A\u0639\u0644\u064A\u0642\u0643$/, "$1 liked your comment"],
+  [/^(.*) \u0623\u0634\u0627\u0631 \u0625\u0644\u064A\u0643 \u0641\u064A (.*)$/, "$1 mentioned you in $2"], [/^(.*) \u0623\u0634\u0627\u0631 \u0625\u0644\u064A\u0643$/, "$1 mentioned you"],
+  [/^\uD83D\uDCF9 \u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u064A\u062F\u064A\u0648 \u0648\u0627\u0631\u062F\u0629(.*)$/, "\uD83D\uDCF9 Incoming video call$1"], [/^\uD83D\uDCDE \u0645\u0643\u0627\u0644\u0645\u0629 \u0635\u0648\u062A\u064A\u0651\u0629 \u0648\u0627\u0631\u062F\u0629(.*)$/, "\uD83D\uDCDE Incoming voice call$1"],
+  [/^\uD83D\uDCF9 \u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u064A\u062F\u064A\u0648 \u0641\u0627\u0626\u062A\u0629$/, "\uD83D\uDCF9 Missed video call"], [/^\uD83D\uDCDE \u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u0627\u0626\u062A\u0629$/, "\uD83D\uDCDE Missed call"],
+  [/^(\uD83D\uDCF9 |\uD83D\uDCDE )(.*) \u064A\u062F\u0639\u0648\u0643 \u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u062C\u0645\u0627\u0639\u064A\u0651\u0629$/, "$1$2 invites you to a group call"],
+  [/^\uD83C\uDF99 (.*) \u0628\u062F\u0623 \u062F\u0631\u062F\u0634\u0629 \u0635\u0648\u062A\u064A\u0651\u0629 \u2014 \u0627\u0646\u0636\u0645\u0651 \u0645\u062A\u0649 \u0634\u0626\u062A$/, "\uD83C\uDF99 $1 started a voice chat \u2014 join anytime"],
+  [/^\uD83D\uDCC5 (.*) \u062F\u0639\u0627\u0643 \u0625\u0644\u0649 \u063A\u0631\u0641\u0629 \u0633\u0648\u0627$/, "\uD83D\uDCC5 $1 invited you to a Sawa room"], [/^\uD83D\uDCC5 (.*) \u062F\u0639\u0627\u0643 \u0644\u0645\u0643\u0627\u0644\u0645\u0629$/, "\uD83D\uDCC5 $1 invited you to a call"],
+  [/^\u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u064A\u062F\u064A\u0648(.*) \u2014 \u0627\u0641\u062A\u062D \u00AB\u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0627\u0644\u0645\u062C\u062F\u0648\u0644\u0629\u00BB$/, "Video call$1 \u2014 open Scheduled calls"], [/^\u0645\u0643\u0627\u0644\u0645\u0629 \u0635\u0648\u062A\u064A\u0651\u0629(.*) \u2014 \u0627\u0641\u062A\u062D \u00AB\u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0627\u0644\u0645\u062C\u062F\u0648\u0644\u0629\u00BB$/, "Voice call$1 \u2014 open Scheduled calls"],
+  [/^\u23F0 \u062A\u0630\u0643\u064A\u0631: \u063A\u0631\u0641\u0629 \u0633\u0648\u0627(.*)$/, "\u23F0 Reminder: Sawa room$1"], [/^\u23F0 \u062A\u0630\u0643\u064A\u0631: \u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u064A\u062F\u064A\u0648(.*)$/, "\u23F0 Reminder: video call$1"], [/^\u23F0 \u062A\u0630\u0643\u064A\u0631: \u0645\u0643\u0627\u0644\u0645\u0629 \u0635\u0648\u062A\u064A\u0651\u0629(.*)$/, "\u23F0 Reminder: voice call$1"],
+  [/^\u062A\u0628\u062F\u0623 \u0628\u0639\u062F (.*) \u2014 \u0627\u0636\u063A\u0637 \u0644\u0644\u062F\u062E\u0648\u0644$/, (m, x) => "Starts in " + enMins(x) + " \u2014 tap to join"],
+  [/^\u062A\u0628\u062F\u0623 \u0628\u0639\u062F (.*) \u2014 \u0645\u0646 \u00AB\u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0627\u0644\u0645\u062C\u062F\u0648\u0644\u0629\u00BB \u0627\u0636\u063A\u0637 \u00AB\u0627\u0628\u062F\u0623 \u0627\u0644\u0622\u0646\u00BB$/, (m, x) => "Starts in " + enMins(x) + " \u2014 tap Start now in Scheduled calls"],
+  [/^\u062D\u0627\u0646 \u0627\u0644\u0645\u0648\u0639\u062F \u2014 \u0627\u0636\u063A\u0637 \u0644\u0644\u062F\u062E\u0648\u0644$/, "It's time \u2014 tap to join"], [/^\u062D\u0627\u0646 \u0627\u0644\u0645\u0648\u0639\u062F \u2014 \u0627\u0641\u062A\u062D \u00AB\u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0627\u0644\u0645\u062C\u062F\u0648\u0644\u0629\u00BB \u0648\u0627\u0646\u0636\u0645\u0651$/, "It's time \u2014 open Scheduled calls and join"],
+  [/^\u0637\u0644\u0628 \u062A\u0648\u0627\u0635\u0644 \u0641\u064A \u0633\u0648\u0627$/, "Contact request on Sawa"], [/^(.*) \u064A\u0631\u064A\u062F \u0627\u0644\u062A\u0648\u0627\u0635\u0644 \u0645\u0639\u0643$/, "$1 wants to connect with you"],
+  [/^\u0642\u0628\u0644 \u0637\u0644\u0628 \u0627\u0644\u062A\u0648\u0627\u0635\u0644 \u2014 \u064A\u0645\u0643\u0646\u0643\u0645\u0627 \u0627\u0644\u0645\u0631\u0627\u0633\u0644\u0629 \u0627\u0644\u0622\u0646 \u2713$/, "Accepted your request \u2014 you can chat now \u2713"],
+  [/^\u062A\u0623\u0643\u064A\u062F \u0631\u0642\u0645 \u0641\u064A \u0633\u0648\u0627$/, "Confirm a number on Sawa"], [/^(.*) \u064A\u0637\u0644\u0628 \u0645\u0646\u0643 \u062A\u0623\u0643\u064A\u062F \u0623\u0646\u0651 \u0631\u0642\u0645\u0647 (.*)$/, "$1 asks you to confirm their number is $2"],
+  [/^\u062A\u0623\u0643\u0651\u062F \u0631\u0642\u0645\u0643 \u2713$/, "Your number is confirmed \u2713"], [/^\u0623\u0643\u0651\u062F \u0627\u062B\u0646\u0627\u0646 \u0645\u0646 \u0645\u0639\u0627\u0631\u0641\u0643 \u0631\u0642\u0645\u0643 (.*) \u2014 \u0635\u0627\u0631 \u0628\u0625\u0645\u0643\u0627\u0646 \u0645\u0639\u0627\u0631\u0641\u0643 \u0625\u064A\u062C\u0627\u062F\u0643 \u0628\u0647$/, "Two contacts confirmed your number $1 \u2014 people you know can now find you by it"],
+  [/^\u0637\u0644\u0628 \u0631\u0628\u0637 \u0641\u064A \u0634\u062C\u0631\u0629 \u0627\u0644\u0639\u0627\u0626\u0644\u0629$/, "Family tree link request"], [/^(.*) \u064A\u0642\u0648\u0644 \u0625\u0646\u0643 \u00AB(.*)\u00BB \u0641\u064A \u0634\u062C\u0631\u0629 \u00AB(.*)\u00BB \u2014 \u0647\u0644 \u0647\u0630\u0627 \u0623\u0646\u062A\u061F$/, "$1 says you're \u201C$2\u201D in the \u201C$3\u201D tree \u2014 is this you?"],
+  [/^\u062A\u0645\u0651 \u0627\u0644\u0631\u0628\u0637 \u2713$/, "Linked \u2713"], [/^(.*) \u0623\u0643\u0651\u062F \u0623\u0646\u0651\u0647 \u00AB(.*)\u00BB \u0641\u064A \u00AB(.*)\u00BB$/, "$1 confirmed they're \u201C$2\u201D in \u201C$3\u201D"],
+  [/^\u0644\u062D\u0638\u0629 \u062C\u062F\u064A\u062F\u0629(.*)$/, "New moment$1"], [/^\u0623\u0648\u0651\u0644 \u0644\u062D\u0638\u0629 \u0645\u0646\u0630 \u0641\u062A\u0631\u0629 \u0637\u0648\u064A\u0644\u0629(.*)$/, "First moment in a long time$1"],   // C153
+  [/^\u0639\u0644\u0651\u0642 \u0639\u0644\u0649 \u0644\u062D\u0638\u062A\u0643: (.*)$/, "Commented on your moment: $1"], [/^\u0631\u062F\u0651 \u0639\u0644\u0649 \u062A\u0639\u0644\u064A\u0642\u0643: (.*)$/, "Replied to your comment: $1"],   // C152
+  [/^\u0623\u0634\u0627\u0631 \u0625\u0644\u064A\u0643 \u0641\u064A \u0644\u062D\u0638\u0629: (.*)$/, "Mentioned you in a moment: $1"], [/^\u0623\u0634\u0627\u0631 \u0625\u0644\u064A\u0643 \u0641\u064A \u062A\u0639\u0644\u064A\u0642: (.*)$/, "Mentioned you in a comment: $1"],
+  [/^\u0639\u0644\u0651\u0642 \u0639\u0644\u0649 \u0644\u062D\u0638\u062A\u0643$/, "Commented on your moment"], [/^\u0631\u062F\u0651 \u0639\u0644\u0649 \u062A\u0639\u0644\u064A\u0642\u0643$/, "Replied to your comment"], [/^\u0623\u0634\u0627\u0631 \u0625\u0644\u064A\u0643 \u0641\u064A \u0644\u062D\u0638\u0629$/, "Mentioned you in a moment"], [/^\u0623\u0634\u0627\u0631 \u0625\u0644\u064A\u0643 \u0641\u064A \u062A\u0639\u0644\u064A\u0642$/, "Mentioned you in a comment"],
+  [/^(\S+) \u0623\u0639\u062C\u0628\u062A\u0647 \u0644\u062D\u0638\u062A\u0643 \u00B7 (.*)$/, "$1 liked your moment \u00B7 $2"], [/^(\S+) \u062A\u0641\u0627\u0639\u0644 \u0645\u0639 \u0644\u062D\u0638\u062A\u0643 \u00B7 (.*)$/, "$1 reacted to your moment \u00B7 $2"],
+  [/^(.*) \u0623\u0639\u062C\u0628\u062A\u0647 \u0644\u062D\u0638\u062A\u0643$/, "$1 liked your moment"], [/^(.*) \u0639\u0644\u0651\u0642 \u0639\u0644\u0649 \u0644\u062D\u0638\u062A\u0643$/, "$1 commented on your moment"],
+  [/^\u0642\u0631\u064A\u0628\u0643/, "Your relative"], [/^\u0645\u0633\u062A\u062E\u062F\u0645 \u0633\u0648\u0627/, "A Sawa user"], [/^\u063A\u0631\u0641\u0629 \u0633\u0648\u0627$/, "Sawa room"], [/^\u0633\u0648\u0627$/, "Sawa"],
 ];
-function enMins(x) { const n = x === "دقيقة" ? 1 : x === "دقيقتين" ? 2 : parseInt(x, 10) || 0; return n === 1 ? "1 minute" : n + " minutes"; }
+function enMins(x) { const n = x === "\u062F\u0642\u064A\u0642\u0629" ? 1 : x === "\u062F\u0642\u064A\u0642\u062A\u064A\u0646" ? 2 : parseInt(x, 10) || 0; return n === 1 ? "1 minute" : n + " minutes"; }
 function enText(v) {
   let s = String(v == null ? "" : v);
   for (const [re, to] of EN_RULES) { if (re.test(s)) { s = s.replace(re, to); } }
@@ -2747,11 +2747,11 @@ function langData(d, en) {
   o.lang = "en";
   return o;
 }
-// نصّ الرسالة نفسه لا يُترجم — فقط وصف المرفقات («📷 صورة»…) ورسالة التشفير
+// \u0646\u0635\u0651 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0646\u0641\u0633\u0647 \u0644\u0627 \u064A\u064F\u062A\u0631\u062C\u0645 \u2014 \u0641\u0642\u0637 \u0648\u0635\u0641 \u0627\u0644\u0645\u0631\u0641\u0642\u0627\u062A (\u00AB\uD83D\uDCF7 \u0635\u0648\u0631\u0629\u00BB\u2026) \u0648\u0631\u0633\u0627\u0644\u0629 \u0627\u0644\u062A\u0634\u0641\u064A\u0631
 function enMsgBody(b) { return enText(b); }
 function apnsOf(d) {
   const call = d.t === "call", ttl = call ? 45 : d.t === "test" ? 120 : 86400;
-  const alert = { title: String(d.title || "سوا").slice(0, 120), body: String(d.body || "").slice(0, 400) };
+  const alert = { title: String(d.title || "\u0633\u0648\u0627").slice(0, 120), body: String(d.body || "").slice(0, 400) };
   const aps = { alert, sound: "default", "thread-id": String(d.cid || d.t || "sawa").slice(0, 60) };
   if (call) aps["interruption-level"] = "time-sensitive";
   const headers = { "apns-priority": "10", "apns-push-type": "alert", "apns-expiration": String(Math.floor(Date.now() / 1000) + ttl) };
@@ -2764,20 +2764,20 @@ async function fcmSend(token, devToken, data, lang) {
   const res = await fetch("https://fcm.googleapis.com/v1/projects/" + PROJECT_ID + "/messages:send", {
     method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
     body: JSON.stringify({ message: { token: devToken, data: data,
-      // C72: تطبيق أندرويد الأصليّ — رسالة بيانات بأولويّة عالية توقظ الهاتف (للمتصفّح يُتجاهل هذا الجزء)
+      // C72: \u062A\u0637\u0628\u064A\u0642 \u0623\u0646\u062F\u0631\u0648\u064A\u062F \u0627\u0644\u0623\u0635\u0644\u064A\u0651 \u2014 \u0631\u0633\u0627\u0644\u0629 \u0628\u064A\u0627\u0646\u0627\u062A \u0628\u0623\u0648\u0644\u0648\u064A\u0651\u0629 \u0639\u0627\u0644\u064A\u0629 \u062A\u0648\u0642\u0638 \u0627\u0644\u0647\u0627\u062A\u0641 (\u0644\u0644\u0645\u062A\u0635\u0641\u0651\u062D \u064A\u064F\u062A\u062C\u0627\u0647\u0644 \u0647\u0630\u0627 \u0627\u0644\u062C\u0632\u0621)
       android: { priority: "HIGH", ttl: data.t === "call" ? "45s" : data.t === "test" ? "120s" : "86400s" },
       webpush: { headers: { Urgency: data.t === "call" || data.t === "test" ? "high" : "normal", TTL: data.t === "call" ? "45" : data.t === "test" ? "120" : "86400" } },
       apns: apnsOf(data) } }) });
   if (res.ok) return "ok";
   const txt = await res.text();
-  // v56: INVALID_ARGUMENT لا يعني رمزاً ميّتاً إلّا إن كان عن الرمز نفسه (كانت أخطاء الحمولة تحذف أجهزة سليمة)
+  // v56: INVALID_ARGUMENT \u0644\u0627 \u064A\u0639\u0646\u064A \u0631\u0645\u0632\u0627\u064B \u0645\u064A\u0651\u062A\u0627\u064B \u0625\u0644\u0651\u0627 \u0625\u0646 \u0643\u0627\u0646 \u0639\u0646 \u0627\u0644\u0631\u0645\u0632 \u0646\u0641\u0633\u0647 (\u0643\u0627\u0646\u062A \u0623\u062E\u0637\u0627\u0621 \u0627\u0644\u062D\u0645\u0648\u0644\u0629 \u062A\u062D\u0630\u0641 \u0623\u062C\u0647\u0632\u0629 \u0633\u0644\u064A\u0645\u0629)
   if (/UNREGISTERED|registration-token-not-registered|NOT_FOUND/.test(txt) || (/INVALID_ARGUMENT/.test(txt) && /registration token/i.test(txt))) return "gone";
   console.log("fcm err:", txt.slice(0, 300)); stat("push:err");
   return "err";
 }
-// C60: أجهزة المستخدم مرتّبةً بالأحدث تسجيلاً (ts) — حتى لا يحجب رمزٌ ميّت قديم رمزاً حيّاً جديداً
+// C60: \u0623\u062C\u0647\u0632\u0629 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u0645\u0631\u062A\u0651\u0628\u0629\u064B \u0628\u0627\u0644\u0623\u062D\u062F\u062B \u062A\u0633\u062C\u064A\u0644\u0627\u064B (ts) \u2014 \u062D\u062A\u0649 \u0644\u0627 \u064A\u062D\u062C\u0628 \u0631\u0645\u0632\u064C \u0645\u064A\u0651\u062A \u0642\u062F\u064A\u0645 \u0631\u0645\u0632\u0627\u064B \u062D\u064A\u0651\u0627\u064B \u062C\u062F\u064A\u062F\u0627\u064B
 const DEV_MAX = 5, DEV_TTL = 60 * 86400000;
-// C180: الخطّة المدفوعة في Cloudflare Workers (١٠٠٠ طلبٍ فرعيّ لكلّ تشغيل بدل ٥٠) ⇒ حدودٌ أوسع. WORKERS_FREE=1 يعيد حدود المجّانيّة.
+// C180: \u0627\u0644\u062E\u0637\u0651\u0629 \u0627\u0644\u0645\u062F\u0641\u0648\u0639\u0629 \u0641\u064A Cloudflare Workers (\u0661\u0660\u0660\u0660 \u0637\u0644\u0628\u064D \u0641\u0631\u0639\u064A\u0651 \u0644\u0643\u0644\u0651 \u062A\u0634\u063A\u064A\u0644 \u0628\u062F\u0644 \u0665\u0660) \u21D2 \u062D\u062F\u0648\u062F\u064C \u0623\u0648\u0633\u0639. WORKERS_FREE=1 \u064A\u0639\u064A\u062F \u062D\u062F\u0648\u062F \u0627\u0644\u0645\u062C\u0651\u0627\u0646\u064A\u0651\u0629.
 function LIM(env) {
   const free = String((env && env.WORKERS_FREE) || (PUSH_ENV && PUSH_ENV.WORKERS_FREE) || "") === "1";
   return free ? { free, push: 12, ring: 10, contacts: 4, mom: 10, task: 12, rem: 1, remBatch: 12, purge: 40, media: 10, story: 2, q: 10, dis: 5 }
@@ -2789,11 +2789,11 @@ async function devsOf(token, uid) {
   devs.sort((a, b) => devTs(b) - devTs(a));
   return devs;
 }
-// يُرسل لأجهزة مستخدمين (حتّى ١٢ مستخدماً لكلّ حدث — حدّ ٥٠ طلباً فرعيّاً)، ويحذف الرموز الميّتة
-/* ---------- C151: إشعارات VoIP للآيفون (شاشة المكالمة الواردة من النظام — CallKit) ----------
-   FCM لا يرسل VoIP ⇒ الخادم يرسل مباشرةً إلى Apple بمفتاح APNs (‎.p8‎) — سرّ الـWorker ‏APNS_P8 (محتوى الملفّ كاملاً)،
-   ومعه APNS_KEY_ID و APNS_TEAM_ID (أو القيم الافتراضيّة أدناه). الموضوع: com.sawaaap.app.voip · البيئة من تسجيل الجهاز (production/development).
-   ينجح ⇒ لا يُرسَل إشعار FCM لذلك الجهاز (لا تكرار) · يفشل ⇒ يُكمَل بإشعار FCM كما كان. */
+// \u064A\u064F\u0631\u0633\u0644 \u0644\u0623\u062C\u0647\u0632\u0629 \u0645\u0633\u062A\u062E\u062F\u0645\u064A\u0646 (\u062D\u062A\u0651\u0649 \u0661\u0662 \u0645\u0633\u062A\u062E\u062F\u0645\u0627\u064B \u0644\u0643\u0644\u0651 \u062D\u062F\u062B \u2014 \u062D\u062F\u0651 \u0665\u0660 \u0637\u0644\u0628\u0627\u064B \u0641\u0631\u0639\u064A\u0651\u0627\u064B)\u060C \u0648\u064A\u062D\u0630\u0641 \u0627\u0644\u0631\u0645\u0648\u0632 \u0627\u0644\u0645\u064A\u0651\u062A\u0629
+/* ---------- C151: \u0625\u0634\u0639\u0627\u0631\u0627\u062A VoIP \u0644\u0644\u0622\u064A\u0641\u0648\u0646 (\u0634\u0627\u0634\u0629 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u0627\u0644\u0648\u0627\u0631\u062F\u0629 \u0645\u0646 \u0627\u0644\u0646\u0638\u0627\u0645 \u2014 CallKit) ----------
+   FCM \u0644\u0627 \u064A\u0631\u0633\u0644 VoIP \u21D2 \u0627\u0644\u062E\u0627\u062F\u0645 \u064A\u0631\u0633\u0644 \u0645\u0628\u0627\u0634\u0631\u0629\u064B \u0625\u0644\u0649 Apple \u0628\u0645\u0641\u062A\u0627\u062D APNs (\u200E.p8\u200E) \u2014 \u0633\u0631\u0651 \u0627\u0644\u0640Worker \u200FAPNS_P8 (\u0645\u062D\u062A\u0648\u0649 \u0627\u0644\u0645\u0644\u0641\u0651 \u0643\u0627\u0645\u0644\u0627\u064B)\u060C
+   \u0648\u0645\u0639\u0647 APNS_KEY_ID \u0648 APNS_TEAM_ID (\u0623\u0648 \u0627\u0644\u0642\u064A\u0645 \u0627\u0644\u0627\u0641\u062A\u0631\u0627\u0636\u064A\u0651\u0629 \u0623\u062F\u0646\u0627\u0647). \u0627\u0644\u0645\u0648\u0636\u0648\u0639: com.sawaaap.app.voip \u00B7 \u0627\u0644\u0628\u064A\u0626\u0629 \u0645\u0646 \u062A\u0633\u062C\u064A\u0644 \u0627\u0644\u062C\u0647\u0627\u0632 (production/development).
+   \u064A\u0646\u062C\u062D \u21D2 \u0644\u0627 \u064A\u064F\u0631\u0633\u064E\u0644 \u0625\u0634\u0639\u0627\u0631 FCM \u0644\u0630\u0644\u0643 \u0627\u0644\u062C\u0647\u0627\u0632 (\u0644\u0627 \u062A\u0643\u0631\u0627\u0631) \u00B7 \u064A\u0641\u0634\u0644 \u21D2 \u064A\u064F\u0643\u0645\u064E\u0644 \u0628\u0625\u0634\u0639\u0627\u0631 FCM \u0643\u0645\u0627 \u0643\u0627\u0646. */
 let PUSH_ENV = null;
 const APNS_TOPIC = "com.sawaaap.app.voip";
 let apnsJwt = { t: 0, v: null, key: null };
@@ -2813,7 +2813,7 @@ async function apnsToken(env) {
   apnsJwt.v = head + "." + body + "." + b64url(sig); apnsJwt.t = Date.now();
   return apnsJwt.v;
 }
-// ⇒ "ok" | "gone" (الرمز ميّت) | نصّ الخطأ
+// \u21D2 "ok" | "gone" (\u0627\u0644\u0631\u0645\u0632 \u0645\u064A\u0651\u062A) | \u0646\u0635\u0651 \u0627\u0644\u062E\u0637\u0623
 async function apnsVoip(env, devToken, envName, payload) {
   const jwt = await apnsToken(env);
   if (!jwt) return "no-key";
@@ -2829,8 +2829,8 @@ async function apnsVoip(env, devToken, envName, payload) {
     return "apns " + r.status + " " + t.slice(0, 160);
   } catch (e) { return "fetch " + String(e && e.message || e).slice(0, 160); }
 }
-const voipOk = new Map();   // callId|device ⇒ أُرسل VoIP بنجاح (تكرار الرنين لا يُرسل FCM لهذا الجهاز)
-// إن كان الجهاز آيفون برمز VoIP: «call» ⇒ VoIP مرّةً واحدة · «missed» ⇒ VoIP إلغاء (تُغلق شاشة النظام) ثمّ FCM «فائتة» كالعادة. يُرجع true إن أغنى عن FCM.
+const voipOk = new Map();   // callId|device \u21D2 \u0623\u064F\u0631\u0633\u0644 VoIP \u0628\u0646\u062C\u0627\u062D (\u062A\u0643\u0631\u0627\u0631 \u0627\u0644\u0631\u0646\u064A\u0646 \u0644\u0627 \u064A\u064F\u0631\u0633\u0644 FCM \u0644\u0647\u0630\u0627 \u0627\u0644\u062C\u0647\u0627\u0632)
+// \u0625\u0646 \u0643\u0627\u0646 \u0627\u0644\u062C\u0647\u0627\u0632 \u0622\u064A\u0641\u0648\u0646 \u0628\u0631\u0645\u0632 VoIP: \u00ABcall\u00BB \u21D2 VoIP \u0645\u0631\u0651\u0629\u064B \u0648\u0627\u062D\u062F\u0629 \u00B7 \u00ABmissed\u00BB \u21D2 VoIP \u0625\u0644\u063A\u0627\u0621 (\u062A\u064F\u063A\u0644\u0642 \u0634\u0627\u0634\u0629 \u0627\u0644\u0646\u0638\u0627\u0645) \u062B\u0645\u0651 FCM \u00AB\u0641\u0627\u0626\u062A\u0629\u00BB \u0643\u0627\u0644\u0639\u0627\u062F\u0629. \u064A\u064F\u0631\u062C\u0639 true \u0625\u0646 \u0623\u063A\u0646\u0649 \u0639\u0646 FCM.
 async function voipFor(dev, du) {
   const vt = fstr(dev, "voip"); if (!vt || !PUSH_ENV || !PUSH_ENV.APNS_P8 || !du) return false;
   const key = String(du.call || "") + "|" + dev.name;
@@ -2844,14 +2844,14 @@ async function voipFor(dev, du) {
   if (du.t === "missed" && du.call) { await apnsVoip(PUSH_ENV, vt, fstr(dev, "voipEnv") || "production", { call: du.call, cancel: "1", title: du.title || "" }); voipOk.delete(key); }
   return false;
 }
-// المدير: اختبار VoIP على أجهزتي (يُظهر ردّ Apple كما هو — يكشف المفتاح أو البيئة أو اتّصال الخادم)
+// \u0627\u0644\u0645\u062F\u064A\u0631: \u0627\u062E\u062A\u0628\u0627\u0631 VoIP \u0639\u0644\u0649 \u0623\u062C\u0647\u0632\u062A\u064A (\u064A\u064F\u0638\u0647\u0631 \u0631\u062F\u0651 Apple \u0643\u0645\u0627 \u0647\u0648 \u2014 \u064A\u0643\u0634\u0641 \u0627\u0644\u0645\u0641\u062A\u0627\u062D \u0623\u0648 \u0627\u0644\u0628\u064A\u0626\u0629 \u0623\u0648 \u0627\u062A\u0651\u0635\u0627\u0644 \u0627\u0644\u062E\u0627\u062F\u0645)
 async function opVoipTest(uid, payload, env, claims) {
   if (!isAdmin(env, claims)) return { admin: false };
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const devs = await devsOf(token, uid), out = [];
   for (const d of devs) {
     const vt = fstr(d, "voip"); if (!vt) continue;
-    const r = await apnsVoip(env, vt, fstr(d, "voipEnv") || "production", { call: "test_" + Date.now().toString(36), title: "سوا — اختبار المكالمة", type: "audio", cancelAfter: "8" });
+    const r = await apnsVoip(env, vt, fstr(d, "voipEnv") || "production", { call: "test_" + Date.now().toString(36), title: "\u0633\u0648\u0627 \u2014 \u0627\u062E\u062A\u0628\u0627\u0631 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629", type: "audio", cancelAfter: "8" });
     out.push({ env: fstr(d, "voipEnv") || "production", result: r });
   }
   return { admin: true, key: !!env.APNS_P8, devices: out };
@@ -2859,13 +2859,13 @@ async function opVoipTest(uid, payload, env, claims) {
 async function pushTo(token, uids, data) {
   let sent = 0;
   const L = LIM(PUSH_ENV), list = [...new Set(uids)].slice(0, L.push);
-  // C180: بالتوازي (٨ مستلمين معاً) — المجموعات الكبيرة كانت تصل لأوّل ١٢ فقط وبالتتابع
+  // C180: \u0628\u0627\u0644\u062A\u0648\u0627\u0632\u064A (\u0668 \u0645\u0633\u062A\u0644\u0645\u064A\u0646 \u0645\u0639\u0627\u064B) \u2014 \u0627\u0644\u0645\u062C\u0645\u0648\u0639\u0627\u062A \u0627\u0644\u0643\u0628\u064A\u0631\u0629 \u0643\u0627\u0646\u062A \u062A\u0635\u0644 \u0644\u0623\u0648\u0651\u0644 \u0661\u0662 \u0641\u0642\u0637 \u0648\u0628\u0627\u0644\u062A\u062A\u0627\u0628\u0639
   const one = async (u) => {
     const devs = await devsOf(token, u);
-    const du = typeof data === "function" ? await data(u) : data;   // v65: بيانات خاصّة بكلّ مستلم (توقيع الإقرار)
+    const du = typeof data === "function" ? await data(u) : data;   // v65: \u0628\u064A\u0627\u0646\u0627\u062A \u062E\u0627\u0635\u0651\u0629 \u0628\u0643\u0644\u0651 \u0645\u0633\u062A\u0644\u0645 (\u062A\u0648\u0642\u064A\u0639 \u0627\u0644\u0625\u0642\u0631\u0627\u0631)
     for (const d of devs.slice(0, DEV_MAX)) {
       if (await voipFor(d, du).catch(() => false)) { sent++; continue; }   // C151
-      // C164: الجهاز أطفأ صور المرسلين ⇒ بلا توقيع الصورة (يبقى شعار سوا)
+      // C164: \u0627\u0644\u062C\u0647\u0627\u0632 \u0623\u0637\u0641\u0623 \u0635\u0648\u0631 \u0627\u0644\u0645\u0631\u0633\u0644\u064A\u0646 \u21D2 \u0628\u0644\u0627 \u062A\u0648\u0642\u064A\u0639 \u0627\u0644\u0635\u0648\u0631\u0629 (\u064A\u0628\u0642\u0649 \u0634\u0639\u0627\u0631 \u0633\u0648\u0627)
       const dd = du && du.ak && fbool(d, "noav") ? Object.assign({}, du, { ak: undefined }) : du;
       if (dd !== du) delete dd.ak;
       const r = await fcmSend(token, fstr(d, "token"), dd, fstr(d, "lang"));
@@ -2876,32 +2876,32 @@ async function pushTo(token, uids, data) {
   for (let i = 0; i < list.length; i += 8) await Promise.all(list.slice(i, i + 8).map(u => one(u).catch(e => console.log("push to:", e && e.message))));
   return sent;
 }
-// v56: «from» مفتاحٌ محجوز في FCM (ومعه message_type و google.*/gcm.*) — وجوده يجعل FCM يرفض الرسالة كلّها (INVALID_ARGUMENT):
-//      كلّ مكالمةٍ ورسالةٍ وطلبٍ كان يُرفض بصمت (الإشعار التجريبيّ وحده بلا from فيصل)، بل كان الرفض يُعدّ «رمزاً ميّتاً» فيُحذف جهاز المستلم.
-//      المرسِل صار «uf»، والواجهات تقرأ uf || from.
+// v56: \u00ABfrom\u00BB \u0645\u0641\u062A\u0627\u062D\u064C \u0645\u062D\u062C\u0648\u0632 \u0641\u064A FCM (\u0648\u0645\u0639\u0647 message_type \u0648 google.*/gcm.*) \u2014 \u0648\u062C\u0648\u062F\u0647 \u064A\u062C\u0639\u0644 FCM \u064A\u0631\u0641\u0636 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0643\u0644\u0651\u0647\u0627 (INVALID_ARGUMENT):
+//      \u0643\u0644\u0651 \u0645\u0643\u0627\u0644\u0645\u0629\u064D \u0648\u0631\u0633\u0627\u0644\u0629\u064D \u0648\u0637\u0644\u0628\u064D \u0643\u0627\u0646 \u064A\u064F\u0631\u0641\u0636 \u0628\u0635\u0645\u062A (\u0627\u0644\u0625\u0634\u0639\u0627\u0631 \u0627\u0644\u062A\u062C\u0631\u064A\u0628\u064A\u0651 \u0648\u062D\u062F\u0647 \u0628\u0644\u0627 from \u0641\u064A\u0635\u0644)\u060C \u0628\u0644 \u0643\u0627\u0646 \u0627\u0644\u0631\u0641\u0636 \u064A\u064F\u0639\u062F\u0651 \u00AB\u0631\u0645\u0632\u0627\u064B \u0645\u064A\u0651\u062A\u0627\u064B\u00BB \u0641\u064A\u064F\u062D\u0630\u0641 \u062C\u0647\u0627\u0632 \u0627\u0644\u0645\u0633\u062A\u0644\u0645.
+//      \u0627\u0644\u0645\u0631\u0633\u0650\u0644 \u0635\u0627\u0631 \u00ABuf\u00BB\u060C \u0648\u0627\u0644\u0648\u0627\u062C\u0647\u0627\u062A \u062A\u0642\u0631\u0623 uf || from.
 function strData(o) { const out = {}; for (const k in o) if (o[k] != null) { const kk = k === "from" ? "uf" : k; if (kk === "message_type" || kk === "notification" || /^(google|gcm)/i.test(kk)) continue; out[kk] = String(o[k]).slice(0, 900); } return out; }
 async function notifyChat(token, c, cid, uid, msg) {
   const members = fsArr(c, "members"), muted = fsArr(c, "mutedBy"), type = fstr(c, "type");
   const names = fsToJs((c.fields || {}).names || { nullValue: null }) || {};
-  const senderName = names[uid] || "سوا";
+  const senderName = names[uid] || "\u0633\u0648\u0627";
   const mentions = msg.mentions || [];
-  // المُشار إليهم أوّلاً (ويصلهم ولو كتموا المجموعة)، ثمّ الباقون غير المكتومين
+  // \u0627\u0644\u0645\u064F\u0634\u0627\u0631 \u0625\u0644\u064A\u0647\u0645 \u0623\u0648\u0651\u0644\u0627\u064B (\u0648\u064A\u0635\u0644\u0647\u0645 \u0648\u0644\u0648 \u0643\u062A\u0645\u0648\u0627 \u0627\u0644\u0645\u062C\u0645\u0648\u0639\u0629)\u060C \u062B\u0645\u0651 \u0627\u0644\u0628\u0627\u0642\u0648\u0646 \u063A\u064A\u0631 \u0627\u0644\u0645\u0643\u062A\u0648\u0645\u064A\u0646
   const tAssigned = msg.type === "tasks" && !msg.enc ? ((msg.extra && msg.extra.tasks) || []).map(t => t.assigneeId).filter(Boolean) : [];   // C173
   const targets = members.filter(u => u !== uid && tAssigned.indexOf(u) < 0 && (mentions.indexOf(u) >= 0 || muted.indexOf(u) < 0))
     .sort((a, b) => (mentions.indexOf(b) >= 0) - (mentions.indexOf(a) >= 0));
   if (!targets.length || type === "saved") return 0;
   const group = type === "group" || type === "family";
-  const body = msg.enc ? "🔒 رسالة مشفّرة" : msg.type === "text" || msg.type === "sticker" ? (msg.text || "") : ({ image: "📷 صورة", video: "🎥 فيديو", voice: "🎤 رسالة صوتيّة", file: "📎 ملفّ", poll: "📊 استطلاع", bill: "🧾 فاتورة", fund: "💝 تبرّعات", tasks: "✅ " + ((msg.extra && msg.extra.title) || "مهامّ"), contact: "👤 جهة اتّصال", location: "📍 موقع" }[msg.type] || "رسالة");
-  const base = { t: "msg", cid, from: uid, ak: notifyChat.env ? await ackSig(notifyChat.env, "av|" + uid) : undefined, mid: msg.id, title: group ? (fstr(c, "name") || "سوا") : senderName, body: group ? senderName + ": " + body : body, ts: msg.ts };
+  const body = msg.enc ? "\uD83D\uDD12 \u0631\u0633\u0627\u0644\u0629 \u0645\u0634\u0641\u0651\u0631\u0629" : msg.type === "text" || msg.type === "sticker" ? (msg.text || "") : ({ image: "\uD83D\uDCF7 \u0635\u0648\u0631\u0629", video: "\uD83C\uDFA5 \u0641\u064A\u062F\u064A\u0648", voice: "\uD83C\uDFA4 \u0631\u0633\u0627\u0644\u0629 \u0635\u0648\u062A\u064A\u0651\u0629", file: "\uD83D\uDCCE \u0645\u0644\u0641\u0651", poll: "\uD83D\uDCCA \u0627\u0633\u062A\u0637\u0644\u0627\u0639", bill: "\uD83E\uDDFE \u0641\u0627\u062A\u0648\u0631\u0629", fund: "\uD83D\uDC9D \u062A\u0628\u0631\u0651\u0639\u0627\u062A", tasks: "\u2705 " + ((msg.extra && msg.extra.title) || "\u0645\u0647\u0627\u0645\u0651"), contact: "\uD83D\uDC64 \u062C\u0647\u0629 \u0627\u062A\u0651\u0635\u0627\u0644", location: "\uD83D\uDCCD \u0645\u0648\u0642\u0639" }[msg.type] || "\u0631\u0633\u0627\u0644\u0629");
+  const base = { t: "msg", cid, from: uid, ak: notifyChat.env ? await ackSig(notifyChat.env, "av|" + uid) : undefined, mid: msg.id, title: group ? (fstr(c, "name") || "\u0633\u0648\u0627") : senderName, body: group ? senderName + ": " + body : body, ts: msg.ts };
   let sent = 0;
   const ment = targets.filter(u => mentions.indexOf(u) >= 0), rest = targets.filter(u => mentions.indexOf(u) < 0);
   const env0 = notifyChat.env;
   const signed = (o) => env0 ? async (u) => strData(Object.assign({}, o, { to: u, dk: await ackSig(env0, "d|" + cid + "|" + u + "|" + msg.ts) })) : strData(o);
-  if (ment.length) sent += await pushTo(token, ment, signed(Object.assign({}, base, { mention: "1", title: senderName + " أشار إليك" + (group ? " في " + (fstr(c, "name") || "") : "") })));
+  if (ment.length) sent += await pushTo(token, ment, signed(Object.assign({}, base, { mention: "1", title: senderName + " \u0623\u0634\u0627\u0631 \u0625\u0644\u064A\u0643" + (group ? " \u0641\u064A " + (fstr(c, "name") || "") : "") })));
   if (rest.length) sent += await pushTo(token, rest.slice(0, Math.max(0, LIM(env0).push - ment.length)), signed(base));   // C180
   return sent;
 }
-// الكتم يُنسخ إلى المحادثة نفسها (mutedBy) فلا يقرأ الإرسال إعدادات كلّ عضو
+// \u0627\u0644\u0643\u062A\u0645 \u064A\u064F\u0646\u0633\u062E \u0625\u0644\u0649 \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629 \u0646\u0641\u0633\u0647\u0627 (mutedBy) \u0641\u0644\u0627 \u064A\u0642\u0631\u0623 \u0627\u0644\u0625\u0631\u0633\u0627\u0644 \u0625\u0639\u062F\u0627\u062F\u0627\u062A \u0643\u0644\u0651 \u0639\u0636\u0648
 async function syncMutedBy(token, uid, before, after) {
   const b = new Set(before || []), a = new Set(after || []);
   const changes = [];
@@ -2909,7 +2909,7 @@ async function syncMutedBy(token, uid, before, after) {
   b.forEach(cid => { if (!a.has(cid)) changes.push([cid, "removeAllFromArray"]); });
   for (const [cid, op] of changes.slice(0, 20)) {
     if (!/^(dm_|sdm_|sv_|fam_|grp_)/.test(cid) || !segOk(cid)) continue;
-    if (op === "appendMissingElements") {   // v61: العضو وحده يضيف نفسه إلى mutedBy
+    if (op === "appendMissingElements") {   // v61: \u0627\u0644\u0639\u0636\u0648 \u0648\u062D\u062F\u0647 \u064A\u0636\u064A\u0641 \u0646\u0641\u0633\u0647 \u0625\u0644\u0649 mutedBy
       const cd = await fsGet(token, "chats/" + cid).catch(() => null);
       if (!cd || fsArr(cd, "members").indexOf(uid) < 0) continue;
     }
@@ -2918,12 +2918,12 @@ async function syncMutedBy(token, uid, before, after) {
   }
 }
 
-/* ---------- 30) المكالمات الجماعيّة (C7) ----------
-   الخادم وحده ينشئ gcalls/{gid} ويحدّد من يُسمح له (allow)؛ الأجهزة تنضمّ وتتبادل الإشارات مباشرةً (قواعد RTDB).
-   gcur/{cid} يشير للمكالمة الجارية في محادثةٍ جماعيّة (شريط «انضمام»). */
-/* ---------- 45) الغرف الكبيرة: وسيطٌ إلى Cloudflare Realtime SFU (C45) ----------
-   السرّان: CF_SFU_APP_ID و CF_SFU_APP_TOKEN (Cloudflare ← Realtime ← SFU ← Create application). المفتاح لا يغادر الخادم.
-   الحراسة: الغرفة كبيرة (rooms/$code/meta/big) وأنا عضوٌ فيها · الجلسة جلستي (sfuown/$sid) · المسار المسحوب لجلسة عضوٍ في الغرفة نفسها. */
+/* ---------- 30) \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0627\u0644\u062C\u0645\u0627\u0639\u064A\u0651\u0629 (C7) ----------
+   \u0627\u0644\u062E\u0627\u062F\u0645 \u0648\u062D\u062F\u0647 \u064A\u0646\u0634\u0626 gcalls/{gid} \u0648\u064A\u062D\u062F\u0651\u062F \u0645\u0646 \u064A\u064F\u0633\u0645\u062D \u0644\u0647 (allow)\u061B \u0627\u0644\u0623\u062C\u0647\u0632\u0629 \u062A\u0646\u0636\u0645\u0651 \u0648\u062A\u062A\u0628\u0627\u062F\u0644 \u0627\u0644\u0625\u0634\u0627\u0631\u0627\u062A \u0645\u0628\u0627\u0634\u0631\u0629\u064B (\u0642\u0648\u0627\u0639\u062F RTDB).
+   gcur/{cid} \u064A\u0634\u064A\u0631 \u0644\u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u0627\u0644\u062C\u0627\u0631\u064A\u0629 \u0641\u064A \u0645\u062D\u0627\u062F\u062B\u0629\u064D \u062C\u0645\u0627\u0639\u064A\u0651\u0629 (\u0634\u0631\u064A\u0637 \u00AB\u0627\u0646\u0636\u0645\u0627\u0645\u00BB). */
+/* ---------- 45) \u0627\u0644\u063A\u0631\u0641 \u0627\u0644\u0643\u0628\u064A\u0631\u0629: \u0648\u0633\u064A\u0637\u064C \u0625\u0644\u0649 Cloudflare Realtime SFU (C45) ----------
+   \u0627\u0644\u0633\u0631\u0651\u0627\u0646: CF_SFU_APP_ID \u0648 CF_SFU_APP_TOKEN (Cloudflare \u2190 Realtime \u2190 SFU \u2190 Create application). \u0627\u0644\u0645\u0641\u062A\u0627\u062D \u0644\u0627 \u064A\u063A\u0627\u062F\u0631 \u0627\u0644\u062E\u0627\u062F\u0645.
+   \u0627\u0644\u062D\u0631\u0627\u0633\u0629: \u0627\u0644\u063A\u0631\u0641\u0629 \u0643\u0628\u064A\u0631\u0629 (rooms/$code/meta/big) \u0648\u0623\u0646\u0627 \u0639\u0636\u0648\u064C \u0641\u064A\u0647\u0627 \u00B7 \u0627\u0644\u062C\u0644\u0633\u0629 \u062C\u0644\u0633\u062A\u064A (sfuown/$sid) \u00B7 \u0627\u0644\u0645\u0633\u0627\u0631 \u0627\u0644\u0645\u0633\u062D\u0648\u0628 \u0644\u062C\u0644\u0633\u0629 \u0639\u0636\u0648\u064D \u0641\u064A \u0627\u0644\u063A\u0631\u0641\u0629 \u0646\u0641\u0633\u0647\u0627. */
 const SFU_BASE = "https://rtc.live.cloudflare.com/v1/apps/";
 const SFU_OWN = new Map();
 function sfuOn(env) { return !!(env.CF_SFU_APP_ID && env.CF_SFU_APP_TOKEN); }
@@ -2982,7 +2982,7 @@ async function opSfuPull(uid, payload, env) {
   const g = await sfuGuard(uid, payload, env, true);
   const want = (payload.tracks || []).slice(0, 40).map(t => ({ sessionId: String(t.sessionId), trackName: String(t.trackName), sc: t.sc === true, rid: t.rid === "h" ? "h" : "f" }));
   if (!want.length || want.some(t => !SFU_SID_RE.test(t.sessionId) || !SFU_TRK_RE.test(t.trackName) || t.sessionId === g.sid)) throw new Error("bad_tracks");
-  // كلّ جلسةٍ مسحوبة لعضوٍ في الغرفة نفسها، وصاحبها ما زال عضواً
+  // \u0643\u0644\u0651 \u062C\u0644\u0633\u0629\u064D \u0645\u0633\u062D\u0648\u0628\u0629 \u0644\u0639\u0636\u0648\u064D \u0641\u064A \u0627\u0644\u063A\u0631\u0641\u0629 \u0646\u0641\u0633\u0647\u0627\u060C \u0648\u0635\u0627\u062D\u0628\u0647\u0627 \u0645\u0627 \u0632\u0627\u0644 \u0639\u0636\u0648\u0627\u064B
   const members = await rtdbGet(g.token, "rooms/" + g.room + "/members").catch(() => null) || {};
   if (!members[uid]) throw new Error("not_member");
   const ok = [], rejected = [];
@@ -2990,7 +2990,7 @@ async function opSfuPull(uid, payload, env) {
     const o = await sfuOwn(g.token, sid);
     if (o && o.room === g.room && members[o.u]) ok.push(sid); else rejected.push(sid);
   }
-  // C179: Simulcast — الناشر يرسل طبقتين (f كاملة · h نصف الدقّة) والخادم يختار لكلّ مشاهدٍ ما تحتمله شبكته (asciibetical: f ثمّ h)
+  // C179: Simulcast \u2014 \u0627\u0644\u0646\u0627\u0634\u0631 \u064A\u0631\u0633\u0644 \u0637\u0628\u0642\u062A\u064A\u0646 (f \u0643\u0627\u0645\u0644\u0629 \u00B7 h \u0646\u0635\u0641 \u0627\u0644\u062F\u0642\u0651\u0629) \u0648\u0627\u0644\u062E\u0627\u062F\u0645 \u064A\u062E\u062A\u0627\u0631 \u0644\u0643\u0644\u0651 \u0645\u0634\u0627\u0647\u062F\u064D \u0645\u0627 \u062A\u062D\u062A\u0645\u0644\u0647 \u0634\u0628\u0643\u062A\u0647 (asciibetical: f \u062B\u0645\u0651 h)
   const tracks = want.filter(t => ok.indexOf(t.sessionId) >= 0).map(t => Object.assign({ location: "remote", sessionId: t.sessionId, trackName: t.trackName },
     t.sc ? { simulcast: { preferredRid: t.rid, priorityOrdering: "asciibetical", ridNotAvailable: "asciibetical" } } : {}));
   const out = want.filter(t => ok.indexOf(t.sessionId) < 0).map(t => ({ sessionId: t.sessionId, trackName: t.trackName, error: "not_in_room" }));
@@ -3024,7 +3024,7 @@ async function blockedBy(token, target, uid) {
   const blocked = pr && fstr(pr, "data") ? (JSON.parse(fstr(pr, "data")).blocked || []) : [];
   return blocked.indexOf(uid) >= 0;
 }
-// v33: أيّهم حظرني؟ (blk/{هو}/{أنا} في RTDB — يكتبها الـWorker عند حفظ قائمة الحظر)
+// v33: \u0623\u064A\u0651\u0647\u0645 \u062D\u0638\u0631\u0646\u064A\u061F (blk/{\u0647\u0648}/{\u0623\u0646\u0627} \u0641\u064A RTDB \u2014 \u064A\u0643\u062A\u0628\u0647\u0627 \u0627\u0644\u0640Worker \u0639\u0646\u062F \u062D\u0641\u0638 \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u062D\u0638\u0631)
 async function blockedSet(token, targets, uid) {
   const out = new Set();
   await Promise.all(targets.map(u => rtdbGet(token, "blk/" + u + "/" + uid).then(v => { if (v === true) out.add(u); }).catch(() => {})));
@@ -3034,16 +3034,16 @@ async function opGcallStart(uid, payload, env, claims, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   payload = payload || {};
   let type = payload.type === "video" ? "video" : "audio";
-  const me = memberIdFields(claims).name.stringValue || "سوا";
+  const me = memberIdFields(claims).name.stringValue || "\u0633\u0648\u0627";
   let allow = [uid], ring = [], cid = null, title = "", gid = null, approval = false, by = uid, muted = [], isSched = false;
   if (payload.cid) {
     cid = String(payload.cid);
     const c = await requireChatMember(token, cid, uid);
     const t = fstr(c, "type");
     if (t !== "group" && t !== "family") throw new Error("not a group chat");
-    title = fstr(c, "name") || "مجموعة";
+    title = fstr(c, "name") || "\u0645\u062C\u0645\u0648\u0639\u0629";
     allow = fsArr(c, "members"); muted = fsArr(c, "mutedBy");
-    // مكالمةٌ جارية في هذه المحادثة؟ ⇒ انضمّ إليها (ويُضاف المتأخّر إلى المسموح لهم)
+    // \u0645\u0643\u0627\u0644\u0645\u0629\u064C \u062C\u0627\u0631\u064A\u0629 \u0641\u064A \u0647\u0630\u0647 \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629\u061F \u21D2 \u0627\u0646\u0636\u0645\u0651 \u0625\u0644\u064A\u0647\u0627 (\u0648\u064A\u064F\u0636\u0627\u0641 \u0627\u0644\u0645\u062A\u0623\u062E\u0651\u0631 \u0625\u0644\u0649 \u0627\u0644\u0645\u0633\u0645\u0648\u062D \u0644\u0647\u0645)
     const curp = await rtdbGet(token, "gcur/" + cid);
     if (curp && curp.gid && segOk(String(curp.gid))) {
       const live = await rtdbGet(token, "gcalls/" + curp.gid);
@@ -3051,9 +3051,9 @@ async function opGcallStart(uid, payload, env, claims, ctx) {
         if (!(live.allow && live.allow[uid])) await rtdbPatch(token, { ["gcalls/" + curp.gid + "/allow/" + uid]: true });
         return { gid: curp.gid, joined: true, type: live.type, title: live.title || title, by: live.by, approval: !!live.approval, cid, vc: !!live.vc };
       }
-      await rtdbPatch(token, { ["gcalls/" + curp.gid]: null });   // مؤشّرٌ لمكالمةٍ انتهت
+      await rtdbPatch(token, { ["gcalls/" + curp.gid]: null });   // \u0645\u0624\u0634\u0651\u0631\u064C \u0644\u0645\u0643\u0627\u0644\u0645\u0629\u064D \u0627\u0646\u062A\u0647\u062A
     }
-    ring = payload.vc ? [] : allow.filter(u => u !== uid);   // v37: «دردشة صوتيّة» = غرفةٌ مفتوحة بلا رنين
+    ring = payload.vc ? [] : allow.filter(u => u !== uid);   // v37: \u00AB\u062F\u0631\u062F\u0634\u0629 \u0635\u0648\u062A\u064A\u0651\u0629\u00BB = \u063A\u0631\u0641\u0629\u064C \u0645\u0641\u062A\u0648\u062D\u0629 \u0628\u0644\u0627 \u0631\u0646\u064A\u0646
   } else if (payload.sched) {
     const sid = String(payload.sched);
     if (!/^[a-z0-9]{6,32}$/.test(sid)) throw new Error("bad id: sched");
@@ -3066,7 +3066,7 @@ async function opGcallStart(uid, payload, env, claims, ctx) {
     if (live && live.members && Object.keys(live.members).length)
       return { gid, joined: true, type: live.type, title: live.title, by: live.by, approval: !!live.approval, cid: live.cid || null };
     allow = users; by = fstr(s, "by") || uid; approval = fbool(s, "approval");
-    title = fstr(s, "title") || fstr(s, "toName") || "مكالمة مجدولة";
+    title = fstr(s, "title") || fstr(s, "toName") || "\u0645\u0643\u0627\u0644\u0645\u0629 \u0645\u062C\u062F\u0648\u0644\u0629";
     type = fstr(s, "type") === "video" ? "video" : "audio";
     cid = fstr(s, "cid") || null;
     ring = users.filter(u => u !== uid);
@@ -3077,7 +3077,7 @@ async function opGcallStart(uid, payload, env, claims, ctx) {
     const quiet = Array.isArray(payload.quiet) ? payload.quiet.map(String) : [];
     allow = [uid].concat(to);
     ring = to.filter(u => quiet.indexOf(u) < 0);
-    // الإشعار لا يصل لمن حظرك (الرنين داخل التطبيق يُسقطه جهازه أيضاً) — يُفحص لمن سيصلهم إشعار فقط
+    // \u0627\u0644\u0625\u0634\u0639\u0627\u0631 \u0644\u0627 \u064A\u0635\u0644 \u0644\u0645\u0646 \u062D\u0638\u0631\u0643 (\u0627\u0644\u0631\u0646\u064A\u0646 \u062F\u0627\u062E\u0644 \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u064A\u064F\u0633\u0642\u0637\u0647 \u062C\u0647\u0627\u0632\u0647 \u0623\u064A\u0636\u0627\u064B) \u2014 \u064A\u064F\u0641\u062D\u0635 \u0644\u0645\u0646 \u0633\u064A\u0635\u0644\u0647\u0645 \u0625\u0634\u0639\u0627\u0631 \u0641\u0642\u0637
     const pushable = [];
     for (const u of ring.slice(0, LIM(env).contacts)) if (!(await blockedBy(token, u, uid))) pushable.push(u);
     payload.__push = pushable;
@@ -3096,27 +3096,27 @@ async function opGcallStart(uid, payload, env, claims, ctx) {
   if (cid && !isSched) upd["gcur/" + cid] = vc ? { gid, type, by: uid, ts: now, vc: true } : { gid, type, by: uid, ts: now };
   for (const u of ring.slice(0, 63)) upd["inbox/" + u + "/" + gid] = { from: uid, fromName: me, type, ts: now, gid, title: node.title };
   await rtdbPatch(token, upd);
-  if (vc) {   // v37: لا رنين — رسالة نظامٍ في المحادثة وإشعارٌ عاديّ (لغير الكاتمين) يفتح المحادثة وفيها شريط «انضمام»
+  if (vc) {   // v37: \u0644\u0627 \u0631\u0646\u064A\u0646 \u2014 \u0631\u0633\u0627\u0644\u0629 \u0646\u0638\u0627\u0645\u064D \u0641\u064A \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629 \u0648\u0625\u0634\u0639\u0627\u0631\u064C \u0639\u0627\u062F\u064A\u0651 (\u0644\u063A\u064A\u0631 \u0627\u0644\u0643\u0627\u062A\u0645\u064A\u0646) \u064A\u0641\u062A\u062D \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629 \u0648\u0641\u064A\u0647\u0627 \u0634\u0631\u064A\u0637 \u00AB\u0627\u0646\u0636\u0645\u0627\u0645\u00BB
     try { await sysMsg(token, cid, uid, "vc_on", {}); } catch (e) {}
     const soft = allow.filter(u => u !== uid && muted.indexOf(u) < 0).slice(0, LIM(env).ring);
     if (soft.length) {
-      const job = pushTo(token, soft, strData({ t: "msg", cid, from: uid, mid: "vc" + gid, title: node.title || "سوا", body: "🎙 " + me + " بدأ دردشة صوتيّة — انضمّ متى شئت", ts: now }));
+      const job = pushTo(token, soft, strData({ t: "msg", cid, from: uid, mid: "vc" + gid, title: node.title || "\u0633\u0648\u0627", body: "\uD83C\uDF99 " + me + " \u0628\u062F\u0623 \u062F\u0631\u062F\u0634\u0629 \u0635\u0648\u062A\u064A\u0651\u0629 \u2014 \u0627\u0646\u0636\u0645\u0651 \u0645\u062A\u0649 \u0634\u0626\u062A", ts: now }));
       if (ctx && ctx.waitUntil) ctx.waitUntil(job.catch(() => {})); else await job.catch(() => {});
     }
     return { gid, joined: false, type, title: node.title, by, approval: false, cid, vc: true };
   }
-  // إشعار رنين لمن لم يكتموا (≤ ١٠ — حدّ الطلبات الفرعيّة)
-  // ≤ ١٠ للمجموعة، ≤ ٤ لجهات الاتّصال (حدّ ٥٠ طلباً فرعيّاً لكلّ طلب في خطّة Workers المجّانيّة)
+  // \u0625\u0634\u0639\u0627\u0631 \u0631\u0646\u064A\u0646 \u0644\u0645\u0646 \u0644\u0645 \u064A\u0643\u062A\u0645\u0648\u0627 (\u2264 \u0661\u0660 \u2014 \u062D\u062F\u0651 \u0627\u0644\u0637\u0644\u0628\u0627\u062A \u0627\u0644\u0641\u0631\u0639\u064A\u0651\u0629)
+  // \u2264 \u0661\u0660 \u0644\u0644\u0645\u062C\u0645\u0648\u0639\u0629\u060C \u2264 \u0664 \u0644\u062C\u0647\u0627\u062A \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 (\u062D\u062F\u0651 \u0665\u0660 \u0637\u0644\u0628\u0627\u064B \u0641\u0631\u0639\u064A\u0651\u0627\u064B \u0644\u0643\u0644\u0651 \u0637\u0644\u0628 \u0641\u064A \u062E\u0637\u0651\u0629 Workers \u0627\u0644\u0645\u062C\u0651\u0627\u0646\u064A\u0651\u0629)
   const targets = payload.__push || ring.filter(u => muted.indexOf(u) < 0).slice(0, LIM(env).ring);   // C180
   if (targets.length) {
-    const body = (type === "video" ? "📹 " : "📞 ") + (cid || isSched ? me + " بدأ مكالمة جماعيّة" : me + " يدعوك لمكالمة جماعيّة");
+    const body = (type === "video" ? "\uD83D\uDCF9 " : "\uD83D\uDCDE ") + (cid || isSched ? me + " \u0628\u062F\u0623 \u0645\u0643\u0627\u0644\u0645\u0629 \u062C\u0645\u0627\u0639\u064A\u0651\u0629" : me + " \u064A\u062F\u0639\u0648\u0643 \u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u062C\u0645\u0627\u0639\u064A\u0651\u0629");
     const job = pushTo(token, targets, strData({ t: "call", call: gid, gid, from: uid, fromName: me, cid: cid || "", type, title: node.title || me, body, ts: now }));
     if (ctx && ctx.waitUntil) ctx.waitUntil(job.catch(() => {})); else await job;
   }
   return { gid, joined: false, type, title: node.title, by, approval: !!approval, cid };
 }
-// C178: المكالمة الجماعيّة تنتقل إلى خادم الوسائط (SFU) حين تكبر — العضو المنتخَب أنشأ غرفةً كبيرة (rooms/{code}/meta: host=هو · big · gcid)
-//       والخادم يتحقّق ثمّ يكتب gcalls/{gid}/room فينتقل إليها الجميع (ومن يأتي لاحقاً)
+// C178: \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u0627\u0644\u062C\u0645\u0627\u0639\u064A\u0651\u0629 \u062A\u0646\u062A\u0642\u0644 \u0625\u0644\u0649 \u062E\u0627\u062F\u0645 \u0627\u0644\u0648\u0633\u0627\u0626\u0637 (SFU) \u062D\u064A\u0646 \u062A\u0643\u0628\u0631 \u2014 \u0627\u0644\u0639\u0636\u0648 \u0627\u0644\u0645\u0646\u062A\u062E\u064E\u0628 \u0623\u0646\u0634\u0623 \u063A\u0631\u0641\u0629\u064B \u0643\u0628\u064A\u0631\u0629 (rooms/{code}/meta: host=\u0647\u0648 \u00B7 big \u00B7 gcid)
+//       \u0648\u0627\u0644\u062E\u0627\u062F\u0645 \u064A\u062A\u062D\u0642\u0651\u0642 \u062B\u0645\u0651 \u064A\u0643\u062A\u0628 gcalls/{gid}/room \u0641\u064A\u0646\u062A\u0642\u0644 \u0625\u0644\u064A\u0647\u0627 \u0627\u0644\u062C\u0645\u064A\u0639 (\u0648\u0645\u0646 \u064A\u0623\u062A\u064A \u0644\u0627\u062D\u0642\u0627\u064B)
 async function opGcallRoom(uid, payload, env) {
   const gid = String((payload && payload.gid) || ""), code = String((payload && payload.code) || "");
   if (!segOk(gid) || !/^[A-HJ-NP-Z2-9]{8}$/.test(code)) throw new Error("bad ref");
@@ -3141,8 +3141,8 @@ async function opGcallAdd(uid, payload, env, claims, ctx) {
   let chatMembers = [];
   if (g.cid) { const c = await chatDoc(token, g.cid); chatMembers = c ? fsArr(c, "members") : []; }
   for (const u of to) if (chatMembers.indexOf(u) < 0 && !(await sharesContact(token, uid, u))) throw new Error("not a contact");
-  const me = memberIdFields(claims).name.stringValue || "سوا", now = Date.now();
-  // v33: من حظرني لا تصله دعوتي (لا رنين ولا إشعار) — الردّ نفسه فلا يعرف المحظور
+  const me = memberIdFields(claims).name.stringValue || "\u0633\u0648\u0627", now = Date.now();
+  // v33: \u0645\u0646 \u062D\u0638\u0631\u0646\u064A \u0644\u0627 \u062A\u0635\u0644\u0647 \u062F\u0639\u0648\u062A\u064A (\u0644\u0627 \u0631\u0646\u064A\u0646 \u0648\u0644\u0627 \u0625\u0634\u0639\u0627\u0631) \u2014 \u0627\u0644\u0631\u062F\u0651 \u0646\u0641\u0633\u0647 \u0641\u0644\u0627 \u064A\u0639\u0631\u0641 \u0627\u0644\u0645\u062D\u0638\u0648\u0631
   const blk = await blockedSet(token, to, uid);
   const reach = to.filter(u => !blk.has(u));
   if (!reach.length) return { added: to.length };
@@ -3150,14 +3150,14 @@ async function opGcallAdd(uid, payload, env, claims, ctx) {
   for (const u of reach) { upd["gcalls/" + gid + "/allow/" + u] = true; upd["inbox/" + u + "/" + gid] = { from: uid, fromName: me, type: g.type, ts: now, gid, title: g.title || "" }; }
   await rtdbPatch(token, upd);
   const job = pushTo(token, reach, strData({ t: "call", call: gid, gid, from: uid, fromName: me, cid: g.cid || "", type: g.type, title: g.title || me,
-    body: (g.type === "video" ? "📹 " : "📞 ") + me + " يدعوك لمكالمة جماعيّة", ts: now }));
+    body: (g.type === "video" ? "\uD83D\uDCF9 " : "\uD83D\uDCDE ") + me + " \u064A\u062F\u0639\u0648\u0643 \u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u062C\u0645\u0627\u0639\u064A\u0651\u0629", ts: now }));
   if (ctx && ctx.waitUntil) ctx.waitUntil(job.catch(() => {})); else await job;
   return { added: to.length };
 }
 
-/* ---------- 31) المكالمات المجدولة (C7) ----------
-   scheds/{id} = { by, byName, title, toName, type, at, end, remind, rq (وقت التذكير، 0 بعد الإرسال), approval, users[], cid, ts }
-   Cron كلّ ٥ دقائق: تذكيرٌ بإشعار لكلّ المدعوّين حين يحين rq، وحذف المواعيد المنتهية منذ يومين. */
+/* ---------- 31) \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0627\u0644\u0645\u062C\u062F\u0648\u0644\u0629 (C7) ----------
+   scheds/{id} = { by, byName, title, toName, type, at, end, remind, rq (\u0648\u0642\u062A \u0627\u0644\u062A\u0630\u0643\u064A\u0631\u060C 0 \u0628\u0639\u062F \u0627\u0644\u0625\u0631\u0633\u0627\u0644), approval, users[], cid, ts }
+   Cron \u0643\u0644\u0651 \u0665 \u062F\u0642\u0627\u0626\u0642: \u062A\u0630\u0643\u064A\u0631\u064C \u0628\u0625\u0634\u0639\u0627\u0631 \u0644\u0643\u0644\u0651 \u0627\u0644\u0645\u062F\u0639\u0648\u0651\u064A\u0646 \u062D\u064A\u0646 \u064A\u062D\u064A\u0646 rq\u060C \u0648\u062D\u0630\u0641 \u0627\u0644\u0645\u0648\u0627\u0639\u064A\u062F \u0627\u0644\u0645\u0646\u062A\u0647\u064A\u0629 \u0645\u0646\u0630 \u064A\u0648\u0645\u064A\u0646. */
 const REMINDS = [5, 15, 30, 60];
 function schedOut(d) {
   const f = d.fields || {}, o = {};
@@ -3177,7 +3177,7 @@ async function opSchedSet(uid, payload, env, claims, ctx) {
   if (!isFinite(at) || at < now - 3600000 || at > now + 400 * 86400000) throw new Error("bad time");
   const remind = REMINDS.indexOf(Number(p.remind)) >= 0 ? Number(p.remind) : 15;
   let users = [uid], cid = null, room = null;
-  if (p.room) {   // C8: غرفة مجدولة (المدعوّون اختياريّون)
+  if (p.room) {   // C8: \u063A\u0631\u0641\u0629 \u0645\u062C\u062F\u0648\u0644\u0629 (\u0627\u0644\u0645\u062F\u0639\u0648\u0651\u0648\u0646 \u0627\u062E\u062A\u064A\u0627\u0631\u064A\u0651\u0648\u0646)
     room = String(p.room);
     if (!/^[A-HJ-NP-Z2-9]{8}$/.test(room)) throw new Error("bad id: room");
     const to = [...new Set((Array.isArray(p.to) ? p.to : []).map(String))].filter(u => u !== uid).slice(0, 7);
@@ -3196,7 +3196,7 @@ async function opSchedSet(uid, payload, env, claims, ctx) {
     users = [uid].concat(to);
   }
   if (users.indexOf(uid) < 0) users.unshift(uid);
-  const me = memberIdFields(claims).name.stringValue || "سوا";
+  const me = memberIdFields(claims).name.stringValue || "\u0633\u0648\u0627";
   const item = { by: uid, byName: me, title: String(p.title || "").slice(0, 120), toName: String(p.toName || "").slice(0, 80),
     type: p.type === "video" ? "video" : "audio", at, end: Math.max(end, at + 60000), remind, approval: !!p.approval, users, ts: now };
   if (cid) item.cid = cid;
@@ -3205,23 +3205,23 @@ async function opSchedSet(uid, payload, env, claims, ctx) {
   const fields = {}; for (const k in item) fields[k] = toFsValue(item[k]);
   fields.rq = { integerValue: String(Math.max(rq, 1)) };
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/scheds/" + id, fields } }]);
-  if (room) {   // بطاقة الغرفة جاهزة والمنظّم مضيفها — من يصل قبله يدخل، ولا يأخذ الاستضافة
+  if (room) {   // \u0628\u0637\u0627\u0642\u0629 \u0627\u0644\u063A\u0631\u0641\u0629 \u062C\u0627\u0647\u0632\u0629 \u0648\u0627\u0644\u0645\u0646\u0638\u0651\u0645 \u0645\u0636\u064A\u0641\u0647\u0627 \u2014 \u0645\u0646 \u064A\u0635\u0644 \u0642\u0628\u0644\u0647 \u064A\u062F\u062E\u0644\u060C \u0648\u0644\u0627 \u064A\u0623\u062E\u0630 \u0627\u0644\u0627\u0633\u062A\u0636\u0627\u0641\u0629
     const meta = await rtdbGet(token, "rooms/" + room + "/meta").catch(() => null);
-    if (!meta) await rtdbPatch(token, { ["rooms/" + room + "/meta"]: { host: uid, title: item.title || "غرفة سوا", ts: now, sched: at, sid: id, gc: at + 6 * 3600000, locked: false, lobby: !!item.approval, owner: uid } });
-    else if (meta.host === uid) await rtdbPatch(token, { ["rooms/" + room + "/meta/sid"]: id, ["rooms/" + room + "/meta/sched"]: at, ["rooms/" + room + "/meta/gc"]: at + 6 * 3600000, ["rooms/" + room + "/meta/title"]: item.title || meta.title || "غرفة سوا" });
+    if (!meta) await rtdbPatch(token, { ["rooms/" + room + "/meta"]: { host: uid, title: item.title || "\u063A\u0631\u0641\u0629 \u0633\u0648\u0627", ts: now, sched: at, sid: id, gc: at + 6 * 3600000, locked: false, lobby: !!item.approval, owner: uid } });
+    else if (meta.host === uid) await rtdbPatch(token, { ["rooms/" + room + "/meta/sid"]: id, ["rooms/" + room + "/meta/sched"]: at, ["rooms/" + room + "/meta/gc"]: at + 6 * 3600000, ["rooms/" + room + "/meta/title"]: item.title || meta.title || "\u063A\u0631\u0641\u0629 \u0633\u0648\u0627" });
   }
-  if (!old) {   // إشعار الدعوة للمدعوّين
+  if (!old) {   // \u0625\u0634\u0639\u0627\u0631 \u0627\u0644\u062F\u0639\u0648\u0629 \u0644\u0644\u0645\u062F\u0639\u0648\u0651\u064A\u0646
     let others = users.filter(u => u !== uid).slice(0, 8);
     if (others.length) { const blk = await blockedSet(token, others, uid); others = others.filter(u => !blk.has(u)); }   // v33
     if (others.length) {
-      const job = pushTo(token, others, strData({ t: "sched", sid: id, cid: cid || "", room: room || "", title: "📅 " + me + (room ? " دعاك إلى غرفة سوا" : " دعاك لمكالمة"),
-        body: (item.type === "video" ? "مكالمة فيديو" : "مكالمة صوتيّة") + (item.title ? " · " + item.title : "") + " — افتح «المكالمات المجدولة»", ts: now }));
+      const job = pushTo(token, others, strData({ t: "sched", sid: id, cid: cid || "", room: room || "", title: "\uD83D\uDCC5 " + me + (room ? " \u062F\u0639\u0627\u0643 \u0625\u0644\u0649 \u063A\u0631\u0641\u0629 \u0633\u0648\u0627" : " \u062F\u0639\u0627\u0643 \u0644\u0645\u0643\u0627\u0644\u0645\u0629"),
+        body: (item.type === "video" ? "\u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u064A\u062F\u064A\u0648" : "\u0645\u0643\u0627\u0644\u0645\u0629 \u0635\u0648\u062A\u064A\u0651\u0629") + (item.title ? " \u00B7 " + item.title : "") + " \u2014 \u0627\u0641\u062A\u062D \u00AB\u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0627\u0644\u0645\u062C\u062F\u0648\u0644\u0629\u00BB", ts: now }));
       if (ctx && ctx.waitUntil) ctx.waitUntil(job.catch(() => {})); else await job;
     }
   }
   return { item: Object.assign({ id }, item) };
 }
-// v54 (C84): من وصله رابط غرفةٍ مجدولة ⇒ تُضاف إلى «مواعيدي» عنده ويصله التذكير — الرابط نفسه هو الدعوة
+// v54 (C84): \u0645\u0646 \u0648\u0635\u0644\u0647 \u0631\u0627\u0628\u0637 \u063A\u0631\u0641\u0629\u064D \u0645\u062C\u062F\u0648\u0644\u0629 \u21D2 \u062A\u064F\u0636\u0627\u0641 \u0625\u0644\u0649 \u00AB\u0645\u0648\u0627\u0639\u064A\u062F\u064A\u00BB \u0639\u0646\u062F\u0647 \u0648\u064A\u0635\u0644\u0647 \u0627\u0644\u062A\u0630\u0643\u064A\u0631 \u2014 \u0627\u0644\u0631\u0627\u0628\u0637 \u0646\u0641\u0633\u0647 \u0647\u0648 \u0627\u0644\u062F\u0639\u0648\u0629
 async function opSchedJoin(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const room = String((payload && payload.room) || "").toUpperCase();
@@ -3229,7 +3229,7 @@ async function opSchedJoin(uid, payload, env) {
   const meta = await rtdbGet(token, "rooms/" + room + "/meta").catch(() => null);
   let doc = null;
   if (meta && meta.sid && /^[a-z0-9]{6,32}$/.test(String(meta.sid))) doc = await fsGet(token, "scheds/" + meta.sid);
-  if (!doc) {   // غرفٌ جُدولت قبل v54 (بلا sid في بطاقتها)
+  if (!doc) {   // \u063A\u0631\u0641\u064C \u062C\u064F\u062F\u0648\u0644\u062A \u0642\u0628\u0644 v54 (\u0628\u0644\u0627 sid \u0641\u064A \u0628\u0637\u0627\u0642\u062A\u0647\u0627)
     const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
       body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "scheds" }], where: { fieldFilter: { field: { fieldPath: "room" }, op: "EQUAL", value: { stringValue: room } } }, limit: 3 } }) });
     const data = await res.json().catch(() => []);
@@ -3271,12 +3271,12 @@ async function opSchedDelete(uid, payload, env) {
     await fsCommit(token, [{ delete: d.name }]);
     return { deleted: true };
   }
-  // مدعوّ: يزيل نفسه من القائمة فقط
+  // \u0645\u062F\u0639\u0648\u0651: \u064A\u0632\u064A\u0644 \u0646\u0641\u0633\u0647 \u0645\u0646 \u0627\u0644\u0642\u0627\u0626\u0645\u0629 \u0641\u0642\u0637
   if (fsArr(d, "users").indexOf(uid) < 0) return { deleted: false };
   await fsCommit(token, [{ transform: { document: d.name, fieldTransforms: [{ fieldPath: "users", removeAllFromArray: { values: [{ stringValue: uid }] } }] } }]);
   return { left: true };
 }
-function minsAr(n) { return n === 1 ? "دقيقة" : n === 2 ? "دقيقتين" : n <= 10 ? n + " دقائق" : n + " دقيقة"; }
+function minsAr(n) { return n === 1 ? "\u062F\u0642\u064A\u0642\u0629" : n === 2 ? "\u062F\u0642\u064A\u0642\u062A\u064A\u0646" : n <= 10 ? n + " \u062F\u0642\u0627\u0626\u0642" : n + " \u062F\u0642\u064A\u0642\u0629"; }
 async function schedReminders(env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const now = Date.now();
@@ -3286,19 +3286,19 @@ async function schedReminders(env) {
       { fieldFilter: { field: { fieldPath: "rq" }, op: "LESS_THAN_OR_EQUAL", value: { integerValue: String(now + 150000) } } }] } }, limit: LIM(env).rem + 2 } }) });
   const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
   let sent = 0;
-  for (const d of rows.slice(0, LIM(env).rem)) {   // C180: ١٠ لكلّ تشغيل (المجّانيّة: واحد)
-    // C84: الغرف المنشورة برابط قد يكثر مدعوّوها ⇒ دفعات من ١٢ في كلّ تشغيل (rqOff)
+  for (const d of rows.slice(0, LIM(env).rem)) {   // C180: \u0661\u0660 \u0644\u0643\u0644\u0651 \u062A\u0634\u063A\u064A\u0644 (\u0627\u0644\u0645\u062C\u0651\u0627\u0646\u064A\u0651\u0629: \u0648\u0627\u062D\u062F)
+    // C84: \u0627\u0644\u063A\u0631\u0641 \u0627\u0644\u0645\u0646\u0634\u0648\u0631\u0629 \u0628\u0631\u0627\u0628\u0637 \u0642\u062F \u064A\u0643\u062B\u0631 \u0645\u062F\u0639\u0648\u0651\u0648\u0647\u0627 \u21D2 \u062F\u0641\u0639\u0627\u062A \u0645\u0646 \u0661\u0662 \u0641\u064A \u0643\u0644\u0651 \u062A\u0634\u063A\u064A\u0644 (rqOff)
     const RB = LIM(env).remBatch, allU = fsArr(d, "users"), off = fsInt(d, "rqOff") || 0, batch = allU.slice(off, off + RB), more = off + RB < allU.length;
-    // أوّلاً: علّمه مُرسَلاً (لا تكرار لو تعثّر الإرسال)
+    // \u0623\u0648\u0651\u0644\u0627\u064B: \u0639\u0644\u0651\u0645\u0647 \u0645\u064F\u0631\u0633\u064E\u0644\u0627\u064B (\u0644\u0627 \u062A\u0643\u0631\u0627\u0631 \u0644\u0648 \u062A\u0639\u062B\u0651\u0631 \u0627\u0644\u0625\u0631\u0633\u0627\u0644)
     await fsCommit(token, [{ update: { name: d.name, fields: more ? { rqOff: { integerValue: String(off + RB) } } : { rq: { integerValue: "0" }, rqOff: { integerValue: "0" } } }, updateMask: { fieldPaths: more ? ["rqOff"] : ["rq", "rqOff"] } }]);
     const at = fsInt(d, "at");
-    if (at < now - 10 * 60000) continue;   // فات موعده
+    if (at < now - 10 * 60000) continue;   // \u0641\u0627\u062A \u0645\u0648\u0639\u062F\u0647
     const mins = Math.max(1, Math.round((at - now) / 60000));
     const title = fstr(d, "title") || fstr(d, "toName") || "", room = fstr(d, "room") || "";
     sent += await pushTo(token, batch, strData({ t: "sched", sid: d.name.split("/").pop(), cid: fstr(d, "cid") || "", room,
-      title: "⏰ تذكير: " + (room ? "غرفة سوا" : fstr(d, "type") === "video" ? "مكالمة فيديو" : "مكالمة صوتيّة") + (title ? " · " + title : ""),
-      body: room ? (at > now + 60000 ? "تبدأ بعد " + minsAr(mins) + " — اضغط للدخول" : "حان الموعد — اضغط للدخول")
-                 : at > now + 60000 ? "تبدأ بعد " + minsAr(mins) + " — من «المكالمات المجدولة» اضغط «ابدأ الآن»" : "حان الموعد — افتح «المكالمات المجدولة» وانضمّ", ts: now }));
+      title: "\u23F0 \u062A\u0630\u0643\u064A\u0631: " + (room ? "\u063A\u0631\u0641\u0629 \u0633\u0648\u0627" : fstr(d, "type") === "video" ? "\u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u064A\u062F\u064A\u0648" : "\u0645\u0643\u0627\u0644\u0645\u0629 \u0635\u0648\u062A\u064A\u0651\u0629") + (title ? " \u00B7 " + title : ""),
+      body: room ? (at > now + 60000 ? "\u062A\u0628\u062F\u0623 \u0628\u0639\u062F " + minsAr(mins) + " \u2014 \u0627\u0636\u063A\u0637 \u0644\u0644\u062F\u062E\u0648\u0644" : "\u062D\u0627\u0646 \u0627\u0644\u0645\u0648\u0639\u062F \u2014 \u0627\u0636\u063A\u0637 \u0644\u0644\u062F\u062E\u0648\u0644")
+                 : at > now + 60000 ? "\u062A\u0628\u062F\u0623 \u0628\u0639\u062F " + minsAr(mins) + " \u2014 \u0645\u0646 \u00AB\u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0627\u0644\u0645\u062C\u062F\u0648\u0644\u0629\u00BB \u0627\u0636\u063A\u0637 \u00AB\u0627\u0628\u062F\u0623 \u0627\u0644\u0622\u0646\u00BB" : "\u062D\u0627\u0646 \u0627\u0644\u0645\u0648\u0639\u062F \u2014 \u0627\u0641\u062A\u062D \u00AB\u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0627\u0644\u0645\u062C\u062F\u0648\u0644\u0629\u00BB \u0648\u0627\u0646\u0636\u0645\u0651", ts: now }));
   }
   return { reminders: rows.length, sent };
 }
@@ -3306,7 +3306,7 @@ async function cleanupCalls(env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const now = Date.now(), upd = {};
   let n = 0;
-  // ١:١ قديمة (لم يحذفها المتّصل) · جماعيّة بلا أحد أو أقدم من ١٢ ساعة
+  // \u0661:\u0661 \u0642\u062F\u064A\u0645\u0629 (\u0644\u0645 \u064A\u062D\u0630\u0641\u0647\u0627 \u0627\u0644\u0645\u062A\u0651\u0635\u0644) \u00B7 \u062C\u0645\u0627\u0639\u064A\u0651\u0629 \u0628\u0644\u0627 \u0623\u062D\u062F \u0623\u0648 \u0623\u0642\u062F\u0645 \u0645\u0646 \u0661\u0662 \u0633\u0627\u0639\u0629
   try {
     const calls = await rtdbGet(token, "calls", '&orderBy="ts"&endAt=' + (now - 3600000) + "&limitToFirst=30");
     for (const k in (calls || {})) { upd["calls/" + k] = null; n++; }
@@ -3318,9 +3318,9 @@ async function cleanupCalls(env) {
       if (!g.members || now - (g.ts || 0) > 12 * 3600000) { upd["gcalls/" + k] = null; if (g.cid) upd["gcur/" + g.cid] = null; n++; }
     }
   } catch (e) {}
-  // الغرف: فارغة وأقدم من ٣ ساعات (والمجدولة بعد مرور موعدها بـ٦ ساعات) أو منتهية
+  // \u0627\u0644\u063A\u0631\u0641: \u0641\u0627\u0631\u063A\u0629 \u0648\u0623\u0642\u062F\u0645 \u0645\u0646 \u0663 \u0633\u0627\u0639\u0627\u062A (\u0648\u0627\u0644\u0645\u062C\u062F\u0648\u0644\u0629 \u0628\u0639\u062F \u0645\u0631\u0648\u0631 \u0645\u0648\u0639\u062F\u0647\u0627 \u0628\u0640\u0666 \u0633\u0627\u0639\u0627\u062A) \u0623\u0648 \u0645\u0646\u062A\u0647\u064A\u0629
   try {
-    // v35: المجدولة (موعدها بعيد) كانت تسدّ أوّل ٢٠ فيتوقّف التنظيف — الآن meta/gc (موعد جواز الحذف) + القديمة بنافذةٍ أوسع
+    // v35: \u0627\u0644\u0645\u062C\u062F\u0648\u0644\u0629 (\u0645\u0648\u0639\u062F\u0647\u0627 \u0628\u0639\u064A\u062F) \u0643\u0627\u0646\u062A \u062A\u0633\u062F\u0651 \u0623\u0648\u0651\u0644 \u0662\u0660 \u0641\u064A\u062A\u0648\u0642\u0651\u0641 \u0627\u0644\u062A\u0646\u0638\u064A\u0641 \u2014 \u0627\u0644\u0622\u0646 meta/gc (\u0645\u0648\u0639\u062F \u062C\u0648\u0627\u0632 \u0627\u0644\u062D\u0630\u0641) + \u0627\u0644\u0642\u062F\u064A\u0645\u0629 \u0628\u0646\u0627\u0641\u0630\u0629\u064D \u0623\u0648\u0633\u0639
     const rs = Object.assign({},
       await rtdbGet(token, "rooms", '&orderBy="meta/ts"&endAt=' + (now - 3 * 3600000) + "&limitToFirst=40").catch(() => ({})),
       await rtdbGet(token, "rooms", '&orderBy="meta/gc"&startAt=1&endAt=' + now + "&limitToFirst=20").catch(() => ({})));
@@ -3329,7 +3329,7 @@ async function cleanupCalls(env) {
       if ((!r.members && (!m.sched || m.sched < now - 6 * 3600000)) || m.ended) { upd["rooms/" + k] = null; n++; }
     }
   } catch (e) {}
-  // المواعيد المنتهية منذ يومين
+  // \u0627\u0644\u0645\u0648\u0627\u0639\u064A\u062F \u0627\u0644\u0645\u0646\u062A\u0647\u064A\u0629 \u0645\u0646\u0630 \u064A\u0648\u0645\u064A\u0646
   try {
     const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
       body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "scheds" }], where: { fieldFilter: { field: { fieldPath: "end" }, op: "LESS_THAN", value: { integerValue: String(now - 2 * 86400000) } } }, limit: 10 } }) });
@@ -3341,9 +3341,9 @@ async function cleanupCalls(env) {
   return { cleaned: n };
 }
 
-/* ---------- 32) الملفّ الشخصيّ: اسم «سوا» + رقم الهاتف (غير موثّق حتّى التحويل للمدفوع) ----------
-   accounts/{uid}: { displayName, phone, phoneVerified:false }. يُنشر الاسم/الرقم إلى عضويّات العائلات ومحادثاتي وجهات اتّصالي
-   (فيراه الآخرون فوراً)، والـWorker يقرأ الاسم المحفوظ بدل اسم Google في كلّ عمليّة (ذاكرة ١٠ دقائق). */
+/* ---------- 32) \u0627\u0644\u0645\u0644\u0641\u0651 \u0627\u0644\u0634\u062E\u0635\u064A\u0651: \u0627\u0633\u0645 \u00AB\u0633\u0648\u0627\u00BB + \u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062A\u0641 (\u063A\u064A\u0631 \u0645\u0648\u062B\u0651\u0642 \u062D\u062A\u0651\u0649 \u0627\u0644\u062A\u062D\u0648\u064A\u0644 \u0644\u0644\u0645\u062F\u0641\u0648\u0639) ----------
+   accounts/{uid}: { displayName, phone, phoneVerified:false }. \u064A\u064F\u0646\u0634\u0631 \u0627\u0644\u0627\u0633\u0645/\u0627\u0644\u0631\u0642\u0645 \u0625\u0644\u0649 \u0639\u0636\u0648\u064A\u0651\u0627\u062A \u0627\u0644\u0639\u0627\u0626\u0644\u0627\u062A \u0648\u0645\u062D\u0627\u062F\u062B\u0627\u062A\u064A \u0648\u062C\u0647\u0627\u062A \u0627\u062A\u0651\u0635\u0627\u0644\u064A
+   (\u0641\u064A\u0631\u0627\u0647 \u0627\u0644\u0622\u062E\u0631\u0648\u0646 \u0641\u0648\u0631\u0627\u064B)\u060C \u0648\u0627\u0644\u0640Worker \u064A\u0642\u0631\u0623 \u0627\u0644\u0627\u0633\u0645 \u0627\u0644\u0645\u062D\u0641\u0648\u0638 \u0628\u062F\u0644 \u0627\u0633\u0645 Google \u0641\u064A \u0643\u0644\u0651 \u0639\u0645\u0644\u064A\u0651\u0629 (\u0630\u0627\u0643\u0631\u0629 \u0661\u0660 \u062F\u0642\u0627\u0626\u0642). */
 const PROFILE_CACHE = new Map();
 async function profileOf(token, uid) {
   const c = PROFILE_CACHE.get(uid);
@@ -3356,9 +3356,9 @@ async function profileOf(token, uid) {
   return v;
 }
 function cleanPhone(x) {
-  let s = String(x || "").replace(/[\s\-().]/g, "").replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d));
+  let s = String(x || "").replace(/[\s\-().]/g, "").replace(/[\u0660-\u0669]/g, d => "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669".indexOf(d));
   if (s.startsWith("00")) s = "+" + s.slice(2);
-  if (/^0\d{9}$/.test(s)) s = "+249" + s.slice(1);   // رقمٌ سودانيّ محلّيّ 09…/01…
+  if (/^0\d{9}$/.test(s)) s = "+249" + s.slice(1);   // \u0631\u0642\u0645\u064C \u0633\u0648\u062F\u0627\u0646\u064A\u0651 \u0645\u062D\u0644\u0651\u064A\u0651 09\u2026/01\u2026
   return /^\+\d{8,15}$/.test(s) ? s : null;
 }
 async function opProfileGet(uid, payload, env, claims) {
@@ -3369,12 +3369,12 @@ async function opProfileGet(uid, payload, env, claims) {
   return { profile: { name: p.name, phone: p.phone, phoneVerified: !!p.phoneVerified, verifiedBy: p.phoneVerified ? (p.verifiedBy || "whatsapp") : null, emailVerified, email: emailVerified ? claims.email : null, googleName: claims.name || null, code: cd.code, findable: cd.findable,
     anon: !!(claims.firebase && claims.firebase.sign_in_provider === "anonymous") }, verify: verifyConfig(env) };
 }
-/* ---------- 43) التحقّق من الهويّة (C43) ----------
-   • البريد: Google يوثّقه، وحساب البريد يوثَّق برابط Firebase (email_verified في الرمز). نفهرسه emails/{sha256(البريد)} = { uid } ليُعثر عليك به.
-   • الهاتف: بلا SMS (Blaze غير متاح). المستخدم يرسل «SAWA-XXXXXX» إلى رقم سوا على واتساب (محادثة يبدؤها المستخدم ⇒ مجّانيّة)،
-     وMeta تستدعي /wa/webhook فنقرأ رقم المرسل الموثَّق عند واتساب ونطابق الرمز. الرقم الذي أرسل الرمز هو الذي يُوثَّق (ويحلّ محلّ المكتوب).
-     الأسرار: WA_NUMBER (رقم سوا بصيغة أرقامٍ دوليّة بلا +) · WA_VERIFY_TOKEN (كلمة تحقّق الـwebhook) · WA_APP_SECRET (توقيع Meta)
-     · اختياريّان للردّ: WA_TOKEN و WA_PHONE_ID. */
+/* ---------- 43) \u0627\u0644\u062A\u062D\u0642\u0651\u0642 \u0645\u0646 \u0627\u0644\u0647\u0648\u064A\u0651\u0629 (C43) ----------
+   \u2022 \u0627\u0644\u0628\u0631\u064A\u062F: Google \u064A\u0648\u062B\u0651\u0642\u0647\u060C \u0648\u062D\u0633\u0627\u0628 \u0627\u0644\u0628\u0631\u064A\u062F \u064A\u0648\u062B\u064E\u0651\u0642 \u0628\u0631\u0627\u0628\u0637 Firebase (email_verified \u0641\u064A \u0627\u0644\u0631\u0645\u0632). \u0646\u0641\u0647\u0631\u0633\u0647 emails/{sha256(\u0627\u0644\u0628\u0631\u064A\u062F)} = { uid } \u0644\u064A\u064F\u0639\u062B\u0631 \u0639\u0644\u064A\u0643 \u0628\u0647.
+   \u2022 \u0627\u0644\u0647\u0627\u062A\u0641: \u0628\u0644\u0627 SMS (Blaze \u063A\u064A\u0631 \u0645\u062A\u0627\u062D). \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u064A\u0631\u0633\u0644 \u00ABSAWA-XXXXXX\u00BB \u0625\u0644\u0649 \u0631\u0642\u0645 \u0633\u0648\u0627 \u0639\u0644\u0649 \u0648\u0627\u062A\u0633\u0627\u0628 (\u0645\u062D\u0627\u062F\u062B\u0629 \u064A\u0628\u062F\u0624\u0647\u0627 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u21D2 \u0645\u062C\u0651\u0627\u0646\u064A\u0651\u0629)\u060C
+     \u0648Meta \u062A\u0633\u062A\u062F\u0639\u064A /wa/webhook \u0641\u0646\u0642\u0631\u0623 \u0631\u0642\u0645 \u0627\u0644\u0645\u0631\u0633\u0644 \u0627\u0644\u0645\u0648\u062B\u064E\u0651\u0642 \u0639\u0646\u062F \u0648\u0627\u062A\u0633\u0627\u0628 \u0648\u0646\u0637\u0627\u0628\u0642 \u0627\u0644\u0631\u0645\u0632. \u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u0630\u064A \u0623\u0631\u0633\u0644 \u0627\u0644\u0631\u0645\u0632 \u0647\u0648 \u0627\u0644\u0630\u064A \u064A\u064F\u0648\u062B\u064E\u0651\u0642 (\u0648\u064A\u062D\u0644\u0651 \u0645\u062D\u0644\u0651 \u0627\u0644\u0645\u0643\u062A\u0648\u0628).
+     \u0627\u0644\u0623\u0633\u0631\u0627\u0631: WA_NUMBER (\u0631\u0642\u0645 \u0633\u0648\u0627 \u0628\u0635\u064A\u063A\u0629 \u0623\u0631\u0642\u0627\u0645\u064D \u062F\u0648\u0644\u064A\u0651\u0629 \u0628\u0644\u0627 +) \u00B7 WA_VERIFY_TOKEN (\u0643\u0644\u0645\u0629 \u062A\u062D\u0642\u0651\u0642 \u0627\u0644\u0640webhook) \u00B7 WA_APP_SECRET (\u062A\u0648\u0642\u064A\u0639 Meta)
+     \u00B7 \u0627\u062E\u062A\u064A\u0627\u0631\u064A\u0651\u0627\u0646 \u0644\u0644\u0631\u062F\u0651: WA_TOKEN \u0648 WA_PHONE_ID. */
 function verifyConfig(env) {
   const wa = !!(env.WA_NUMBER && env.WA_VERIFY_TOKEN && env.WA_APP_SECRET);
   return { whatsapp: wa, waNumber: wa ? String(env.WA_NUMBER).replace(/\D/g, "") : null };
@@ -3408,7 +3408,7 @@ async function opPhoneStart(uid, payload, env, claims) {
   const acc = await fsGet(token, "accounts/" + uid).catch(() => null);
   const old = fstr(acc, "otp"); if (old && old !== code) writes.push({ delete: DOC_ROOT + "/otp/" + old });
   await fsCommit(token, writes);
-  const text = "رمز سوا: SAWA-" + code;
+  const text = "\u0631\u0645\u0632 \u0633\u0648\u0627: SAWA-" + code;
   return { enabled: true, code, exp, link: "https://wa.me/" + cfg.waNumber + "?text=" + encodeURIComponent(text), text };
 }
 async function opPhoneStatus(uid, payload, env) {
@@ -3421,11 +3421,11 @@ async function opPhoneStatus(uid, payload, env) {
   return { phone, phoneVerified: v, verifiedBy: v ? (fstr(d, "verifiedBy") || "whatsapp") : null, pending: !v && exp > Date.now(), mismatch: fstr(d, "otpMismatch") || null,
     vouches: vouches.n, vouchers: vouches.names, needed: VOUCH_NEEDED };
 }
-/* ---------- 44) تأكيد الرقم عبر المعارف (C44) ----------
-   بلا Meta ولا SMS: صاحب الرقم يطلب من معارفه (جهات اتّصال متبادلة) تأكيد أنّ هذا رقمه. كلّ مؤكِّدٍ يجب أن يكون
-   غير مجهول وموثَّق البريد (Google/بريد مؤكَّد) أو موثَّق الهاتف. تأكيدان من شخصين مختلفين للرقم الحاليّ ⇒ phoneVerified
-   (verifiedBy = "contacts"). accounts/{to}/vouchin/{from} = طلب · accounts/{owner}/vouches/{voucher} = { phone, name, ts, matched } (C187: المسار السابق vouches/{owner}/{voucher} كان مساراً غير صالح لـ Firestore).
-   تغيير الرقم يُبطل التأكيدات القديمة (تُحسب فقط التي تحمل الرقم الحاليّ). رقمٌ واحد لحسابٍ واحد (phones/). */
+/* ---------- 44) \u062A\u0623\u0643\u064A\u062F \u0627\u0644\u0631\u0642\u0645 \u0639\u0628\u0631 \u0627\u0644\u0645\u0639\u0627\u0631\u0641 (C44) ----------
+   \u0628\u0644\u0627 Meta \u0648\u0644\u0627 SMS: \u0635\u0627\u062D\u0628 \u0627\u0644\u0631\u0642\u0645 \u064A\u0637\u0644\u0628 \u0645\u0646 \u0645\u0639\u0627\u0631\u0641\u0647 (\u062C\u0647\u0627\u062A \u0627\u062A\u0651\u0635\u0627\u0644 \u0645\u062A\u0628\u0627\u062F\u0644\u0629) \u062A\u0623\u0643\u064A\u062F \u0623\u0646\u0651 \u0647\u0630\u0627 \u0631\u0642\u0645\u0647. \u0643\u0644\u0651 \u0645\u0624\u0643\u0650\u0651\u062F\u064D \u064A\u062C\u0628 \u0623\u0646 \u064A\u0643\u0648\u0646
+   \u063A\u064A\u0631 \u0645\u062C\u0647\u0648\u0644 \u0648\u0645\u0648\u062B\u064E\u0651\u0642 \u0627\u0644\u0628\u0631\u064A\u062F (Google/\u0628\u0631\u064A\u062F \u0645\u0624\u0643\u064E\u0651\u062F) \u0623\u0648 \u0645\u0648\u062B\u064E\u0651\u0642 \u0627\u0644\u0647\u0627\u062A\u0641. \u062A\u0623\u0643\u064A\u062F\u0627\u0646 \u0645\u0646 \u0634\u062E\u0635\u064A\u0646 \u0645\u062E\u062A\u0644\u0641\u064A\u0646 \u0644\u0644\u0631\u0642\u0645 \u0627\u0644\u062D\u0627\u0644\u064A\u0651 \u21D2 phoneVerified
+   (verifiedBy = "contacts"). accounts/{to}/vouchin/{from} = \u0637\u0644\u0628 \u00B7 accounts/{owner}/vouches/{voucher} = { phone, name, ts, matched } (C187: \u0627\u0644\u0645\u0633\u0627\u0631 \u0627\u0644\u0633\u0627\u0628\u0642 vouches/{owner}/{voucher} \u0643\u0627\u0646 \u0645\u0633\u0627\u0631\u0627\u064B \u063A\u064A\u0631 \u0635\u0627\u0644\u062D \u0644\u0640 Firestore).
+   \u062A\u063A\u064A\u064A\u0631 \u0627\u0644\u0631\u0642\u0645 \u064A\u064F\u0628\u0637\u0644 \u0627\u0644\u062A\u0623\u0643\u064A\u062F\u0627\u062A \u0627\u0644\u0642\u062F\u064A\u0645\u0629 (\u062A\u064F\u062D\u0633\u0628 \u0641\u0642\u0637 \u0627\u0644\u062A\u064A \u062A\u062D\u0645\u0644 \u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u062D\u0627\u0644\u064A\u0651). \u0631\u0642\u0645\u064C \u0648\u0627\u062D\u062F \u0644\u062D\u0633\u0627\u0628\u064D \u0648\u0627\u062D\u062F (phones/). */
 const VOUCH_NEEDED = 2;
 async function vouchCount(token, owner, phone) {
   const vs = await fsList(token, "accounts/" + owner + "/vouches").catch(() => []);
@@ -3450,7 +3450,7 @@ async function opVouchRequest(uid, payload, env, claims, ctx) {
   }
   if (writes.length) await fsCommit(token, writes);
   if (sent.length) {
-    const job = pushTo(token, sent, strData({ t: "req", k: "vouch", from: uid, title: "تأكيد رقم في سوا", body: (me || "مستخدم سوا") + " يطلب منك تأكيد أنّ رقمه " + p.phone, ts: now })).catch(e => console.log("push:", e && e.message));
+    const job = pushTo(token, sent, strData({ t: "req", k: "vouch", from: uid, title: "\u062A\u0623\u0643\u064A\u062F \u0631\u0642\u0645 \u0641\u064A \u0633\u0648\u0627", body: (me || "\u0645\u0633\u062A\u062E\u062F\u0645 \u0633\u0648\u0627") + " \u064A\u0637\u0644\u0628 \u0645\u0646\u0643 \u062A\u0623\u0643\u064A\u062F \u0623\u0646\u0651 \u0631\u0642\u0645\u0647 " + p.phone, ts: now })).catch(e => console.log("push:", e && e.message));
     if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
     await sigTo(token, sent, "req");
   }
@@ -3483,13 +3483,13 @@ async function opVouchRespond(uid, payload, env, claims, ctx) {
         { update: { name: DOC_ROOT + "/accounts/" + owner, fields: { phoneVerified: { booleanValue: true }, verifiedBy: { stringValue: "contacts" }, phoneVerifiedAt: { integerValue: String(Date.now()) } } }, updateMask: { fieldPaths: ["phoneVerified", "verifiedBy", "phoneVerifiedAt"] } },
         { update: { name: DOC_ROOT + "/phones/" + tphone, fields: { uid: { stringValue: owner }, by: { stringValue: "contacts" }, ts: { integerValue: String(Date.now()) } } } }]);
       PROFILE_CACHE.delete(owner); verified = true;
-      const job = pushTo(token, [owner], strData({ t: "vouchok", title: "تأكّد رقمك ✓", body: "أكّد اثنان من معارفك رقمك " + tphone + " — صار بإمكان معارفك إيجادك به", ts: Date.now() })).catch(() => {});
+      const job = pushTo(token, [owner], strData({ t: "vouchok", title: "\u062A\u0623\u0643\u0651\u062F \u0631\u0642\u0645\u0643 \u2713", body: "\u0623\u0643\u0651\u062F \u0627\u062B\u0646\u0627\u0646 \u0645\u0646 \u0645\u0639\u0627\u0631\u0641\u0643 \u0631\u0642\u0645\u0643 " + tphone + " \u2014 \u0635\u0627\u0631 \u0628\u0625\u0645\u0643\u0627\u0646 \u0645\u0639\u0627\u0631\u0641\u0643 \u0625\u064A\u062C\u0627\u062F\u0643 \u0628\u0647", ts: Date.now() })).catch(() => {});
       if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
     }
   }
   return { done: true, counted: true, count: vc.n, needed: VOUCH_NEEDED, verified, conflict };
 }
-// Meta ⇒ /wa/webhook : التحقّق (GET) والرسائل (POST)
+// Meta \u21D2 /wa/webhook : \u0627\u0644\u062A\u062D\u0642\u0651\u0642 (GET) \u0648\u0627\u0644\u0631\u0633\u0627\u0626\u0644 (POST)
 async function waWebhook(request, env, ctx) {
   const u = new URL(request.url);
   if (request.method === "GET") {
@@ -3512,7 +3512,7 @@ async function waWebhook(request, env, ctx) {
     for (const m of msgs.slice(0, 10)) {
       const from = String(m.from || "").replace(/\D/g, ""); if (!from) continue;
       const text = (m.text && m.text.body) || (m.button && m.button.text) || "";
-      const mm = String(text).match(/SAWA\s*[-–—:]?\s*(\d{6})/i); if (!mm) continue;
+      const mm = String(text).match(/SAWA\s*[-\u2013\u2014:]?\s*(\d{6})/i); if (!mm) continue;
       await waVerify(token, env, mm[1], "+" + from).catch(e => console.log("wa verify:", e && e.message));
     }
   })();
@@ -3522,11 +3522,11 @@ async function waWebhook(request, env, ctx) {
 function timingEq(a, b) { let r = 0; for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i); return r === 0; }
 async function waVerify(token, env, code, from) {
   const o = await fsGet(token, "otp/" + code);
-  const uid = fstr(o, "uid"); if (!uid) { await waReply(env, from, "الرمز غير معروف أو انتهى. افتح سوا ← حسابي ← تحقّق عبر واتساب واطلب رمزاً جديداً."); return; }
+  const uid = fstr(o, "uid"); if (!uid) { await waReply(env, from, "\u0627\u0644\u0631\u0645\u0632 \u063A\u064A\u0631 \u0645\u0639\u0631\u0648\u0641 \u0623\u0648 \u0627\u0646\u062A\u0647\u0649. \u0627\u0641\u062A\u062D \u0633\u0648\u0627 \u2190 \u062D\u0633\u0627\u0628\u064A \u2190 \u062A\u062D\u0642\u0651\u0642 \u0639\u0628\u0631 \u0648\u0627\u062A\u0633\u0627\u0628 \u0648\u0627\u0637\u0644\u0628 \u0631\u0645\u0632\u0627\u064B \u062C\u062F\u064A\u062F\u0627\u064B."); return; }
   const exp = Number(o.fields.exp && o.fields.exp.integerValue || 0);
-  if (exp < Date.now()) { await fsCommit(token, [{ delete: DOC_ROOT + "/otp/" + code }]); await waReply(env, from, "انتهت صلاحيّة الرمز. اطلب رمزاً جديداً من سوا."); return; }
+  if (exp < Date.now()) { await fsCommit(token, [{ delete: DOC_ROOT + "/otp/" + code }]); await waReply(env, from, "\u0627\u0646\u062A\u0647\u062A \u0635\u0644\u0627\u062D\u064A\u0651\u0629 \u0627\u0644\u0631\u0645\u0632. \u0627\u0637\u0644\u0628 \u0631\u0645\u0632\u0627\u064B \u062C\u062F\u064A\u062F\u0627\u064B \u0645\u0646 \u0633\u0648\u0627."); return; }
   const phone = cleanPhone(from); if (!phone) return;
-  // من كان الرقم عنده موثَّقاً من قبل يفقده (رقمٌ واحد لحسابٍ واحد)
+  // \u0645\u0646 \u0643\u0627\u0646 \u0627\u0644\u0631\u0642\u0645 \u0639\u0646\u062F\u0647 \u0645\u0648\u062B\u064E\u0651\u0642\u0627\u064B \u0645\u0646 \u0642\u0628\u0644 \u064A\u0641\u0642\u062F\u0647 (\u0631\u0642\u0645\u064C \u0648\u0627\u062D\u062F \u0644\u062D\u0633\u0627\u0628\u064D \u0648\u0627\u062D\u062F)
   const prevOwner = fstr(await fsGet(token, "phones/" + phone).catch(() => null), "uid");
   const writes = [
     { update: { name: DOC_ROOT + "/accounts/" + uid, fields: { phone: { stringValue: phone }, phoneVerified: { booleanValue: true }, verifiedBy: { stringValue: "whatsapp" }, phoneVerifiedAt: { integerValue: String(Date.now()) }, otp: { nullValue: null }, otpExp: { nullValue: null }, otpMismatch: { nullValue: null } } },
@@ -3534,12 +3534,12 @@ async function waVerify(token, env, code, from) {
     { update: { name: DOC_ROOT + "/phones/" + phone, fields: { uid: { stringValue: uid }, ts: { integerValue: String(Date.now()) } } } },
     { delete: DOC_ROOT + "/otp/" + code }];
   if (prevOwner && prevOwner !== uid) writes.push({ update: { name: DOC_ROOT + "/accounts/" + prevOwner, fields: { phoneVerified: { booleanValue: false } } }, updateMask: { fieldPaths: ["phoneVerified"] } });
-  // الرقم القديم المكتوب في الحساب (إن اختلف) يفقد فهرسه إن كان لنا
+  // \u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u0642\u062F\u064A\u0645 \u0627\u0644\u0645\u0643\u062A\u0648\u0628 \u0641\u064A \u0627\u0644\u062D\u0633\u0627\u0628 (\u0625\u0646 \u0627\u062E\u062A\u0644\u0641) \u064A\u0641\u0642\u062F \u0641\u0647\u0631\u0633\u0647 \u0625\u0646 \u0643\u0627\u0646 \u0644\u0646\u0627
   const oldPhone = fstr(o, "phone");
   if (oldPhone && oldPhone !== phone) { const op = await fsGet(token, "phones/" + oldPhone).catch(() => null); if (fstr(op, "uid") === uid) writes.push({ delete: DOC_ROOT + "/phones/" + oldPhone }); }
   await fsCommit(token, writes);
   PROFILE_CACHE.delete(uid); if (prevOwner) PROFILE_CACHE.delete(prevOwner);
-  await waReply(env, from, "تمّ توثيق رقمك في سوا ✓ — عد إلى التطبيق.");
+  await waReply(env, from, "\u062A\u0645\u0651 \u062A\u0648\u062B\u064A\u0642 \u0631\u0642\u0645\u0643 \u0641\u064A \u0633\u0648\u0627 \u2713 \u2014 \u0639\u062F \u0625\u0644\u0649 \u0627\u0644\u062A\u0637\u0628\u064A\u0642.");
 }
 async function waReply(env, to, text) {
   if (!env.WA_TOKEN || !env.WA_PHONE_ID) return;
@@ -3548,7 +3548,7 @@ async function waReply(env, to, text) {
       body: JSON.stringify({ messaging_product: "whatsapp", to: String(to).replace(/\D/g, ""), type: "text", text: { body: text } }) });
   } catch (e) { console.log("wa reply:", e && e.message); }
 }
-// البحث بالهاتف الموثَّق أو البريد الموثَّق — بالشكل نفسه الذي يعيده code.find
+// \u0627\u0644\u0628\u062D\u062B \u0628\u0627\u0644\u0647\u0627\u062A\u0641 \u0627\u0644\u0645\u0648\u062B\u064E\u0651\u0642 \u0623\u0648 \u0627\u0644\u0628\u0631\u064A\u062F \u0627\u0644\u0645\u0648\u062B\u064E\u0651\u0642 \u2014 \u0628\u0627\u0644\u0634\u0643\u0644 \u0646\u0641\u0633\u0647 \u0627\u0644\u0630\u064A \u064A\u0639\u064A\u062F\u0647 code.find
 async function findTarget(token, uidHit) {
   if (!uidHit) return null;
   const acc = await fsGet(token, "accounts/" + uidHit);
@@ -3583,15 +3583,15 @@ async function opProfileSet(uid, payload, env, claims) {
   let name, phone;
   if ("name" in payload) {
     name = String(payload.name || "").replace(/\s+/g, " ").trim().slice(0, 40);
-    if (name.length < 2) throw new Error("الاسم قصيرٌ جدّاً");
+    if (name.length < 2) throw new Error("\u0627\u0644\u0627\u0633\u0645 \u0642\u0635\u064A\u0631\u064C \u062C\u062F\u0651\u0627\u064B");
     fields.displayName = { stringValue: name }; mask.push("displayName");
   }
   if ("phone" in payload) {
     if (payload.phone === null || payload.phone === "") phone = "";
-    else { phone = cleanPhone(payload.phone); if (!phone) throw new Error("رقم الهاتف غير صحيح — مثال: +249912345678"); }
+    else { phone = cleanPhone(payload.phone); if (!phone) throw new Error("\u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062A\u0641 \u063A\u064A\u0631 \u0635\u062D\u064A\u062D \u2014 \u0645\u062B\u0627\u0644: +249912345678"); }
     fields.phone = phone ? { stringValue: phone } : { nullValue: null }; fields.phoneVerified = { booleanValue: false }; mask.push("phone", "phoneVerified");
   }
-  // v37: صورة الحساب — avatars/{uid} = { d: data:image/… (≤ ٢٠ ألف حرف)، ts } يقرؤها كلّ مسجَّل (القواعد)، والخادم وحده يكتبها
+  // v37: \u0635\u0648\u0631\u0629 \u0627\u0644\u062D\u0633\u0627\u0628 \u2014 avatars/{uid} = { d: data:image/\u2026 (\u2264 \u0662\u0660 \u0623\u0644\u0641 \u062D\u0631\u0641)\u060C ts } \u064A\u0642\u0631\u0624\u0647\u0627 \u0643\u0644\u0651 \u0645\u0633\u062C\u064E\u0651\u0644 (\u0627\u0644\u0642\u0648\u0627\u0639\u062F)\u060C \u0648\u0627\u0644\u062E\u0627\u062F\u0645 \u0648\u062D\u062F\u0647 \u064A\u0643\u062A\u0628\u0647\u0627
   let photo;
   if ("photo" in payload) {
     if (payload.photo === null || payload.photo === "") photo = "";
@@ -3603,10 +3603,10 @@ async function opProfileSet(uid, payload, env, claims) {
   }
   if (!mask.length) throw new Error("nothing to change");
   const pw = [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields }, updateMask: { fieldPaths: mask } }];
-  if (phone !== undefined) {   // C43: الرقم الموثَّق القديم يفقد فهرسه (إن كان لي)؛ الرقم الجديد غير موثَّق حتّى يُتحقَّق
+  if (phone !== undefined) {   // C43: \u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u0645\u0648\u062B\u064E\u0651\u0642 \u0627\u0644\u0642\u062F\u064A\u0645 \u064A\u0641\u0642\u062F \u0641\u0647\u0631\u0633\u0647 (\u0625\u0646 \u0643\u0627\u0646 \u0644\u064A)\u061B \u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u062C\u062F\u064A\u062F \u063A\u064A\u0631 \u0645\u0648\u062B\u064E\u0651\u0642 \u062D\u062A\u0651\u0649 \u064A\u064F\u062A\u062D\u0642\u064E\u0651\u0642
     const pv0 = PROFILE_CACHE.get(uid) || await profileOf(token, uid);
     if (pv0.phone && pv0.phone !== phone) { const op = await fsGet(token, "phones/" + pv0.phone).catch(() => null); if (fstr(op, "uid") === uid) pw.push({ delete: DOC_ROOT + "/phones/" + pv0.phone }); }
-    if (pv0.phone === phone && pv0.phoneVerified) { delete fields.phoneVerified; const i = mask.indexOf("phoneVerified"); if (i >= 0) mask.splice(i, 1); }   // الرقم نفسه ⇒ يبقى موثَّقاً
+    if (pv0.phone === phone && pv0.phoneVerified) { delete fields.phoneVerified; const i = mask.indexOf("phoneVerified"); if (i >= 0) mask.splice(i, 1); }   // \u0627\u0644\u0631\u0642\u0645 \u0646\u0641\u0633\u0647 \u21D2 \u064A\u0628\u0642\u0649 \u0645\u0648\u062B\u064E\u0651\u0642\u0627\u064B
   }
   if (photo !== undefined) pw.push(photo ? { update: { name: DOC_ROOT + "/avatars/" + uid, fields: { d: { stringValue: photo }, ts: { integerValue: String(Date.now()) } } } } : { delete: DOC_ROOT + "/avatars/" + uid });
   await fsCommit(token, pw);
@@ -3614,7 +3614,7 @@ async function opProfileSet(uid, payload, env, claims) {
   const prev = PROFILE_CACHE.get(uid) || {};
   PROFILE_CACHE.set(uid, Object.assign({}, prev, { name: name !== undefined ? name : prev.name || null, phone: phone !== undefined ? (phone || null) : prev.phone || null,
     phoneVerified: phone !== undefined && phone !== prev.phone ? false : !!prev.phoneVerified, at: prev.at || Date.now() }));
-  // النشر: عضويّاتي في العائلات · أسمائي في المحادثات · بطاقتي عند جهات اتّصالي (حدّ ٥٠ طلباً فرعيّاً)
+  // \u0627\u0644\u0646\u0634\u0631: \u0639\u0636\u0648\u064A\u0651\u0627\u062A\u064A \u0641\u064A \u0627\u0644\u0639\u0627\u0626\u0644\u0627\u062A \u00B7 \u0623\u0633\u0645\u0627\u0626\u064A \u0641\u064A \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0627\u062A \u00B7 \u0628\u0637\u0627\u0642\u062A\u064A \u0639\u0646\u062F \u062C\u0647\u0627\u062A \u0627\u062A\u0651\u0635\u0627\u0644\u064A (\u062D\u062F\u0651 \u0665\u0660 \u0637\u0644\u0628\u0627\u064B \u0641\u0631\u0639\u064A\u0651\u0627\u064B)
   const pf = {}, pm = [];
   if (name !== undefined) { pf.name = { stringValue: name }; pm.push("name"); }
   if (phone !== undefined) { pf.phone = phone ? { stringValue: phone } : { nullValue: null }; pm.push("phone"); }
@@ -3640,15 +3640,15 @@ async function opProfileSet(uid, payload, env, claims) {
   return { profile: { name: name !== undefined ? name : prev.name || null, phone: phone !== undefined ? (phone || null) : prev.phone || null, phoneVerified: !!(PROFILE_CACHE.get(uid) || {}).phoneVerified }, propagated: n };
 }
 
-/* ---------- 29) المكالمات (C6) ----------
-   الإشارات (العرض/الردّ/المرشّحون) في Realtime Database مباشرةً بين الجهازين (calls/{id} + inbox/{uid}) — القواعد تقصرها على
-   جهات الاتّصال (acl). الـWorker: بيانات TURN · رنينٌ عبر الإشعارات حين يكون التطبيق مغلقاً · إشعار «مكالمة فائتة». */
+/* ---------- 29) \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A (C6) ----------
+   \u0627\u0644\u0625\u0634\u0627\u0631\u0627\u062A (\u0627\u0644\u0639\u0631\u0636/\u0627\u0644\u0631\u062F\u0651/\u0627\u0644\u0645\u0631\u0634\u0651\u062D\u0648\u0646) \u0641\u064A Realtime Database \u0645\u0628\u0627\u0634\u0631\u0629\u064B \u0628\u064A\u0646 \u0627\u0644\u062C\u0647\u0627\u0632\u064A\u0646 (calls/{id} + inbox/{uid}) \u2014 \u0627\u0644\u0642\u0648\u0627\u0639\u062F \u062A\u0642\u0635\u0631\u0647\u0627 \u0639\u0644\u0649
+   \u062C\u0647\u0627\u062A \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 (acl). \u0627\u0644\u0640Worker: \u0628\u064A\u0627\u0646\u0627\u062A TURN \u00B7 \u0631\u0646\u064A\u0646\u064C \u0639\u0628\u0631 \u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062A \u062D\u064A\u0646 \u064A\u0643\u0648\u0646 \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0645\u063A\u0644\u0642\u0627\u064B \u00B7 \u0625\u0634\u0639\u0627\u0631 \u00AB\u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u0627\u0626\u062A\u0629\u00BB. */
 let iceCache = null, iceAt = 0;
-// P1: Cloudflare Realtime TURN (١٠٠٠ GB/شهر مجّاناً) — سرّان في Cloudflare: CF_TURN_KEY_ID و CF_TURN_API_TOKEN.
-// بيانات دخولٍ مؤقّتة (٢٤ ساعة) تُجدَّد كلّ ٦ ساعات وتُشارَك بين الطلبات. فشلها ⇒ نرجع إلى Metered تلقائيّاً.
-// TURN_PROVIDER = "metered" (متغيّرٌ اختياريّ) يُجبر الرجوع إلى Metered دون حذف الأسرار.
-// v33: بيانات دخولٍ لكلّ مستخدم (صلاحيتها ٦ ساعات، تُعاد له خلال ساعتين) بدل بياناتٍ واحدة لكلّ الناس ٢٤ ساعة —
-//      تسرُّبها لا يفتح المرحِّل للجميع، وصلاحيّتها قصيرة. والضيف المجهول بحدٍّ أضيق (لكلّ حساب ولكلّ عنوان IP).
+// P1: Cloudflare Realtime TURN (\u0661\u0660\u0660\u0660 GB/\u0634\u0647\u0631 \u0645\u062C\u0651\u0627\u0646\u0627\u064B) \u2014 \u0633\u0631\u0651\u0627\u0646 \u0641\u064A Cloudflare: CF_TURN_KEY_ID \u0648 CF_TURN_API_TOKEN.
+// \u0628\u064A\u0627\u0646\u0627\u062A \u062F\u062E\u0648\u0644\u064D \u0645\u0624\u0642\u0651\u062A\u0629 (\u0662\u0664 \u0633\u0627\u0639\u0629) \u062A\u064F\u062C\u062F\u064E\u0651\u062F \u0643\u0644\u0651 \u0666 \u0633\u0627\u0639\u0627\u062A \u0648\u062A\u064F\u0634\u0627\u0631\u064E\u0643 \u0628\u064A\u0646 \u0627\u0644\u0637\u0644\u0628\u0627\u062A. \u0641\u0634\u0644\u0647\u0627 \u21D2 \u0646\u0631\u062C\u0639 \u0625\u0644\u0649 Metered \u062A\u0644\u0642\u0627\u0626\u064A\u0651\u0627\u064B.
+// TURN_PROVIDER = "metered" (\u0645\u062A\u063A\u064A\u0651\u0631\u064C \u0627\u062E\u062A\u064A\u0627\u0631\u064A\u0651) \u064A\u064F\u062C\u0628\u0631 \u0627\u0644\u0631\u062C\u0648\u0639 \u0625\u0644\u0649 Metered \u062F\u0648\u0646 \u062D\u0630\u0641 \u0627\u0644\u0623\u0633\u0631\u0627\u0631.
+// v33: \u0628\u064A\u0627\u0646\u0627\u062A \u062F\u062E\u0648\u0644\u064D \u0644\u0643\u0644\u0651 \u0645\u0633\u062A\u062E\u062F\u0645 (\u0635\u0644\u0627\u062D\u064A\u062A\u0647\u0627 \u0666 \u0633\u0627\u0639\u0627\u062A\u060C \u062A\u064F\u0639\u0627\u062F \u0644\u0647 \u062E\u0644\u0627\u0644 \u0633\u0627\u0639\u062A\u064A\u0646) \u0628\u062F\u0644 \u0628\u064A\u0627\u0646\u0627\u062A\u064D \u0648\u0627\u062D\u062F\u0629 \u0644\u0643\u0644\u0651 \u0627\u0644\u0646\u0627\u0633 \u0662\u0664 \u0633\u0627\u0639\u0629 \u2014
+//      \u062A\u0633\u0631\u064F\u0651\u0628\u0647\u0627 \u0644\u0627 \u064A\u0641\u062A\u062D \u0627\u0644\u0645\u0631\u062D\u0650\u0651\u0644 \u0644\u0644\u062C\u0645\u064A\u0639\u060C \u0648\u0635\u0644\u0627\u062D\u064A\u0651\u062A\u0647\u0627 \u0642\u0635\u064A\u0631\u0629. \u0648\u0627\u0644\u0636\u064A\u0641 \u0627\u0644\u0645\u062C\u0647\u0648\u0644 \u0628\u062D\u062F\u064D\u0651 \u0623\u0636\u064A\u0642 (\u0644\u0643\u0644\u0651 \u062D\u0633\u0627\u0628 \u0648\u0644\u0643\u0644\u0651 \u0639\u0646\u0648\u0627\u0646 IP).
 const iceByUid = new Map(), iceHits = new Map();
 function iceRateOk(key, max) {
   const now = Date.now(), h = iceHits.get(key);
@@ -3663,17 +3663,17 @@ async function cloudflareIce(env, uid) {
     body: JSON.stringify({ ttl: 6 * 3600 }) });
   let b = null; try { b = await res.json(); } catch (e) {}
   if (!res.ok || !b || !Array.isArray(b.iceServers)) throw new Error("cloudflare turn " + res.status);
-  // المنفذ 53 تحجبه المتصفّحات (ينتظر حتّى المهلة) — نحذفه
+  // \u0627\u0644\u0645\u0646\u0641\u0630 53 \u062A\u062D\u062C\u0628\u0647 \u0627\u0644\u0645\u062A\u0635\u0641\u0651\u062D\u0627\u062A (\u064A\u0646\u062A\u0638\u0631 \u062D\u062A\u0651\u0649 \u0627\u0644\u0645\u0647\u0644\u0629) \u2014 \u0646\u062D\u0630\u0641\u0647
   const list = b.iceServers.map(x => Object.assign({}, x, { urls: [].concat(x.urls || []).filter(u => !/:53(\?|$)/.test(String(u))) }))
     .filter(x => x.urls.length);
   if (!list.some(x => x.username && x.credential)) throw new Error("cloudflare turn: no credentials");
   if (uid) { if (iceByUid.size > 5000) iceByUid.clear(); iceByUid.set(uid, { list, at: Date.now() }); }
   return list;
 }
-// C178: مراقبة الخدمات — كلّ خدمةٍ تُفحص وحدها: Firestore (الرسائل والبيانات) · RTDB (الإشارات) · وسطاء TURN (Metered بطلب STUN حقيقيّ عبر TCP،
-//       Cloudflare بإصدار بيانات الدخول) · خادم الوسائط SFU · الإشعارات (FCM). النتيجة في health/now مع آخر ٧٢ قياساً لكلّ خدمة،
-//       وإشعارٌ للمدير حين تتعطّل خدمة (بعد إعادة فحصٍ تؤكّد العطل) وحين تعود.
-const HEALTH_LABELS = { firestore: "الرسائل والبيانات (Firestore)", rtdb: "إشارات المكالمات (RTDB)", cfturn: "وسيط Cloudflare", sfu: "خادم الوسائط (SFU)", fcm: "الإشعارات (FCM)" };
+// C178: \u0645\u0631\u0627\u0642\u0628\u0629 \u0627\u0644\u062E\u062F\u0645\u0627\u062A \u2014 \u0643\u0644\u0651 \u062E\u062F\u0645\u0629\u064D \u062A\u064F\u0641\u062D\u0635 \u0648\u062D\u062F\u0647\u0627: Firestore (\u0627\u0644\u0631\u0633\u0627\u0626\u0644 \u0648\u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A) \u00B7 RTDB (\u0627\u0644\u0625\u0634\u0627\u0631\u0627\u062A) \u00B7 \u0648\u0633\u0637\u0627\u0621 TURN (Metered \u0628\u0637\u0644\u0628 STUN \u062D\u0642\u064A\u0642\u064A\u0651 \u0639\u0628\u0631 TCP\u060C
+//       Cloudflare \u0628\u0625\u0635\u062F\u0627\u0631 \u0628\u064A\u0627\u0646\u0627\u062A \u0627\u0644\u062F\u062E\u0648\u0644) \u00B7 \u062E\u0627\u062F\u0645 \u0627\u0644\u0648\u0633\u0627\u0626\u0637 SFU \u00B7 \u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062A (FCM). \u0627\u0644\u0646\u062A\u064A\u062C\u0629 \u0641\u064A health/now \u0645\u0639 \u0622\u062E\u0631 \u0667\u0662 \u0642\u064A\u0627\u0633\u0627\u064B \u0644\u0643\u0644\u0651 \u062E\u062F\u0645\u0629\u060C
+//       \u0648\u0625\u0634\u0639\u0627\u0631\u064C \u0644\u0644\u0645\u062F\u064A\u0631 \u062D\u064A\u0646 \u062A\u062A\u0639\u0637\u0651\u0644 \u062E\u062F\u0645\u0629 (\u0628\u0639\u062F \u0625\u0639\u0627\u062F\u0629 \u0641\u062D\u0635\u064D \u062A\u0624\u0643\u0651\u062F \u0627\u0644\u0639\u0637\u0644) \u0648\u062D\u064A\u0646 \u062A\u0639\u0648\u062F.
+const HEALTH_LABELS = { firestore: "\u0627\u0644\u0631\u0633\u0627\u0626\u0644 \u0648\u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A (Firestore)", rtdb: "\u0625\u0634\u0627\u0631\u0627\u062A \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A (RTDB)", cfturn: "\u0648\u0633\u064A\u0637 Cloudflare", sfu: "\u062E\u0627\u062F\u0645 \u0627\u0644\u0648\u0633\u0627\u0626\u0637 (SFU)", fcm: "\u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062A (FCM)" };
 async function stunTcp(host, port) {
   const t0 = Date.now();
   const sock = connect({ hostname: host, port });
@@ -3689,7 +3689,7 @@ async function stunTcp(host, port) {
     return Date.now() - t0;
   } finally { try { await sock.close(); } catch (e) {} }
 }
-async function fcmProbe(token) {   // تحقّقٌ بلا إرسال (validate_only إلى موضوعٍ وهميّ)
+async function fcmProbe(token) {   // \u062A\u062D\u0642\u0651\u0642\u064C \u0628\u0644\u0627 \u0625\u0631\u0633\u0627\u0644 (validate_only \u0625\u0644\u0649 \u0645\u0648\u0636\u0648\u0639\u064D \u0648\u0647\u0645\u064A\u0651)
   const t0 = Date.now();
   const res = await fetch("https://fcm.googleapis.com/v1/projects/" + PROJECT_ID + "/messages:send", {
     method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
@@ -3703,7 +3703,7 @@ async function healthRun(env, opts) {
   const name = DOC_ROOT + "/health/now";
   const prevDoc = await fsGet(token, "health/now").catch(() => null);
   const prev = prevDoc ? { svc: JSON.parse(fstr(prevDoc, "svc") || "{}"), hist: JSON.parse(fstr(prevDoc, "hist") || "{}"), admin: fstr(prevDoc, "admin") } : { svc: {}, hist: {}, admin: "" };
-  if (!opts.manual && prevDoc && Date.now() - fsInt(prevDoc, "at") < 270000) return { at: fsInt(prevDoc, "at"), svc: prev.svc, hist: prev.hist, skipped: true };   // C180: كلّ ٥ دقائق مهما تكرّر المجدوِل
+  if (!opts.manual && prevDoc && Date.now() - fsInt(prevDoc, "at") < 270000) return { at: fsInt(prevDoc, "at"), svc: prev.svc, hist: prev.hist, skipped: true };   // C180: \u0643\u0644\u0651 \u0665 \u062F\u0642\u0627\u0626\u0642 \u0645\u0647\u0645\u0627 \u062A\u0643\u0631\u0651\u0631 \u0627\u0644\u0645\u062C\u062F\u0648\u0650\u0644
   const probes = {
     firestore: async () => { await fsGet(token, "config/relay"); },
     rtdb: async () => { await rtdbGet(token, "health"); },
@@ -3720,7 +3720,7 @@ async function healthRun(env, opts) {
   const first = await Promise.all(names.map(k => run(probes[k])));
   for (let i = 0; i < names.length; i++) {
     let r = first[i];
-    if (!r.ok) { await new Promise(res => setTimeout(res, 1500)); r = await run(probes[names[i]]); }   // إعادة فحصٍ قبل الحكم بالعطل
+    if (!r.ok) { await new Promise(res => setTimeout(res, 1500)); r = await run(probes[names[i]]); }   // \u0625\u0639\u0627\u062F\u0629 \u0641\u062D\u0635\u064D \u0642\u0628\u0644 \u0627\u0644\u062D\u0643\u0645 \u0628\u0627\u0644\u0639\u0637\u0644
     out[names[i]] = r;
   }
   const now = Date.now(), svc = {}, hist = {}, down = [], up = [];
@@ -3731,12 +3731,12 @@ async function healthRun(env, opts) {
     if (p.ok !== false && !r.ok) down.push(k); else if (p.ok === false && r.ok) up.push(k);
   }
   await fsCommit(token, [{ update: { name, fields: { at: { integerValue: String(now) }, svc: { stringValue: JSON.stringify(svc) }, hist: { stringValue: JSON.stringify(hist) }, admin: { stringValue: opts.admin || prev.admin || "" } } },
-    updateMask: { fieldPaths: ["at", "svc", "hist", "admin"] } }]);   // C181: لا تمسح حقول الملخّص اليوميّ
+    updateMask: { fieldPaths: ["at", "svc", "hist", "admin"] } }]);   // C181: \u0644\u0627 \u062A\u0645\u0633\u062D \u062D\u0642\u0648\u0644 \u0627\u0644\u0645\u0644\u062E\u0651\u0635 \u0627\u0644\u064A\u0648\u0645\u064A\u0651
   const admin = opts.admin || prev.admin;
-  const lbl = (k) => HEALTH_LABELS[k] || (k.indexOf("metered:") === 0 ? "وسيط Metered (" + k.slice(8) + ")" : k);
+  const lbl = (k) => HEALTH_LABELS[k] || (k.indexOf("metered:") === 0 ? "\u0648\u0633\u064A\u0637 Metered (" + k.slice(8) + ")" : k);
   if (admin && !opts.manual && (down.length || up.length)) {
-    const body = (down.length ? "⛔ متعطّل: " + down.map(lbl).join("، ") + (out[down[0]].err ? " — " + out[down[0]].err : "") : "") + (up.length ? (down.length ? "\n" : "") + "✅ عاد: " + up.map(lbl).join("، ") : "");
-    await pushTo(token, [admin], strData({ t: "health", title: down.length ? "⚠️ سوا: خدمة متعطّلة" : "✅ سوا: عادت الخدمة", body, ts: now })).catch(() => {});
+    const body = (down.length ? "\u26D4 \u0645\u062A\u0639\u0637\u0651\u0644: " + down.map(lbl).join("\u060C ") + (out[down[0]].err ? " \u2014 " + out[down[0]].err : "") : "") + (up.length ? (down.length ? "\n" : "") + "\u2705 \u0639\u0627\u062F: " + up.map(lbl).join("\u060C ") : "");
+    await pushTo(token, [admin], strData({ t: "health", title: down.length ? "\u26A0\uFE0F \u0633\u0648\u0627: \u062E\u062F\u0645\u0629 \u0645\u062A\u0639\u0637\u0651\u0644\u0629" : "\u2705 \u0633\u0648\u0627: \u0639\u0627\u062F\u062A \u0627\u0644\u062E\u062F\u0645\u0629", body, ts: now })).catch(() => {});
   }
   return { at: now, svc, hist };
 }
@@ -3745,17 +3745,17 @@ async function opAdminHealth(uid, payload, env, claims) {
   if (payload && payload.run) { const r = await healthRun(env, { admin: uid, manual: true }); return Object.assign({ admin: true, labels: HEALTH_LABELS }, r); }
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const d = await fsGet(token, "health/now").catch(() => null);
-  if (!d || fstr(d, "admin") !== uid) {   // أوّل فتحٍ للشاشة يسجّل المدير لتصله التنبيهات
+  if (!d || fstr(d, "admin") !== uid) {   // \u0623\u0648\u0651\u0644 \u0641\u062A\u062D\u064D \u0644\u0644\u0634\u0627\u0634\u0629 \u064A\u0633\u062C\u0651\u0644 \u0627\u0644\u0645\u062F\u064A\u0631 \u0644\u062A\u0635\u0644\u0647 \u0627\u0644\u062A\u0646\u0628\u064A\u0647\u0627\u062A
     await fsCommit(token, [{ update: { name: DOC_ROOT + "/health/now", fields: { admin: { stringValue: uid } } }, updateMask: { fieldPaths: ["admin"] } }]).catch(() => {});
   }
   return { admin: true, labels: HEALTH_LABELS, at: d ? fsInt(d, "at") : 0, svc: d ? JSON.parse(fstr(d, "svc") || "{}") : {}, hist: d ? JSON.parse(fstr(d, "hist") || "{}") : {} };
 }
 
-// C178: مضيفو Metered الإقليميّون — العامّ (يوجّه للأقرب) + الشرق الأوسط + وسط أوروبا. التطبيق يقيس زمن كلّ واحدٍ من شبكة الهاتف
-//       ويستعمل أسرع اثنين (relayIce). المتغيّر METERED_HOSTS يغلب هذه القائمة. (الأقاليم في الخطط المدفوعة؛ ما يفشل قياسه لا يُستعمل)
+// C178: \u0645\u0636\u064A\u0641\u0648 Metered \u0627\u0644\u0625\u0642\u0644\u064A\u0645\u064A\u0651\u0648\u0646 \u2014 \u0627\u0644\u0639\u0627\u0645\u0651 (\u064A\u0648\u062C\u0651\u0647 \u0644\u0644\u0623\u0642\u0631\u0628) + \u0627\u0644\u0634\u0631\u0642 \u0627\u0644\u0623\u0648\u0633\u0637 + \u0648\u0633\u0637 \u0623\u0648\u0631\u0648\u0628\u0627. \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u064A\u0642\u064A\u0633 \u0632\u0645\u0646 \u0643\u0644\u0651 \u0648\u0627\u062D\u062F\u064D \u0645\u0646 \u0634\u0628\u0643\u0629 \u0627\u0644\u0647\u0627\u062A\u0641
+//       \u0648\u064A\u0633\u062A\u0639\u0645\u0644 \u0623\u0633\u0631\u0639 \u0627\u062B\u0646\u064A\u0646 (relayIce). \u0627\u0644\u0645\u062A\u063A\u064A\u0651\u0631 METERED_HOSTS \u064A\u063A\u0644\u0628 \u0647\u0630\u0647 \u0627\u0644\u0642\u0627\u0626\u0645\u0629. (\u0627\u0644\u0623\u0642\u0627\u0644\u064A\u0645 \u0641\u064A \u0627\u0644\u062E\u0637\u0637 \u0627\u0644\u0645\u062F\u0641\u0648\u0639\u0629\u061B \u0645\u0627 \u064A\u0641\u0634\u0644 \u0642\u064A\u0627\u0633\u0647 \u0644\u0627 \u064A\u064F\u0633\u062A\u0639\u0645\u0644)
 const METERED_DEFAULT_HOSTS = "global.relay.metered.ca,middle-east.relay.metered.ca,eu-central.relay.metered.ca";
-// C179: Metered — بيانات دخولٍ مؤقّتة لكلّ مستخدم عبر TURN REST API (تنتهي بعد ٧٢ ساعة، تُجدَّد حين يبقى أقلّ من ٢٤ ساعة).
-//       الجديدة تحتاج حتّى دقيقتين لتنتشر على خوادم Metered ⇒ تبقى القديمة مستعملةً حتّى تنتشر الجديدة. turncred/{uid} للخادم وحده.
+// C179: Metered \u2014 \u0628\u064A\u0627\u0646\u0627\u062A \u062F\u062E\u0648\u0644\u064D \u0645\u0624\u0642\u0651\u062A\u0629 \u0644\u0643\u0644\u0651 \u0645\u0633\u062A\u062E\u062F\u0645 \u0639\u0628\u0631 TURN REST API (\u062A\u0646\u062A\u0647\u064A \u0628\u0639\u062F \u0667\u0662 \u0633\u0627\u0639\u0629\u060C \u062A\u064F\u062C\u062F\u064E\u0651\u062F \u062D\u064A\u0646 \u064A\u0628\u0642\u0649 \u0623\u0642\u0644\u0651 \u0645\u0646 \u0662\u0664 \u0633\u0627\u0639\u0629).
+//       \u0627\u0644\u062C\u062F\u064A\u062F\u0629 \u062A\u062D\u062A\u0627\u062C \u062D\u062A\u0651\u0649 \u062F\u0642\u064A\u0642\u062A\u064A\u0646 \u0644\u062A\u0646\u062A\u0634\u0631 \u0639\u0644\u0649 \u062E\u0648\u0627\u062F\u0645 Metered \u21D2 \u062A\u0628\u0642\u0649 \u0627\u0644\u0642\u062F\u064A\u0645\u0629 \u0645\u0633\u062A\u0639\u0645\u0644\u0629\u064B \u062D\u062A\u0651\u0649 \u062A\u0646\u062A\u0634\u0631 \u0627\u0644\u062C\u062F\u064A\u062F\u0629. turncred/{uid} \u0644\u0644\u062E\u0627\u062F\u0645 \u0648\u062D\u062F\u0647.
 const MCRED_TTL = 72 * 3600, MCRED_RENEW = 24 * 3600 * 1000, MCRED_PROP = 150 * 1000;
 const MCRED_MEM = new Map();
 async function meteredCred(env, uid) {
@@ -3775,12 +3775,12 @@ async function meteredCred(env, uid) {
     stat("turn:mnew");
   }
   if (dirty) await fsCommit(token, [{ update: { name: DOC_ROOT + "/turncred/" + uid, fields: { c: { stringValue: c ? JSON.stringify(c) : "" }, n: { stringValue: n ? JSON.stringify(n) : "" }, ts: { integerValue: String(now) } } } }]).catch(() => {});
-  const use = c && c.exp - now > 10 * 60000 ? c : Object.assign({ fresh: now - n.at < MCRED_PROP }, n);   // القديمة ما دامت صالحة حتّى تنتشر الجديدة
+  const use = c && c.exp - now > 10 * 60000 ? c : Object.assign({ fresh: now - n.at < MCRED_PROP }, n);   // \u0627\u0644\u0642\u062F\u064A\u0645\u0629 \u0645\u0627 \u062F\u0627\u0645\u062A \u0635\u0627\u0644\u062D\u0629 \u062D\u062A\u0651\u0649 \u062A\u0646\u062A\u0634\u0631 \u0627\u0644\u062C\u062F\u064A\u062F\u0629
   if (use === c && !n) MCRED_MEM.set(uid, c);
   if (MCRED_MEM.size > 5000) MCRED_MEM.clear();
   return use;
 }
-// C175: الوسيط الأساسيّ يبدّله المدير من هاتفه — config/relay.primary = "m" | "cf" | "" (تلقائيّ = TURN_PROVIDER في الـWorker)
+// C175: \u0627\u0644\u0648\u0633\u064A\u0637 \u0627\u0644\u0623\u0633\u0627\u0633\u064A\u0651 \u064A\u0628\u062F\u0651\u0644\u0647 \u0627\u0644\u0645\u062F\u064A\u0631 \u0645\u0646 \u0647\u0627\u062A\u0641\u0647 \u2014 config/relay.primary = "m" | "cf" | "" (\u062A\u0644\u0642\u0627\u0626\u064A\u0651 = TURN_PROVIDER \u0641\u064A \u0627\u0644\u0640Worker)
 let RELAY_CFG = null, RELAY_AT = 0;
 async function relayPref(env) {
   if (RELAY_CFG !== null && Date.now() - RELAY_AT < 60000) return RELAY_CFG;
@@ -3803,24 +3803,24 @@ async function opRtcIce(uid, payload, env, claims, request) {
   const stun = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
   const anon = !!(claims && claims.firebase && claims.firebase.sign_in_provider === "anonymous");
   const ip = (request && request.headers.get("CF-Connecting-IP")) || "?";
-  // حدّ الطلبات الجديدة (ما في الذاكرة لا يُحسب): المسجَّل ٢٠/ساعة · الضيف ٦/ساعة و٢٠ لكلّ عنوان IP
+  // \u062D\u062F\u0651 \u0627\u0644\u0637\u0644\u0628\u0627\u062A \u0627\u0644\u062C\u062F\u064A\u062F\u0629 (\u0645\u0627 \u0641\u064A \u0627\u0644\u0630\u0627\u0643\u0631\u0629 \u0644\u0627 \u064A\u064F\u062D\u0633\u0628): \u0627\u0644\u0645\u0633\u062C\u064E\u0651\u0644 \u0662\u0660/\u0633\u0627\u0639\u0629 \u00B7 \u0627\u0644\u0636\u064A\u0641 \u0666/\u0633\u0627\u0639\u0629 \u0648\u0662\u0660 \u0644\u0643\u0644\u0651 \u0639\u0646\u0648\u0627\u0646 IP
   const cached = iceByUid.get(uid);
   if (!(cached && Date.now() - cached.at < 2 * 3600 * 1000)) {
     if (!iceRateOk("u:" + uid, anon ? 6 : 20) || (anon && !iceRateOk("ip:" + ip, 20))) { stat("turn:limited"); return { iceServers: stun, turn: false, limited: true }; }
   }
-  // v60 (C94): عدّة وسطاء — يُعاد كلّ وسيطٍ متاح في «relays» ليقيس التطبيق أقربها لشبكته ويختاره (أو يختار المستخدم يدويّاً).
-  //   Cloudflare (CF_TURN_*) · Metered (METERED_USER/PASS مع METERED_HOSTS: مضيفون مفصولون بفاصلة، أو METERED_HOST) أو مفتاح API
-  //   · وسطاء إضافيّون في السرّ TURN_EXTRA: [{"label":"…","urls":[…],"username":"…","credential":"…"}]
-  //   iceServers = STUN + كلّ الوسطاء (الترتيب الافتراضيّ) للنسخ القديمة.
+  // v60 (C94): \u0639\u062F\u0651\u0629 \u0648\u0633\u0637\u0627\u0621 \u2014 \u064A\u064F\u0639\u0627\u062F \u0643\u0644\u0651 \u0648\u0633\u064A\u0637\u064D \u0645\u062A\u0627\u062D \u0641\u064A \u00ABrelays\u00BB \u0644\u064A\u0642\u064A\u0633 \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0623\u0642\u0631\u0628\u0647\u0627 \u0644\u0634\u0628\u0643\u062A\u0647 \u0648\u064A\u062E\u062A\u0627\u0631\u0647 (\u0623\u0648 \u064A\u062E\u062A\u0627\u0631 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u064A\u062F\u0648\u064A\u0651\u0627\u064B).
+  //   Cloudflare (CF_TURN_*) \u00B7 Metered (METERED_USER/PASS \u0645\u0639 METERED_HOSTS: \u0645\u0636\u064A\u0641\u0648\u0646 \u0645\u0641\u0635\u0648\u0644\u0648\u0646 \u0628\u0641\u0627\u0635\u0644\u0629\u060C \u0623\u0648 METERED_HOST) \u0623\u0648 \u0645\u0641\u062A\u0627\u062D API
+  //   \u00B7 \u0648\u0633\u0637\u0627\u0621 \u0625\u0636\u0627\u0641\u064A\u0651\u0648\u0646 \u0641\u064A \u0627\u0644\u0633\u0631\u0651 TURN_EXTRA: [{"label":"\u2026","urls":[\u2026],"username":"\u2026","credential":"\u2026"}]
+  //   iceServers = STUN + \u0643\u0644\u0651 \u0627\u0644\u0648\u0633\u0637\u0627\u0621 (\u0627\u0644\u062A\u0631\u062A\u064A\u0628 \u0627\u0644\u0627\u0641\u062A\u0631\u0627\u0636\u064A\u0651) \u0644\u0644\u0646\u0633\u062E \u0627\u0644\u0642\u062F\u064A\u0645\u0629.
   const relays = []; let cfErr = null, mErr = null;
   if (env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN) {
     try { relays.push({ id: "cf", label: "Cloudflare", iceServers: await cloudflareIce(env, uid) }); }
     catch (e) { cfErr = String((e && e.message) || e); console.log("cf turn:", cfErr); }
   }
-  // C179: بيانات دخولٍ مؤقّتة لكلّ مستخدم (METERED_SECRET + METERED_APP) بدل الاسم وكلمة المرور الثابتين — والثابتة احتياطٌ إن تعذّر الإنشاء
+  // C179: \u0628\u064A\u0627\u0646\u0627\u062A \u062F\u062E\u0648\u0644\u064D \u0645\u0624\u0642\u0651\u062A\u0629 \u0644\u0643\u0644\u0651 \u0645\u0633\u062A\u062E\u062F\u0645 (METERED_SECRET + METERED_APP) \u0628\u062F\u0644 \u0627\u0644\u0627\u0633\u0645 \u0648\u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631 \u0627\u0644\u062B\u0627\u0628\u062A\u064A\u0646 \u2014 \u0648\u0627\u0644\u062B\u0627\u0628\u062A\u0629 \u0627\u062D\u062A\u064A\u0627\u0637\u064C \u0625\u0646 \u062A\u0639\u0630\u0651\u0631 \u0627\u0644\u0625\u0646\u0634\u0627\u0621
   let mc = null;
   if (env.METERED_SECRET && env.METERED_APP && uid) { try { mc = await meteredCred(env, uid); } catch (e) { mErr = String((e && e.message) || e); console.log("metered cred:", mErr); } }
-  if ((!mc || mc.fresh) && env.METERED_USER && env.METERED_PASS) mc = { u: env.METERED_USER, p: env.METERED_PASS, fixed: true };   // أوّل دقيقتين لبيانات المستخدم الجديدة: الثابتة إن وُجدت
+  if ((!mc || mc.fresh) && env.METERED_USER && env.METERED_PASS) mc = { u: env.METERED_USER, p: env.METERED_PASS, fixed: true };   // \u0623\u0648\u0651\u0644 \u062F\u0642\u064A\u0642\u062A\u064A\u0646 \u0644\u0628\u064A\u0627\u0646\u0627\u062A \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u0627\u0644\u062C\u062F\u064A\u062F\u0629: \u0627\u0644\u062B\u0627\u0628\u062A\u0629 \u0625\u0646 \u0648\u064F\u062C\u062F\u062A
   if (mc) {
     const hosts = String(env.METERED_HOSTS || env.METERED_HOST || METERED_DEFAULT_HOSTS).split(/[\s,]+/).filter(h => /^[a-z0-9.-]{3,80}$/i.test(h)).slice(0, 6);
     for (const h of hosts) relays.push({ id: "m:" + h, label: "Metered " + (h.split(".")[0] === "global" ? "global" : h.split(".")[0]),
@@ -3846,8 +3846,8 @@ async function opRtcIce(uid, payload, env, claims, request) {
       });
     } catch (e) { console.log("TURN_EXTRA:", String(e.message || e)); }
   }
-  // C165: Metered هو الوسيط الأساسيّ و Cloudflare احتياطٌ إن فشل (للمقارنة) · TURN_PROVIDER = "cloudflare" يعكس الترتيب
-  const want = (await relayPref(env).catch(() => "")) || (env.TURN_PROVIDER === "cloudflare" ? "cf" : "m");   // C175: اختيار المدير يغلب
+  // C165: Metered \u0647\u0648 \u0627\u0644\u0648\u0633\u064A\u0637 \u0627\u0644\u0623\u0633\u0627\u0633\u064A\u0651 \u0648 Cloudflare \u0627\u062D\u062A\u064A\u0627\u0637\u064C \u0625\u0646 \u0641\u0634\u0644 (\u0644\u0644\u0645\u0642\u0627\u0631\u0646\u0629) \u00B7 TURN_PROVIDER = "cloudflare" \u064A\u0639\u0643\u0633 \u0627\u0644\u062A\u0631\u062A\u064A\u0628
+  const want = (await relayPref(env).catch(() => "")) || (env.TURN_PROVIDER === "cloudflare" ? "cf" : "m");   // C175: \u0627\u062E\u062A\u064A\u0627\u0631 \u0627\u0644\u0645\u062F\u064A\u0631 \u064A\u063A\u0644\u0628
   const hasM = relays.some(r => /^m/.test(r.id)), hasCf = relays.some(r => r.id === "cf");
   const primary = (want === "cf" && hasCf) || !hasM ? "cf" : "m";
   const isP = (r) => primary === "cf" ? r.id === "cf" : /^m/.test(r.id);
@@ -3855,7 +3855,7 @@ async function opRtcIce(uid, payload, env, claims, request) {
   if (!relays.length) return Object.assign({ iceServers: stun, turn: false }, cfErr ? { cfErr } : {}, mErr ? { err: mErr } : {});
   stat("turn:" + relays[0].id.split(":")[0]);
   const all = []; relays.forEach(r => r.iceServers.forEach(x => all.push(x)));
-  // iceServers (للنسخ القديمة): الأساسيّ وحده إن وُجد، فلا يختار الهاتف غيره إلّا إن فشل
+  // iceServers (\u0644\u0644\u0646\u0633\u062E \u0627\u0644\u0642\u062F\u064A\u0645\u0629): \u0627\u0644\u0623\u0633\u0627\u0633\u064A\u0651 \u0648\u062D\u062F\u0647 \u0625\u0646 \u0648\u064F\u062C\u062F\u060C \u0641\u0644\u0627 \u064A\u062E\u062A\u0627\u0631 \u0627\u0644\u0647\u0627\u062A\u0641 \u063A\u064A\u0631\u0647 \u0625\u0644\u0651\u0627 \u0625\u0646 \u0641\u0634\u0644
   const prim = relays.filter(isP), base = prim.length ? prim : relays;
   const bl = []; base.forEach(r => r.iceServers.forEach(x => bl.push(x)));
   return Object.assign({ turn: true, provider: relays[0].id === "cf" ? "cloudflare" : "metered", primary: primary === "cf" ? "cf" : "m", iceServers: stun.concat(bl), relays }, cfErr ? { cfErr } : {});
@@ -3866,19 +3866,19 @@ async function opCallRing(uid, payload, env, claims, ctx) {
   const to = payload && payload.to, callId = String((payload && payload.callId) || "");
   if (!segOk(String(to || "")) || !/^[A-Za-z0-9_-]{6,40}$/.test(callId)) throw new Error("bad call");
   if (!(await sharesContact(token, uid, to))) throw new Error("not a contact");
-  // المحظور لا يرنّ عند من حظره
+  // \u0627\u0644\u0645\u062D\u0638\u0648\u0631 \u0644\u0627 \u064A\u0631\u0646\u0651 \u0639\u0646\u062F \u0645\u0646 \u062D\u0638\u0631\u0647
   const pr = await fsGet(token, "accounts/" + to + "/chatprefs/main");
   const blocked = pr && fstr(pr, "data") ? (JSON.parse(fstr(pr, "data")).blocked || []) : [];
-  if (blocked.indexOf(uid) >= 0) return { queued: true };   // v33: الردّ نفسه — لا يعرف المحظور أنّه محظور
-  // v33: لا إشعار «مكالمة واردة» بلا مكالمةٍ حقيقيّة ترنّ منّي إليه (كان يمكن إغراق أحدٍ بإشعارات رنينٍ وهميّة)
+  if (blocked.indexOf(uid) >= 0) return { queued: true };   // v33: \u0627\u0644\u0631\u062F\u0651 \u0646\u0641\u0633\u0647 \u2014 \u0644\u0627 \u064A\u0639\u0631\u0641 \u0627\u0644\u0645\u062D\u0638\u0648\u0631 \u0623\u0646\u0651\u0647 \u0645\u062D\u0638\u0648\u0631
+  // v33: \u0644\u0627 \u0625\u0634\u0639\u0627\u0631 \u00AB\u0645\u0643\u0627\u0644\u0645\u0629 \u0648\u0627\u0631\u062F\u0629\u00BB \u0628\u0644\u0627 \u0645\u0643\u0627\u0644\u0645\u0629\u064D \u062D\u0642\u064A\u0642\u064A\u0651\u0629 \u062A\u0631\u0646\u0651 \u0645\u0646\u0651\u064A \u0625\u0644\u064A\u0647 (\u0643\u0627\u0646 \u064A\u0645\u0643\u0646 \u0625\u063A\u0631\u0627\u0642 \u0623\u062D\u062F\u064D \u0628\u0625\u0634\u0639\u0627\u0631\u0627\u062A \u0631\u0646\u064A\u0646\u064D \u0648\u0647\u0645\u064A\u0651\u0629)
   const call = await rtdbGet(token, "calls/" + callId).catch(() => null);
   if (!call || call.from !== uid || call.to !== to || call.state !== "ringing") return { queued: true };
-  const name = memberIdFields(claims).name.stringValue || "سوا";
+  const name = memberIdFields(claims).name.stringValue || "\u0633\u0648\u0627";
   const video = payload.type === "video";
-  const rk = await ackSig(env, "r|" + callId + "|" + to);   // v65: الجهاز يُقرّ «رنّت» ⇒ المتّصل يرى «يرنّ…»
+  const rk = await ackSig(env, "r|" + callId + "|" + to);   // v65: \u0627\u0644\u062C\u0647\u0627\u0632 \u064A\u064F\u0642\u0631\u0651 \u00AB\u0631\u0646\u0651\u062A\u00BB \u21D2 \u0627\u0644\u0645\u062A\u0651\u0635\u0644 \u064A\u0631\u0649 \u00AB\u064A\u0631\u0646\u0651\u2026\u00BB
   const data = (n) => strData({ t: "call", call: callId, from: uid, cid: dmId(uid, to), type: video ? "video" : "audio",
-    title: name, body: (video ? "📹 مكالمة فيديو واردة" : "📞 مكالمة صوتيّة واردة") + (n ? " · " + "●".repeat(n) : ""), ts: Date.now(), ring: String(n), to: to, rk: rk });
-  // C71: رنينٌ متكرّر كتطبيقات المكالمات — إشعارٌ كلّ ٨ ثوانٍ (بالوسم نفسه مع renotify ⇒ صوتٌ واهتزازٌ من جديد) ما دامت المكالمة ترنّ، حتى ~٢٤ ث
+    title: name, body: (video ? "\uD83D\uDCF9 \u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u064A\u062F\u064A\u0648 \u0648\u0627\u0631\u062F\u0629" : "\uD83D\uDCDE \u0645\u0643\u0627\u0644\u0645\u0629 \u0635\u0648\u062A\u064A\u0651\u0629 \u0648\u0627\u0631\u062F\u0629") + (n ? " \u00B7 " + "\u25CF".repeat(n) : ""), ts: Date.now(), ring: String(n), to: to, rk: rk });
+  // C71: \u0631\u0646\u064A\u0646\u064C \u0645\u062A\u0643\u0631\u0651\u0631 \u0643\u062A\u0637\u0628\u064A\u0642\u0627\u062A \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u2014 \u0625\u0634\u0639\u0627\u0631\u064C \u0643\u0644\u0651 \u0668 \u062B\u0648\u0627\u0646\u064D (\u0628\u0627\u0644\u0648\u0633\u0645 \u0646\u0641\u0633\u0647 \u0645\u0639 renotify \u21D2 \u0635\u0648\u062A\u064C \u0648\u0627\u0647\u062A\u0632\u0627\u0632\u064C \u0645\u0646 \u062C\u062F\u064A\u062F) \u0645\u0627 \u062F\u0627\u0645\u062A \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u062A\u0631\u0646\u0651\u060C \u062D\u062A\u0649 ~\u0662\u0664 \u062B
   const job = (async () => {
     let sent = await pushTo(token, [to], data(0));
     for (let n = 1; n <= RING_REPEATS; n++) {
@@ -3887,14 +3887,14 @@ async function opCallRing(uid, payload, env, claims, ctx) {
       if (!c || c.state !== "ringing" || c.acc) break;
       sent += await pushTo(token, [to], data(n));
     }
-    await telWrite(token, callId, "srv", uid, { ev: "ring", sent, video }).catch(() => {});   // C179: حدث البنية تحت معرّف المكالمة نفسه
+    await telWrite(token, callId, "srv", uid, { ev: "ring", sent, video }).catch(() => {});   // C179: \u062D\u062F\u062B \u0627\u0644\u0628\u0646\u064A\u0629 \u062A\u062D\u062A \u0645\u0639\u0631\u0651\u0641 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u0646\u0641\u0633\u0647
     return sent;
   })();
   if (ctx && ctx.waitUntil) { ctx.waitUntil(job.catch(() => {})); return { queued: true }; }
   return { sent: await job };
 }
-// C179: سجلّ كلّ مكالمة — يرسله كلّ طرفٍ عند انتهائها (tel/{callId}~{طرف}) ويضيف الخادم أحداثه (الرنين) تحت المعرّف نفسه.
-//       للمدير: admin.tel يجمعها بالمعرّف (نسبة المرور عبر TURN · UDP · زمن الاتّصال · RTT/الفقد/التذبذب · أسباب الفشل). تُحذف بعد ٣٠ يوماً.
+// C179: \u0633\u062C\u0644\u0651 \u0643\u0644\u0651 \u0645\u0643\u0627\u0644\u0645\u0629 \u2014 \u064A\u0631\u0633\u0644\u0647 \u0643\u0644\u0651 \u0637\u0631\u0641\u064D \u0639\u0646\u062F \u0627\u0646\u062A\u0647\u0627\u0626\u0647\u0627 (tel/{callId}~{\u0637\u0631\u0641}) \u0648\u064A\u0636\u064A\u0641 \u0627\u0644\u062E\u0627\u062F\u0645 \u0623\u062D\u062F\u0627\u062B\u0647 (\u0627\u0644\u0631\u0646\u064A\u0646) \u062A\u062D\u062A \u0627\u0644\u0645\u0639\u0631\u0651\u0641 \u0646\u0641\u0633\u0647.
+//       \u0644\u0644\u0645\u062F\u064A\u0631: admin.tel \u064A\u062C\u0645\u0639\u0647\u0627 \u0628\u0627\u0644\u0645\u0639\u0631\u0651\u0641 (\u0646\u0633\u0628\u0629 \u0627\u0644\u0645\u0631\u0648\u0631 \u0639\u0628\u0631 TURN \u00B7 UDP \u00B7 \u0632\u0645\u0646 \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 \u00B7 RTT/\u0627\u0644\u0641\u0642\u062F/\u0627\u0644\u062A\u0630\u0628\u0630\u0628 \u00B7 \u0623\u0633\u0628\u0627\u0628 \u0627\u0644\u0641\u0634\u0644). \u062A\u064F\u062D\u0630\u0641 \u0628\u0639\u062F \u0663\u0660 \u064A\u0648\u0645\u0627\u064B.
 const TEL_ID = /^[A-Za-z0-9_-]{4,60}$/;
 async function telWrite(token, cid, side, uid, d) {
   const id = (cid + "~" + side).replace(/[^A-Za-z0-9_~-]/g, "").slice(0, 120);
@@ -3922,7 +3922,7 @@ async function opAdminTel(uid, payload, env, claims) {
   const h = await fsGet(token, "health/now").catch(() => null);
   return Object.assign({ admin: true, days, qoff: !!(h && fbool(h, "qoff")) }, r);
 }
-// C181: تحليل سجلّات المكالمات منذ وقتٍ معيّن (يستعمله تقرير المدير والملخّص اليوميّ والتنبيه)
+// C181: \u062A\u062D\u0644\u064A\u0644 \u0633\u062C\u0644\u0651\u0627\u062A \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0645\u0646\u0630 \u0648\u0642\u062A\u064D \u0645\u0639\u064A\u0651\u0646 (\u064A\u0633\u062A\u0639\u0645\u0644\u0647 \u062A\u0642\u0631\u064A\u0631 \u0627\u0644\u0645\u062F\u064A\u0631 \u0648\u0627\u0644\u0645\u0644\u062E\u0651\u0635 \u0627\u0644\u064A\u0648\u0645\u064A\u0651 \u0648\u0627\u0644\u062A\u0646\u0628\u064A\u0647)
 async function telAnalyze(token, since) {
   const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
     body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "tel" }], where: { fieldFilter: { field: { fieldPath: "ts" }, op: "GREATER_THAN_OR_EQUAL", value: { integerValue: String(since) } } },
@@ -3958,24 +3958,24 @@ async function telAnalyze(token, since) {
   return { all: sum(one), byPlat, groups: { n: groups.length, sfu: groups.filter(c => c.sides.some(x => x.mode === "sfu")).length, conn: groups.filter(c => c.sides.some(x => x.ok)).length },
     recent: calls.slice(0, 40) };
 }
-// C181: ملخّص الجودة اليوميّ للمدير (٧ صباحاً بتوقيت السودان، عن آخر ٢٤ ساعة) + تنبيهٌ فوريّ إن انهارت الجودة في آخر ساعتين.
-//       الحدود: الاتّصال < ٨٥٪ · عبر TURN > ٤٠٪ · غير UDP > ١٥٪ · زمن الاتّصال > ٣ ث · وصول الرنين < ٩٠٪. المدير يوقفه من «سجلّ المكالمات».
-const Q_TZ = 2 * 3600000, Q_HOUR = 5;   // UTC+2 · الساعة ٥ UTC = ٧ صباحاً
+// C181: \u0645\u0644\u062E\u0651\u0635 \u0627\u0644\u062C\u0648\u062F\u0629 \u0627\u0644\u064A\u0648\u0645\u064A\u0651 \u0644\u0644\u0645\u062F\u064A\u0631 (\u0667 \u0635\u0628\u0627\u062D\u0627\u064B \u0628\u062A\u0648\u0642\u064A\u062A \u0627\u0644\u0633\u0648\u062F\u0627\u0646\u060C \u0639\u0646 \u0622\u062E\u0631 \u0662\u0664 \u0633\u0627\u0639\u0629) + \u062A\u0646\u0628\u064A\u0647\u064C \u0641\u0648\u0631\u064A\u0651 \u0625\u0646 \u0627\u0646\u0647\u0627\u0631\u062A \u0627\u0644\u062C\u0648\u062F\u0629 \u0641\u064A \u0622\u062E\u0631 \u0633\u0627\u0639\u062A\u064A\u0646.
+//       \u0627\u0644\u062D\u062F\u0648\u062F: \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 < \u0668\u0665\u066A \u00B7 \u0639\u0628\u0631 TURN > \u0664\u0660\u066A \u00B7 \u063A\u064A\u0631 UDP > \u0661\u0665\u066A \u00B7 \u0632\u0645\u0646 \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 > \u0663 \u062B \u00B7 \u0648\u0635\u0648\u0644 \u0627\u0644\u0631\u0646\u064A\u0646 < \u0669\u0660\u066A. \u0627\u0644\u0645\u062F\u064A\u0631 \u064A\u0648\u0642\u0641\u0647 \u0645\u0646 \u00AB\u0633\u062C\u0644\u0651 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A\u00BB.
+const Q_TZ = 2 * 3600000, Q_HOUR = 5;   // UTC+2 \u00B7 \u0627\u0644\u0633\u0627\u0639\u0629 \u0665 UTC = \u0667 \u0635\u0628\u0627\u062D\u0627\u064B
 function qPct(a, b) { return b ? Math.round(a * 100 / b) : null; }
 function qWarnings(a) {
   const w = [];
-  if (a.n >= 5 && qPct(a.conn, a.n) < 85) w.push("الاتّصال " + qPct(a.conn, a.n) + "% (أقلّ من ٨٥٪)");
-  if (a.conn >= 5 && qPct(a.relay, a.conn) > 40) w.push("عبر الوسيط " + qPct(a.relay, a.conn) + "% (أكثر من ٤٠٪)");
-  if (a.conn >= 5 && qPct(a.tcp, a.conn) > 15) w.push("بلا UDP " + qPct(a.tcp, a.conn) + "%");
-  if (a.setup != null && a.setup > 3000) w.push("زمن الاتّصال " + (a.setup / 1000).toFixed(1) + " ث");
-  if (a.ringN >= 5 && qPct(a.ringOk, a.ringN) < 90) w.push("وصول الرنين " + qPct(a.ringOk, a.ringN) + "%");
+  if (a.n >= 5 && qPct(a.conn, a.n) < 85) w.push("\u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 " + qPct(a.conn, a.n) + "% (\u0623\u0642\u0644\u0651 \u0645\u0646 \u0668\u0665\u066A)");
+  if (a.conn >= 5 && qPct(a.relay, a.conn) > 40) w.push("\u0639\u0628\u0631 \u0627\u0644\u0648\u0633\u064A\u0637 " + qPct(a.relay, a.conn) + "% (\u0623\u0643\u062B\u0631 \u0645\u0646 \u0664\u0660\u066A)");
+  if (a.conn >= 5 && qPct(a.tcp, a.conn) > 15) w.push("\u0628\u0644\u0627 UDP " + qPct(a.tcp, a.conn) + "%");
+  if (a.setup != null && a.setup > 3000) w.push("\u0632\u0645\u0646 \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 " + (a.setup / 1000).toFixed(1) + " \u062B");
+  if (a.ringN >= 5 && qPct(a.ringOk, a.ringN) < 90) w.push("\u0648\u0635\u0648\u0644 \u0627\u0644\u0631\u0646\u064A\u0646 " + qPct(a.ringOk, a.ringN) + "%");
   return w;
 }
-const Q_REASON = { hangup: "أُنهيت", remote: "أنهاها الآخر", noanswer: "لم يُجب", declined: "رُفضت", cancel: "أُلغيت", failed: "فشل الاتّصال", lost: "انقطعت", error: "خطأ", busy: "مشغول", missed: "فائتة" };
+const Q_REASON = { hangup: "\u0623\u064F\u0646\u0647\u064A\u062A", remote: "\u0623\u0646\u0647\u0627\u0647\u0627 \u0627\u0644\u0622\u062E\u0631", noanswer: "\u0644\u0645 \u064A\u064F\u062C\u0628", declined: "\u0631\u064F\u0641\u0636\u062A", cancel: "\u0623\u064F\u0644\u063A\u064A\u062A", failed: "\u0641\u0634\u0644 \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644", lost: "\u0627\u0646\u0642\u0637\u0639\u062A", error: "\u062E\u0637\u0623", busy: "\u0645\u0634\u063A\u0648\u0644", missed: "\u0641\u0627\u0626\u062A\u0629" };
 function qLine(a) {
   const top0 = Object.keys(a.reasons || {}).sort((x, y) => a.reasons[y] - a.reasons[x])[0], top = top0 ? (Q_REASON[top0] || top0) + " (" + a.reasons[top0] + ")" : "";
-  return [a.n + " مكالمة", "اتّصلت " + (qPct(a.conn, a.n) ?? "–") + "%", "عبر الوسيط " + (qPct(a.relay, a.conn) ?? "–") + "%", "UDP " + (a.conn ? 100 - qPct(a.tcp, a.conn) : "–") + "%",
-    a.setup != null ? "الاتّصال " + (a.setup / 1000).toFixed(1) + " ث" : "", a.rtt != null ? "RTT " + a.rtt + " ms" : "", a.loss != null ? "فقد " + a.loss + "%" : "", top ? "أكثر الفشل: " + top : ""].filter(Boolean).join(" · ");
+  return [a.n + " \u0645\u0643\u0627\u0644\u0645\u0629", "\u0627\u062A\u0651\u0635\u0644\u062A " + (qPct(a.conn, a.n) ?? "\u2013") + "%", "\u0639\u0628\u0631 \u0627\u0644\u0648\u0633\u064A\u0637 " + (qPct(a.relay, a.conn) ?? "\u2013") + "%", "UDP " + (a.conn ? 100 - qPct(a.tcp, a.conn) : "\u2013") + "%",
+    a.setup != null ? "\u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 " + (a.setup / 1000).toFixed(1) + " \u062B" : "", a.rtt != null ? "RTT " + a.rtt + " ms" : "", a.loss != null ? "\u0641\u0642\u062F " + a.loss + "%" : "", top ? "\u0623\u0643\u062B\u0631 \u0627\u0644\u0641\u0634\u0644: " + top : ""].filter(Boolean).join(" \u00B7 ");
 }
 async function qualityWatch(env, opts) {
   opts = opts || {};
@@ -3988,19 +3988,19 @@ async function qualityWatch(env, opts) {
   if (opts.test || (new Date(now).getUTCHours() >= Q_HOUR && fstr(h, "qd") !== day)) {
     const r = await telAnalyze(token, now - 86400000), a = r.all, w = qWarnings(a), g = r.groups || {};
     if (a.n || g.n || opts.test) {
-      const body = (a.n ? qLine(a) : "لا مكالمات فرديّة") + (g.n ? "\nالمجموعات والغرف: " + g.n + " (SFU " + (qPct(g.sfu, g.n) ?? 0) + "%)" : "") + (w.length ? "\n⚠️ " + w.join(" · ") : "");
-      sent += await pushTo(token, [admin], strData({ t: "quality", title: (w.length ? "⚠️ " : "📊 ") + "سوا — جودة المكالمات أمس", body, ts: now }));
+      const body = (a.n ? qLine(a) : "\u0644\u0627 \u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0641\u0631\u062F\u064A\u0651\u0629") + (g.n ? "\n\u0627\u0644\u0645\u062C\u0645\u0648\u0639\u0627\u062A \u0648\u0627\u0644\u063A\u0631\u0641: " + g.n + " (SFU " + (qPct(g.sfu, g.n) ?? 0) + "%)" : "") + (w.length ? "\n\u26A0\uFE0F " + w.join(" \u00B7 ") : "");
+      sent += await pushTo(token, [admin], strData({ t: "quality", title: (w.length ? "\u26A0\uFE0F " : "\uD83D\uDCCA ") + "\u0633\u0648\u0627 \u2014 \u062C\u0648\u062F\u0629 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0623\u0645\u0633", body, ts: now }));
     }
     if (!opts.test) set.qd = { stringValue: day };
   }
-  // التنبيه الفوريّ: كلّ ٣٠ دقيقة نفحص آخر ساعتين، ولا نكرّره قبل ٦ ساعات
+  // \u0627\u0644\u062A\u0646\u0628\u064A\u0647 \u0627\u0644\u0641\u0648\u0631\u064A\u0651: \u0643\u0644\u0651 \u0663\u0660 \u062F\u0642\u064A\u0642\u0629 \u0646\u0641\u062D\u0635 \u0622\u062E\u0631 \u0633\u0627\u0639\u062A\u064A\u0646\u060C \u0648\u0644\u0627 \u0646\u0643\u0631\u0651\u0631\u0647 \u0642\u0628\u0644 \u0666 \u0633\u0627\u0639\u0627\u062A
   if (!opts.test && now - fsInt(h, "qc") > 30 * 60000) {
     set.qc = { integerValue: String(now) };
     if (now - fsInt(h, "qa") > 6 * 3600000) {
       const a = (await telAnalyze(token, now - 2 * 3600000)).all;
       const bad = (a.n >= 8 && qPct(a.conn, a.n) < 70) || (a.conn >= 8 && qPct(a.relay, a.conn) > 60) || (a.ringN >= 8 && qPct(a.ringOk, a.ringN) < 70);
       if (bad) {
-        sent += await pushTo(token, [admin], strData({ t: "quality", title: "🚨 سوا — تراجعٌ في المكالمات الآن", body: "آخر ساعتين: " + qLine(a) + "\n" + qWarnings(a).join(" · "), ts: now }));
+        sent += await pushTo(token, [admin], strData({ t: "quality", title: "\uD83D\uDEA8 \u0633\u0648\u0627 \u2014 \u062A\u0631\u0627\u062C\u0639\u064C \u0641\u064A \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A \u0627\u0644\u0622\u0646", body: "\u0622\u062E\u0631 \u0633\u0627\u0639\u062A\u064A\u0646: " + qLine(a) + "\n" + qWarnings(a).join(" \u00B7 "), ts: now }));
         set.qa = { integerValue: String(now) };
       }
     }
@@ -4034,16 +4034,16 @@ async function opCallMissed(uid, payload, env, claims, ctx) {
   const pr = await fsGet(token, "accounts/" + to + "/chatprefs/main");
   const blocked = pr && fstr(pr, "data") ? (JSON.parse(fstr(pr, "data")).blocked || []) : [];
   if (blocked.indexOf(uid) >= 0) return { sent: 0 };
-  const name = memberIdFields(claims).name.stringValue || "سوا";
+  const name = memberIdFields(claims).name.stringValue || "\u0633\u0648\u0627";
   const job = pushTo(token, [to], strData({ t: "missed", call: String((payload && payload.callId) || ""), from: uid, cid: dmId(uid, to), title: name,
-    body: payload.type === "video" ? "📹 مكالمة فيديو فائتة" : "📞 مكالمة فائتة", ts: Date.now() }));
+    body: payload.type === "video" ? "\uD83D\uDCF9 \u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u064A\u062F\u064A\u0648 \u0641\u0627\u0626\u062A\u0629" : "\uD83D\uDCDE \u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u0627\u0626\u062A\u0629", ts: Date.now() }));
   if (ctx && ctx.waitUntil) { ctx.waitUntil(job); return { queued: true }; }
   return { sent: await job };
 }
 
-/* ---------- 23) schedules.sync — مواعيد المستخدم الشخصيّة بين أجهزته ----------
-   accounts/{uid}/schedules/{gid} = { data: JSON { id: item } }. دمجٌ موعداً موعداً: لكلّ موعد _u (وقت تعديله)،
-   والأحدث يغلب؛ الحذف علامة { id, _deleted, _u } حتّى لا يعود المحذوف من جهازٍ آخر. */
+/* ---------- 23) schedules.sync \u2014 \u0645\u0648\u0627\u0639\u064A\u062F \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u0627\u0644\u0634\u062E\u0635\u064A\u0651\u0629 \u0628\u064A\u0646 \u0623\u062C\u0647\u0632\u062A\u0647 ----------
+   accounts/{uid}/schedules/{gid} = { data: JSON { id: item } }. \u062F\u0645\u062C\u064C \u0645\u0648\u0639\u062F\u0627\u064B \u0645\u0648\u0639\u062F\u0627\u064B: \u0644\u0643\u0644\u0651 \u0645\u0648\u0639\u062F _u (\u0648\u0642\u062A \u062A\u0639\u062F\u064A\u0644\u0647)\u060C
+   \u0648\u0627\u0644\u0623\u062D\u062F\u062B \u064A\u063A\u0644\u0628\u061B \u0627\u0644\u062D\u0630\u0641 \u0639\u0644\u0627\u0645\u0629 { id, _deleted, _u } \u062D\u062A\u0651\u0649 \u0644\u0627 \u064A\u0639\u0648\u062F \u0627\u0644\u0645\u062D\u0630\u0648\u0641 \u0645\u0646 \u062C\u0647\u0627\u0632\u064D \u0622\u062E\u0631. */
 async function opSchedulesSync(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const groupId = payload && payload.groupId;
@@ -4066,27 +4066,27 @@ async function opSchedulesSync(uid, payload, env) {
   return { items: Object.keys(map).map(k => map[k]).filter(x => !x._deleted), changed: changed };
 }
 
-/* ---------- المدخل ---------- */
+/* ---------- \u0627\u0644\u0645\u062F\u062E\u0644 ---------- */
 function json(obj, status) {
-  obj.ver = VER; // كلّ ردّ يحمل علامة الإصدار الحيّ
+  obj.ver = VER; // \u0643\u0644\u0651 \u0631\u062F\u0651 \u064A\u062D\u0645\u0644 \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u0627\u0644\u062D\u064A\u0651
   return new Response(JSON.stringify(obj), {
     status: status || 200,
     headers: { ...CORS, "Content-Type": "application/json" },
   });
 }
-/* ---------- 31) رمز سوا وطلبات التواصل (C10) ----------
-   لكلّ حسابٍ رمزٌ من ١٠ أرقام: ٩ عشوائيّة (أوّلها ١–٩ فلا يشبه رقم هاتفٍ سودانيّ يبدأ بـ0) + رقم تحقّق (Luhn)
-   يكشف أيّ خطأٍ في رقمٍ واحد أو تبديل رقمين متجاورين.
-   codes/{code} = { uid, ts } — فريدٌ بالإنشاء المشروط · accounts/{uid}: code, codeTs, findable, gname
-   من يُدخل الرمز يرى الاسم وحده (لا بريد ولا هاتف) ويرسل «طلب تواصل»؛ لا مراسلة ولا اتّصال قبل القبول.
-   accounts/{to}/creq/{from} = { name, text, ts, code } · accounts/{from}/creqout/{to} = { name, ts } */
+/* ---------- 31) \u0631\u0645\u0632 \u0633\u0648\u0627 \u0648\u0637\u0644\u0628\u0627\u062A \u0627\u0644\u062A\u0648\u0627\u0635\u0644 (C10) ----------
+   \u0644\u0643\u0644\u0651 \u062D\u0633\u0627\u0628\u064D \u0631\u0645\u0632\u064C \u0645\u0646 \u0661\u0660 \u0623\u0631\u0642\u0627\u0645: \u0669 \u0639\u0634\u0648\u0627\u0626\u064A\u0651\u0629 (\u0623\u0648\u0651\u0644\u0647\u0627 \u0661\u2013\u0669 \u0641\u0644\u0627 \u064A\u0634\u0628\u0647 \u0631\u0642\u0645 \u0647\u0627\u062A\u0641\u064D \u0633\u0648\u062F\u0627\u0646\u064A\u0651 \u064A\u0628\u062F\u0623 \u0628\u06400) + \u0631\u0642\u0645 \u062A\u062D\u0642\u0651\u0642 (Luhn)
+   \u064A\u0643\u0634\u0641 \u0623\u064A\u0651 \u062E\u0637\u0623\u064D \u0641\u064A \u0631\u0642\u0645\u064D \u0648\u0627\u062D\u062F \u0623\u0648 \u062A\u0628\u062F\u064A\u0644 \u0631\u0642\u0645\u064A\u0646 \u0645\u062A\u062C\u0627\u0648\u0631\u064A\u0646.
+   codes/{code} = { uid, ts } \u2014 \u0641\u0631\u064A\u062F\u064C \u0628\u0627\u0644\u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0645\u0634\u0631\u0648\u0637 \u00B7 accounts/{uid}: code, codeTs, findable, gname
+   \u0645\u0646 \u064A\u064F\u062F\u062E\u0644 \u0627\u0644\u0631\u0645\u0632 \u064A\u0631\u0649 \u0627\u0644\u0627\u0633\u0645 \u0648\u062D\u062F\u0647 (\u0644\u0627 \u0628\u0631\u064A\u062F \u0648\u0644\u0627 \u0647\u0627\u062A\u0641) \u0648\u064A\u0631\u0633\u0644 \u00AB\u0637\u0644\u0628 \u062A\u0648\u0627\u0635\u0644\u00BB\u061B \u0644\u0627 \u0645\u0631\u0627\u0633\u0644\u0629 \u0648\u0644\u0627 \u0627\u062A\u0651\u0635\u0627\u0644 \u0642\u0628\u0644 \u0627\u0644\u0642\u0628\u0648\u0644.
+   accounts/{to}/creq/{from} = { name, text, ts, code } \u00B7 accounts/{from}/creqout/{to} = { name, ts } */
 function luhnDigit(s) {
   let sum = 0;
   for (let i = 0; i < s.length; i++) { let d = Number(s[s.length - 1 - i]); if (i % 2 === 0) { d *= 2; if (d > 9) d -= 9; } sum += d; }
   return String((10 - (sum % 10)) % 10);
 }
 function codeDigits(x) {
-  return String(x == null ? "" : x).replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d)).replace(/[۰-۹]/g, d => "۰۱۲۳۴۵۶۷۸۹".indexOf(d)).replace(/\D/g, "");
+  return String(x == null ? "" : x).replace(/[\u0660-\u0669]/g, d => "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669".indexOf(d)).replace(/[\u06F0-\u06F9]/g, d => "\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9".indexOf(d)).replace(/\D/g, "");
 }
 function codeValid(c) { return /^[1-9]\d{9}$/.test(c) && luhnDigit(c.slice(0, 9)) === c[9]; }
 function newCode() {
@@ -4117,20 +4117,20 @@ async function ensureCode(token, uid, claims, force) {
   }
   throw new Error("code generation failed");
 }
-// حدّ البحث والطلبات: ٣٠ بحثاً و١٠ طلبات في الساعة لكلّ مستخدم (يمنع تخمين الرموز وإغراق الناس بالطلبات)
+// \u062D\u062F\u0651 \u0627\u0644\u0628\u062D\u062B \u0648\u0627\u0644\u0637\u0644\u0628\u0627\u062A: \u0663\u0660 \u0628\u062D\u062B\u0627\u064B \u0648\u0661\u0660 \u0637\u0644\u0628\u0627\u062A \u0641\u064A \u0627\u0644\u0633\u0627\u0639\u0629 \u0644\u0643\u0644\u0651 \u0645\u0633\u062A\u062E\u062F\u0645 (\u064A\u0645\u0646\u0639 \u062A\u062E\u0645\u064A\u0646 \u0627\u0644\u0631\u0645\u0648\u0632 \u0648\u0625\u063A\u0631\u0627\u0642 \u0627\u0644\u0646\u0627\u0633 \u0628\u0627\u0644\u0637\u0644\u0628\u0627\u062A)
 const CODE_RL = new Map();
-/* ---------- 49) معاينة الروابط (C49) ----------
-   link.peek {url}: http(s) فقط · لا عناوين خاصّة/محلّيّة (حماية SSRF) · حدّ ١٠ ثوانٍ و٢٥٦ كيلوبايت · HTML فقط · ذاكرة ساعة · ٦٠/ساعة لكلّ مستخدم.
-   الصورة لا تمرّ عبر الخادم: نعيد عنوانها فقط والجهاز يحمّلها. */
+/* ---------- 49) \u0645\u0639\u0627\u064A\u0646\u0629 \u0627\u0644\u0631\u0648\u0627\u0628\u0637 (C49) ----------
+   link.peek {url}: http(s) \u0641\u0642\u0637 \u00B7 \u0644\u0627 \u0639\u0646\u0627\u0648\u064A\u0646 \u062E\u0627\u0635\u0651\u0629/\u0645\u062D\u0644\u0651\u064A\u0651\u0629 (\u062D\u0645\u0627\u064A\u0629 SSRF) \u00B7 \u062D\u062F\u0651 \u0661\u0660 \u062B\u0648\u0627\u0646\u064D \u0648\u0662\u0665\u0666 \u0643\u064A\u0644\u0648\u0628\u0627\u064A\u062A \u00B7 HTML \u0641\u0642\u0637 \u00B7 \u0630\u0627\u0643\u0631\u0629 \u0633\u0627\u0639\u0629 \u00B7 \u0666\u0660/\u0633\u0627\u0639\u0629 \u0644\u0643\u0644\u0651 \u0645\u0633\u062A\u062E\u062F\u0645.
+   \u0627\u0644\u0635\u0648\u0631\u0629 \u0644\u0627 \u062A\u0645\u0631\u0651 \u0639\u0628\u0631 \u0627\u0644\u062E\u0627\u062F\u0645: \u0646\u0639\u064A\u062F \u0639\u0646\u0648\u0627\u0646\u0647\u0627 \u0641\u0642\u0637 \u0648\u0627\u0644\u062C\u0647\u0627\u0632 \u064A\u062D\u0645\u0651\u0644\u0647\u0627. */
 const LINK_CACHE = new Map();
 function linkHostOk(h) {
   h = String(h || "").toLowerCase();
   if (!h || h === "localhost" || /\.(local|internal|localhost)$/.test(h)) return false;
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) {   // IPv4 حرفيّ: نرفض الخاصّ والمحلّيّ
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) {   // IPv4 \u062D\u0631\u0641\u064A\u0651: \u0646\u0631\u0641\u0636 \u0627\u0644\u062E\u0627\u0635\u0651 \u0648\u0627\u0644\u0645\u062D\u0644\u0651\u064A\u0651
     const [a, b] = h.split(".").map(Number);
     if (a === 10 || a === 127 || a === 0 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254) || a >= 224) return false;
   }
-  if (h.indexOf(":") >= 0) return false;         // IPv6 حرفيّ
+  if (h.indexOf(":") >= 0) return false;         // IPv6 \u062D\u0631\u0641\u064A\u0651
   return true;
 }
 function htmlDecode(t) { return String(t || "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&nbsp;/g, " ").replace(/&#(\d+);/g, (m, n) => { try { return String.fromCodePoint(Number(n)); } catch (e) { return ""; } }).replace(/\s+/g, " ").trim(); }
@@ -4187,7 +4187,7 @@ async function codeTarget(token, raw) {
   const t = fstr(d, "uid");
   if (!t) return null;
   const acc = await fsGet(token, "accounts/" + t);
-  if (!acc || fstr(acc, "code") !== c || !accFindable(acc)) return null;   // رمزٌ قديم (غُيّر) أو صاحبه أخفى نفسه
+  if (!acc || fstr(acc, "code") !== c || !accFindable(acc)) return null;   // \u0631\u0645\u0632\u064C \u0642\u062F\u064A\u0645 (\u063A\u064F\u064A\u0651\u0631) \u0623\u0648 \u0635\u0627\u062D\u0628\u0647 \u0623\u062E\u0641\u0649 \u0646\u0641\u0633\u0647
   return { uid: t, code: c, name: fstr(acc, "displayName") || fstr(acc, "gname") || null };
 }
 async function myName(token, uid, claims) {
@@ -4210,7 +4210,7 @@ async function opCodeFind(uid, payload, env) {
     fsGet(token, "accounts/" + uid + "/creqout/" + t.uid), fsGet(token, "accounts/" + uid + "/creq/" + t.uid)]);
   return { found: true, name: t.name, code: t.code, contact: !!contact, pending: inR ? "in" : outR ? "out" : null, uid: (contact || inR || outR) ? t.uid : undefined };
 }
-// C50: إشارةٌ في RTDB يراقبها جهاز المستلم (sig/$uid — يقرؤها صاحبها فقط) فيحدّث الطلبات وجهات الاتّصال فوراً ولو كانت الإشعارات مغلقة
+// C50: \u0625\u0634\u0627\u0631\u0629\u064C \u0641\u064A RTDB \u064A\u0631\u0627\u0642\u0628\u0647\u0627 \u062C\u0647\u0627\u0632 \u0627\u0644\u0645\u0633\u062A\u0644\u0645 (sig/$uid \u2014 \u064A\u0642\u0631\u0624\u0647\u0627 \u0635\u0627\u062D\u0628\u0647\u0627 \u0641\u0642\u0637) \u0641\u064A\u062D\u062F\u0651\u062B \u0627\u0644\u0637\u0644\u0628\u0627\u062A \u0648\u062C\u0647\u0627\u062A \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 \u0641\u0648\u0631\u0627\u064B \u0648\u0644\u0648 \u0643\u0627\u0646\u062A \u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062A \u0645\u063A\u0644\u0642\u0629
 async function sigTo(token, uids, kind) {
   const pat = {}; const now = Date.now();
   for (const u of [].concat(uids || [])) if (u) pat["sig/" + u] = { k: kind, ts: now };
@@ -4223,7 +4223,7 @@ async function opCodeRequest(uid, payload, env, claims, ctx) {
   if (!t) throw new Error("not_found");
   if (t.uid === uid) throw new Error("self");
   if (await sharesContact(token, uid, t.uid)) return { already: true, uid: t.uid };
-  // طلبه إليّ قائم ⇒ قبولٌ متبادل فوراً
+  // \u0637\u0644\u0628\u0647 \u0625\u0644\u064A\u0651 \u0642\u0627\u0626\u0645 \u21D2 \u0642\u0628\u0648\u0644\u064C \u0645\u062A\u0628\u0627\u062F\u0644 \u0641\u0648\u0631\u0627\u064B
   if (await fsGet(token, "accounts/" + uid + "/creq/" + t.uid)) {
     const r = await acceptReq(token, uid, t.uid, claims, ctx);
     return Object.assign({ accepted: true, uid: t.uid }, r);
@@ -4235,24 +4235,24 @@ async function opCodeRequest(uid, payload, env, claims, ctx) {
   const myCode = (await ensureCode(token, uid, claims, false)).code;
   const writes = [{ update: { name: DOC_ROOT + "/accounts/" + uid + "/creqout/" + t.uid, fields: {
     name: t.name ? { stringValue: t.name } : { nullValue: null }, code: { stringValue: t.code }, ts: { integerValue: String(now) } } } }];
-  // من حظرني لا يصله شيء — ولا يعرف المرسل (يبقى «بانتظار الموافقة»)
+  // \u0645\u0646 \u062D\u0638\u0631\u0646\u064A \u0644\u0627 \u064A\u0635\u0644\u0647 \u0634\u064A\u0621 \u2014 \u0648\u0644\u0627 \u064A\u0639\u0631\u0641 \u0627\u0644\u0645\u0631\u0633\u0644 (\u064A\u0628\u0642\u0649 \u00AB\u0628\u0627\u0646\u062A\u0638\u0627\u0631 \u0627\u0644\u0645\u0648\u0627\u0641\u0642\u0629\u00BB)
   const blocked = await blockedBy(token, t.uid, uid).catch(() => false);
   if (!blocked) writes.push({ update: { name: DOC_ROOT + "/accounts/" + t.uid + "/creq/" + uid, fields: {
     name: me ? { stringValue: me } : { nullValue: null }, text: { stringValue: text }, code: { stringValue: myCode }, ts: { integerValue: String(now) } } } });
   await fsCommit(token, writes);
   if (!blocked) {
-    const job = pushTo(token, [t.uid], strData({ t: "req", from: uid, title: "طلب تواصل في سوا", body: (me || "مستخدم سوا") + (text ? ": " + text : " يريد التواصل معك"), ts: now }))
+    const job = pushTo(token, [t.uid], strData({ t: "req", from: uid, title: "\u0637\u0644\u0628 \u062A\u0648\u0627\u0635\u0644 \u0641\u064A \u0633\u0648\u0627", body: (me || "\u0645\u0633\u062A\u062E\u062F\u0645 \u0633\u0648\u0627") + (text ? ": " + text : " \u064A\u0631\u064A\u062F \u0627\u0644\u062A\u0648\u0627\u0635\u0644 \u0645\u0639\u0643"), ts: now }))
       .catch(e => console.log("push:", e && e.message));
     if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
     await sigTo(token, [t.uid], "req");
   }
-  return { sent: true, name: t.name, uid: t.uid };   // v58: ليحفظ المرسل اسمه عنده (تسمية) قبل القبول
+  return { sent: true, name: t.name, uid: t.uid };   // v58: \u0644\u064A\u062D\u0641\u0638 \u0627\u0644\u0645\u0631\u0633\u0644 \u0627\u0633\u0645\u0647 \u0639\u0646\u062F\u0647 (\u062A\u0633\u0645\u064A\u0629) \u0642\u0628\u0644 \u0627\u0644\u0642\u0628\u0648\u0644
 }
 // ============================================================
-//  v59: القصص (الاستوري) — لجهات اتّصالي، تختفي بعد ٢٤ ساعة
-//  stories/{u} = { name, aud[] (جهات اتّصاله − المُخفى عنهم), hide[], items[] ≤ ٣٠ (نصّ/صورة/فيديو), exp (أقرب انتهاء), ts }
-//  stories/{u}/media/{mid}{by,mime,size,n,ts,done} + c/{i}{d} — يرفعها صاحبها مباشرةً (القواعد)، ويقرؤها من في aud
-//  stories/{u}/seen/{sid~viewer} = { sid, by, ts } — «شاهدها» يقرؤه صاحب القصّة وحده
+//  v59: \u0627\u0644\u0642\u0635\u0635 (\u0627\u0644\u0627\u0633\u062A\u0648\u0631\u064A) \u2014 \u0644\u062C\u0647\u0627\u062A \u0627\u062A\u0651\u0635\u0627\u0644\u064A\u060C \u062A\u062E\u062A\u0641\u064A \u0628\u0639\u062F \u0662\u0664 \u0633\u0627\u0639\u0629
+//  stories/{u} = { name, aud[] (\u062C\u0647\u0627\u062A \u0627\u062A\u0651\u0635\u0627\u0644\u0647 \u2212 \u0627\u0644\u0645\u064F\u062E\u0641\u0649 \u0639\u0646\u0647\u0645), hide[], items[] \u2264 \u0663\u0660 (\u0646\u0635\u0651/\u0635\u0648\u0631\u0629/\u0641\u064A\u062F\u064A\u0648), exp (\u0623\u0642\u0631\u0628 \u0627\u0646\u062A\u0647\u0627\u0621), ts }
+//  stories/{u}/media/{mid}{by,mime,size,n,ts,done} + c/{i}{d} \u2014 \u064A\u0631\u0641\u0639\u0647\u0627 \u0635\u0627\u062D\u0628\u0647\u0627 \u0645\u0628\u0627\u0634\u0631\u0629\u064B (\u0627\u0644\u0642\u0648\u0627\u0639\u062F)\u060C \u0648\u064A\u0642\u0631\u0624\u0647\u0627 \u0645\u0646 \u0641\u064A aud
+//  stories/{u}/seen/{sid~viewer} = { sid, by, ts } \u2014 \u00AB\u0634\u0627\u0647\u062F\u0647\u0627\u00BB \u064A\u0642\u0631\u0624\u0647 \u0635\u0627\u062D\u0628 \u0627\u0644\u0642\u0635\u0651\u0629 \u0648\u062D\u062F\u0647
 // ============================================================
 const STORY_TTL = 24 * 3600000, STORY_MAX = 30, STORY_BG = 8;
 function storyItems(doc) {
@@ -4277,7 +4277,7 @@ async function storyDropMedia(token, owner, it) {
   const w = [{ delete: base }]; for (let i = 0; i < n; i++) w.push({ delete: base + "/c/" + i });
   await fsCommit(token, w).catch(() => {});
 }
-// v61: حجز رفع وسيط القصّة (كالمحادثات): حدٌّ يوميّ مشترك، والقواعد ترفض وسيطاً بلا حجز أو أكبر منه، وما بقي ٤٨ ساعة يُحذف
+// v61: \u062D\u062C\u0632 \u0631\u0641\u0639 \u0648\u0633\u064A\u0637 \u0627\u0644\u0642\u0635\u0651\u0629 (\u0643\u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0627\u062A): \u062D\u062F\u064C\u0651 \u064A\u0648\u0645\u064A\u0651 \u0645\u0634\u062A\u0631\u0643\u060C \u0648\u0627\u0644\u0642\u0648\u0627\u0639\u062F \u062A\u0631\u0641\u0636 \u0648\u0633\u064A\u0637\u0627\u064B \u0628\u0644\u0627 \u062D\u062C\u0632 \u0623\u0648 \u0623\u0643\u0628\u0631 \u0645\u0646\u0647\u060C \u0648\u0645\u0627 \u0628\u0642\u064A \u0664\u0668 \u0633\u0627\u0639\u0629 \u064A\u064F\u062D\u0630\u0641
 async function opStoryBegin(uid, payload, env) {
   if (!codeRate(uid, "storyb", 40)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -4357,7 +4357,7 @@ async function opStoryView(uid, payload, env) {
     sid: { stringValue: sid }, by: { stringValue: uid }, ts: { integerValue: String(Date.now()) } } } }]);
   return { ok: true };
 }
-// المُخفى عنهم قصصي (والجمهور يُعاد حسابه من جهات الاتّصال الحاليّة)
+// \u0627\u0644\u0645\u064F\u062E\u0641\u0649 \u0639\u0646\u0647\u0645 \u0642\u0635\u0635\u064A (\u0648\u0627\u0644\u062C\u0645\u0647\u0648\u0631 \u064A\u064F\u0639\u0627\u062F \u062D\u0633\u0627\u0628\u0647 \u0645\u0646 \u062C\u0647\u0627\u062A \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 \u0627\u0644\u062D\u0627\u0644\u064A\u0651\u0629)
 async function opStoryAudience(uid, payload, env, claims) {
   const hide = [...new Set((Array.isArray(payload && payload.hide) ? payload.hide : []).map(String).filter(segOk))].slice(0, 2000);
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -4368,12 +4368,12 @@ async function opStoryAudience(uid, payload, env, claims) {
   return { aud: aud.length, hide };
 }
 // ============================================================
-//  C133: لحظات الأصدقاء — منشوراتٌ دائمة (نصّ · حتّى ٤ صور أو فيديو ≤ ٣٠ ث · موقع · استطلاع) · إعجاب وتعليقات · جمهورٌ لكلّ لحظة
-//  moments/{pid} = { by, name, aud[] (يشمل صاحبها), mode, text, media[], loc, poll{q,opts[]}, votes{uid:idx}, likes[], cc, ts }
-//    pid = "m" + (9e12 − الوقت) بأساس ٣٦ (٩ خانات) + ٤ عشوائيّة ⇒ ترتيب المعرّفات تصاعديّاً = الأحدث أوّلاً ⇒ الخلاصة بلا فهرسٍ مركّب
-//  moments/{pid}/media/{mid} + c/{i} — يرفعها صاحبها مباشرةً بعد حجز moment.begin (momentq/{pid~mid}) · يقرؤها من في aud
-//  moments/{pid}/cm/{cmid} = { by, name, text, ts } — يكتبها الخادم · يقرؤها من في aud
-//  mset/{uid} = { close[], hide[] } — المقرّبون والمُخفى عنهم افتراضيّاً
+//  C133: \u0644\u062D\u0638\u0627\u062A \u0627\u0644\u0623\u0635\u062F\u0642\u0627\u0621 \u2014 \u0645\u0646\u0634\u0648\u0631\u0627\u062A\u064C \u062F\u0627\u0626\u0645\u0629 (\u0646\u0635\u0651 \u00B7 \u062D\u062A\u0651\u0649 \u0664 \u0635\u0648\u0631 \u0623\u0648 \u0641\u064A\u062F\u064A\u0648 \u2264 \u0663\u0660 \u062B \u00B7 \u0645\u0648\u0642\u0639 \u00B7 \u0627\u0633\u062A\u0637\u0644\u0627\u0639) \u00B7 \u0625\u0639\u062C\u0627\u0628 \u0648\u062A\u0639\u0644\u064A\u0642\u0627\u062A \u00B7 \u062C\u0645\u0647\u0648\u0631\u064C \u0644\u0643\u0644\u0651 \u0644\u062D\u0638\u0629
+//  moments/{pid} = { by, name, aud[] (\u064A\u0634\u0645\u0644 \u0635\u0627\u062D\u0628\u0647\u0627), mode, text, media[], loc, poll{q,opts[]}, votes{uid:idx}, likes[], cc, ts }
+//    pid = "m" + (9e12 \u2212 \u0627\u0644\u0648\u0642\u062A) \u0628\u0623\u0633\u0627\u0633 \u0663\u0666 (\u0669 \u062E\u0627\u0646\u0627\u062A) + \u0664 \u0639\u0634\u0648\u0627\u0626\u064A\u0651\u0629 \u21D2 \u062A\u0631\u062A\u064A\u0628 \u0627\u0644\u0645\u0639\u0631\u0651\u0641\u0627\u062A \u062A\u0635\u0627\u0639\u062F\u064A\u0651\u0627\u064B = \u0627\u0644\u0623\u062D\u062F\u062B \u0623\u0648\u0651\u0644\u0627\u064B \u21D2 \u0627\u0644\u062E\u0644\u0627\u0635\u0629 \u0628\u0644\u0627 \u0641\u0647\u0631\u0633\u064D \u0645\u0631\u0643\u0651\u0628
+//  moments/{pid}/media/{mid} + c/{i} \u2014 \u064A\u0631\u0641\u0639\u0647\u0627 \u0635\u0627\u062D\u0628\u0647\u0627 \u0645\u0628\u0627\u0634\u0631\u0629\u064B \u0628\u0639\u062F \u062D\u062C\u0632 moment.begin (momentq/{pid~mid}) \u00B7 \u064A\u0642\u0631\u0624\u0647\u0627 \u0645\u0646 \u0641\u064A aud
+//  moments/{pid}/cm/{cmid} = { by, name, text, ts } \u2014 \u064A\u0643\u062A\u0628\u0647\u0627 \u0627\u0644\u062E\u0627\u062F\u0645 \u00B7 \u064A\u0642\u0631\u0624\u0647\u0627 \u0645\u0646 \u0641\u064A aud
+//  mset/{uid} = { close[], hide[] } \u2014 \u0627\u0644\u0645\u0642\u0631\u0651\u0628\u0648\u0646 \u0648\u0627\u0644\u0645\u064F\u062E\u0641\u0649 \u0639\u0646\u0647\u0645 \u0627\u0641\u062A\u0631\u0627\u0636\u064A\u0651\u0627\u064B
 // ============================================================
 const MOM_TEXT = 2000, MOM_MEDIA = 4, MOM_CMT = 500;
 function momPidOk(p) { return typeof p === "string" && /^m[0-9a-z]{9}[0-9a-z]{4}$/.test(p); }
@@ -4385,7 +4385,7 @@ async function momPrefs(token, uid) {
   const d = await fsGet(token, "mset/" + uid).catch(() => null);
   return { close: fsArr(d, "close"), hide: fsArr(d, "hide"), mute: fsArr(d, "mute"), seen: fsInt(d, "seen"), np: fsInt(d, "np") };
 }
-// C133b: إزالة أشخاصٍ من جمهور كلّ لحظاتي السابقة (حين أُخفي عنهم لحظاتي أو أحظرهم) — الجمهور يُحسب عند النشر فيجب تنظيفه بعده
+// C133b: \u0625\u0632\u0627\u0644\u0629 \u0623\u0634\u062E\u0627\u0635\u064D \u0645\u0646 \u062C\u0645\u0647\u0648\u0631 \u0643\u0644\u0651 \u0644\u062D\u0638\u0627\u062A\u064A \u0627\u0644\u0633\u0627\u0628\u0642\u0629 (\u062D\u064A\u0646 \u0623\u064F\u062E\u0641\u064A \u0639\u0646\u0647\u0645 \u0644\u062D\u0638\u0627\u062A\u064A \u0623\u0648 \u0623\u062D\u0638\u0631\u0647\u0645) \u2014 \u0627\u0644\u062C\u0645\u0647\u0648\u0631 \u064A\u064F\u062D\u0633\u0628 \u0639\u0646\u062F \u0627\u0644\u0646\u0634\u0631 \u0641\u064A\u062C\u0628 \u062A\u0646\u0638\u064A\u0641\u0647 \u0628\u0639\u062F\u0647
 async function momStrip(token, uid, uids) {
   uids = (uids || []).filter(u => segOk(String(u)) && u !== uid);
   if (!uids.length) return 0;
@@ -4405,8 +4405,8 @@ async function opMomentPrefs(uid, payload, env) {
   const clean = (a) => [...new Set((Array.isArray(a) ? a : []).map(String).filter(u => segOk(u) && u !== uid))].slice(0, 1000);
   if (!Array.isArray(p.close) && !Array.isArray(p.hide) && !Array.isArray(p.mute)) return cur;
   const next = { seen: cur.seen, close: Array.isArray(p.close) ? clean(p.close) : cur.close, hide: Array.isArray(p.hide) ? clean(p.hide) : cur.hide, mute: Array.isArray(p.mute) ? clean(p.mute) : cur.mute };
-  await fsCommit(token, [{ update: { name: DOC_ROOT + "/mset/" + uid, fields: { close: toFsValue(next.close), hide: toFsValue(next.hide), mute: toFsValue(next.mute), ts: { integerValue: String(Date.now()) } } }, updateMask: { fieldPaths: ["close", "hide", "mute", "ts"] } }]);   // C135: يبقى seen
-  // «لا تُظهر لحظاتي لـ» يشمل اللحظات السابقة أيضاً
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/mset/" + uid, fields: { close: toFsValue(next.close), hide: toFsValue(next.hide), mute: toFsValue(next.mute), ts: { integerValue: String(Date.now()) } } }, updateMask: { fieldPaths: ["close", "hide", "mute", "ts"] } }]);   // C135: \u064A\u0628\u0642\u0649 seen
+  // \u00AB\u0644\u0627 \u062A\u064F\u0638\u0647\u0631 \u0644\u062D\u0638\u0627\u062A\u064A \u0644\u0640\u00BB \u064A\u0634\u0645\u0644 \u0627\u0644\u0644\u062D\u0638\u0627\u062A \u0627\u0644\u0633\u0627\u0628\u0642\u0629 \u0623\u064A\u0636\u0627\u064B
   const added = next.hide.filter(u => cur.hide.indexOf(u) < 0);
   if (added.length) next.stripped = await momStrip(token, uid, added).catch(() => 0);
   return next;
@@ -4446,7 +4446,7 @@ async function momAudience(token, uid, a, hideExtra) {
   } else { list = Object.keys(contacts); label = "contacts"; }
   const hide = new Set(prefs.hide.concat(Array.isArray(hideExtra) ? hideExtra.map(String) : []));
   list = [...new Set(list)].filter(u => u !== uid && segOk(u) && !hide.has(u)).slice(0, 1500);
-  // الحظر بالاتّجاهين: من حظرني (blk/{هو}/{أنا}) ومن حظرتُه (blk/{أنا})
+  // \u0627\u0644\u062D\u0638\u0631 \u0628\u0627\u0644\u0627\u062A\u0651\u062C\u0627\u0647\u064A\u0646: \u0645\u0646 \u062D\u0638\u0631\u0646\u064A (blk/{\u0647\u0648}/{\u0623\u0646\u0627}) \u0648\u0645\u0646 \u062D\u0638\u0631\u062A\u064F\u0647 (blk/{\u0623\u0646\u0627})
   const mine = (await rtdbGet(token, "blk/" + uid).catch(() => null)) || {};
   list = list.filter(u => mine[u] !== true);
   const blk = list.length ? await blockedSet(token, list, uid) : new Set();
@@ -4469,7 +4469,7 @@ async function opMomentPost(uid, payload, env, claims, ctx) {
     if (!md || fstr(md, "by") !== uid || !fbool(md, "done")) throw new Error("media not uploaded");
     const it = { mid, t, mime: fstr(md, "mime").slice(0, 100), size: fsInt(md, "size"), n: fsInt(md, "n") };
     if (m.thumb && typeof m.thumb === "string" && m.thumb.length <= 8000 && /^data:image\/(jpeg|png|webp);base64,/.test(m.thumb)) it.thumb = m.thumb;
-    // C137: غلاف الفيديو الواضح (≤ ١٢٠ ألف حرف ≈ ٩٠ كيلوبايت) — فيديو واحد في اللحظة فيبقى المستند صغيراً
+    // C137: \u063A\u0644\u0627\u0641 \u0627\u0644\u0641\u064A\u062F\u064A\u0648 \u0627\u0644\u0648\u0627\u0636\u062D (\u2264 \u0661\u0662\u0660 \u0623\u0644\u0641 \u062D\u0631\u0641 \u2248 \u0669\u0660 \u0643\u064A\u0644\u0648\u0628\u0627\u064A\u062A) \u2014 \u0641\u064A\u062F\u064A\u0648 \u0648\u0627\u062D\u062F \u0641\u064A \u0627\u0644\u0644\u062D\u0638\u0629 \u0641\u064A\u0628\u0642\u0649 \u0627\u0644\u0645\u0633\u062A\u0646\u062F \u0635\u063A\u064A\u0631\u0627\u064B
     if (t === "video" && m.poster && typeof m.poster === "string" && m.poster.length <= 120000 && /^data:image\/jpeg;base64,/.test(m.poster)) it.poster = m.poster;
     if (Number(m.w) > 0 && Number(m.h) > 0) { it.w = Math.round(Number(m.w)); it.h = Math.round(Number(m.h)); }
     if (t === "video") it.dur = Math.max(1, Math.min(31, Math.round(Number(m.dur) || 15)));
@@ -4501,17 +4501,17 @@ async function opMomentPost(uid, payload, env, claims, ctx) {
   if (men.length) {
     const rcp = {}; men.forEach(u => { rcp[u] = "mention"; });
     const fake = { name: DOC_ROOT + "/moments/" + pid, fields: { aud: toFsValue(au.aud), text: { stringValue: text }, by: { stringValue: uid } } };
-    await momNotes(token, env, ctx, fake, uid, claims, rcp, { text: text || "📷" }).catch(e => console.log("mention:", e && e.message));
+    await momNotes(token, env, ctx, fake, uid, claims, rcp, { text: text || "\uD83D\uDCF7" }).catch(e => console.log("mention:", e && e.message));
   }
-  // C153: «لحظة جديدة» لمن في الجمهور (كإشعار القصص في انستجرام)
-  const np = momNewPush(token, env, uid, pid, String(name || "مستخدم سوا").slice(0, 80), au, men, media).catch(e => console.log("newpush:", e && e.message));
+  // C153: \u00AB\u0644\u062D\u0638\u0629 \u062C\u062F\u064A\u062F\u0629\u00BB \u0644\u0645\u0646 \u0641\u064A \u0627\u0644\u062C\u0645\u0647\u0648\u0631 (\u0643\u0625\u0634\u0639\u0627\u0631 \u0627\u0644\u0642\u0635\u0635 \u0641\u064A \u0627\u0646\u0633\u062A\u062C\u0631\u0627\u0645)
+  const np = momNewPush(token, env, uid, pid, String(name || "\u0645\u0633\u062A\u062E\u062F\u0645 \u0633\u0648\u0627").slice(0, 80), au, men, media).catch(e => console.log("newpush:", e && e.message));
   if (ctx && ctx.waitUntil) ctx.waitUntil(np); else await np;
   return { pid, aud: au.n, mode: au.label, men: men.length };
 }
-/* C153: إشعار «لحظة جديدة» — العنوان اسم الناشر (وصورته) والنصّ «لحظة جديدة 📷».
-   مرّةً كلّ ٤ ساعات على الأكثر لكلّ ناشر (mset/{uid}.np) · حتّى ١٠ مستلمين (حدّ الطلبات الفرعيّة): المقرّبون أوّلاً ثمّ عشوائيّاً ·
-   يُستثنى من أُشير إليه (وصله إشعار الإشارة) ومن كتم لحظاتي (mset/{هو}.mute) · أوّل لحظة بعد ١٤ يوماً ⇒ «أوّل لحظة منذ فترة طويلة». */
-const MOM_NEW_GAP = 4 * 3600000, MOM_NEW_MAX = 60;   // C180: كان ١٠ (حدّ الخطّة المجّانيّة)
+/* C153: \u0625\u0634\u0639\u0627\u0631 \u00AB\u0644\u062D\u0638\u0629 \u062C\u062F\u064A\u062F\u0629\u00BB \u2014 \u0627\u0644\u0639\u0646\u0648\u0627\u0646 \u0627\u0633\u0645 \u0627\u0644\u0646\u0627\u0634\u0631 (\u0648\u0635\u0648\u0631\u062A\u0647) \u0648\u0627\u0644\u0646\u0635\u0651 \u00AB\u0644\u062D\u0638\u0629 \u062C\u062F\u064A\u062F\u0629 \uD83D\uDCF7\u00BB.
+   \u0645\u0631\u0651\u0629\u064B \u0643\u0644\u0651 \u0664 \u0633\u0627\u0639\u0627\u062A \u0639\u0644\u0649 \u0627\u0644\u0623\u0643\u062B\u0631 \u0644\u0643\u0644\u0651 \u0646\u0627\u0634\u0631 (mset/{uid}.np) \u00B7 \u062D\u062A\u0651\u0649 \u0661\u0660 \u0645\u0633\u062A\u0644\u0645\u064A\u0646 (\u062D\u062F\u0651 \u0627\u0644\u0637\u0644\u0628\u0627\u062A \u0627\u0644\u0641\u0631\u0639\u064A\u0651\u0629): \u0627\u0644\u0645\u0642\u0631\u0651\u0628\u0648\u0646 \u0623\u0648\u0651\u0644\u0627\u064B \u062B\u0645\u0651 \u0639\u0634\u0648\u0627\u0626\u064A\u0651\u0627\u064B \u00B7
+   \u064A\u064F\u0633\u062A\u062B\u0646\u0649 \u0645\u0646 \u0623\u064F\u0634\u064A\u0631 \u0625\u0644\u064A\u0647 (\u0648\u0635\u0644\u0647 \u0625\u0634\u0639\u0627\u0631 \u0627\u0644\u0625\u0634\u0627\u0631\u0629) \u0648\u0645\u0646 \u0643\u062A\u0645 \u0644\u062D\u0638\u0627\u062A\u064A (mset/{\u0647\u0648}.mute) \u00B7 \u0623\u0648\u0651\u0644 \u0644\u062D\u0638\u0629 \u0628\u0639\u062F \u0661\u0664 \u064A\u0648\u0645\u0627\u064B \u21D2 \u00AB\u0623\u0648\u0651\u0644 \u0644\u062D\u0638\u0629 \u0645\u0646\u0630 \u0641\u062A\u0631\u0629 \u0637\u0648\u064A\u0644\u0629\u00BB. */
+const MOM_NEW_GAP = 4 * 3600000, MOM_NEW_MAX = 60;   // C180: \u0643\u0627\u0646 \u0661\u0660 (\u062D\u062F\u0651 \u0627\u0644\u062E\u0637\u0651\u0629 \u0627\u0644\u0645\u062C\u0651\u0627\u0646\u064A\u0651\u0629)
 async function momNewPush(token, env, uid, pid, me, au, men, media) {
   const now = Date.now(), last = (au.prefs && au.prefs.np) || 0;
   if (last && now - last < MOM_NEW_GAP) return 0;
@@ -4521,7 +4521,7 @@ async function momNewPush(token, env, uid, pid, me, au, men, media) {
   const rest = to.filter(u => !close.has(u));
   for (let i = rest.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const t = rest[i]; rest[i] = rest[j]; rest[j] = t; }
   to = to.filter(u => close.has(u)).concat(rest).slice(0, MOM_NEW_MAX * 2);
-  try {   // من كتم لحظاتي لا يصله شيء
+  try {   // \u0645\u0646 \u0643\u062A\u0645 \u0644\u062D\u0638\u0627\u062A\u064A \u0644\u0627 \u064A\u0635\u0644\u0647 \u0634\u064A\u0621
     const res = await fetch(FS_BASE + ":batchGet", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
       body: JSON.stringify({ documents: to.map(u => DOC_ROOT + "/mset/" + u), mask: { fieldPaths: ["mute"] } }) });
     const muted = new Set();
@@ -4531,8 +4531,8 @@ async function momNewPush(token, env, uid, pid, me, au, men, media) {
   to = to.slice(0, MOM_NEW_MAX);
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/mset/" + uid, fields: { np: { integerValue: String(now) } } }, updateMask: { fieldPaths: ["np"] } }]).catch(() => {});
   if (!to.length) return 0;
-  const icon = media.some(m => m.t === "video") ? " 🎥" : media.length ? " 📷" : "";
-  const body = (last && now - last > 14 * 86400000 ? "أوّل لحظة منذ فترة طويلة" : "لحظة جديدة") + icon;
+  const icon = media.some(m => m.t === "video") ? " \uD83C\uDFA5" : media.length ? " \uD83D\uDCF7" : "";
+  const body = (last && now - last > 14 * 86400000 ? "\u0623\u0648\u0651\u0644 \u0644\u062D\u0638\u0629 \u0645\u0646\u0630 \u0641\u062A\u0631\u0629 \u0637\u0648\u064A\u0644\u0629" : "\u0644\u062D\u0638\u0629 \u062C\u062F\u064A\u062F\u0629") + icon;
   const d = strData({ t: "moment", k: "new", pid, from: uid, ak: await ackSig(env, "av|" + uid), title: me, body, ts: now });
   stat("moment:newpush");
   return pushTo(token, to, d);
@@ -4556,12 +4556,12 @@ async function opMomentDelete(uid, payload, env, claims) {
   await fsCommit(token, [{ delete: DOC_ROOT + "/moments/" + pid }]);
   return { deleted: true };
 }
-// C135: الإشعارات داخل التطبيق (mnote/{uid}/n/{nid}) + إشعار الهاتف — لصاحب اللحظة · لصاحب التعليق المردود عليه · لمن ذُكروا بـ@
-//   nid = "n" + (9e12 − الوقت) بأساس ٣٦ ⇒ ترتيب المعرّفات = الأحدث أوّلاً (بلا فهرس) · k: like | comment | reply | mention | mentionc | creact
-const MOM_RX = ["❤️", "😍", "😂", "😊", "😮", "😢", "😭", "😡", "👏", "🤲"];   // C136
+// C135: \u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062A \u062F\u0627\u062E\u0644 \u0627\u0644\u062A\u0637\u0628\u064A\u0642 (mnote/{uid}/n/{nid}) + \u0625\u0634\u0639\u0627\u0631 \u0627\u0644\u0647\u0627\u062A\u0641 \u2014 \u0644\u0635\u0627\u062D\u0628 \u0627\u0644\u0644\u062D\u0638\u0629 \u00B7 \u0644\u0635\u0627\u062D\u0628 \u0627\u0644\u062A\u0639\u0644\u064A\u0642 \u0627\u0644\u0645\u0631\u062F\u0648\u062F \u0639\u0644\u064A\u0647 \u00B7 \u0644\u0645\u0646 \u0630\u064F\u0643\u0631\u0648\u0627 \u0628\u0640@
+//   nid = "n" + (9e12 \u2212 \u0627\u0644\u0648\u0642\u062A) \u0628\u0623\u0633\u0627\u0633 \u0663\u0666 \u21D2 \u062A\u0631\u062A\u064A\u0628 \u0627\u0644\u0645\u0639\u0631\u0651\u0641\u0627\u062A = \u0627\u0644\u0623\u062D\u062F\u062B \u0623\u0648\u0651\u0644\u0627\u064B (\u0628\u0644\u0627 \u0641\u0647\u0631\u0633) \u00B7 k: like | comment | reply | mention | mentionc | creact
+const MOM_RX = ["\u2764\uFE0F", "\uD83D\uDE0D", "\uD83D\uDE02", "\uD83D\uDE0A", "\uD83D\uDE2E", "\uD83D\uDE22", "\uD83D\uDE2D", "\uD83D\uDE21", "\uD83D\uDC4F", "\uD83E\uDD32"];   // C136
 function momRid() { let n = (9e12 - Date.now()).toString(36); while (n.length < 9) n = "0" + n; return n.slice(-9) + Math.random().toString(36).slice(2, 6).padEnd(4, "0"); }
 function momCmidOk(c) { return typeof c === "string" && /^c[0-9a-z]{6,20}$/.test(c); }
-// الإشارات: [{u, n}] أو معرّفات ⇒ من في جمهور اللحظة فقط (لا يُشار إلى من لا يراها) · ≤ ٢٠
+// \u0627\u0644\u0625\u0634\u0627\u0631\u0627\u062A: [{u, n}] \u0623\u0648 \u0645\u0639\u0631\u0651\u0641\u0627\u062A \u21D2 \u0645\u0646 \u0641\u064A \u062C\u0645\u0647\u0648\u0631 \u0627\u0644\u0644\u062D\u0638\u0629 \u0641\u0642\u0637 (\u0644\u0627 \u064A\u064F\u0634\u0627\u0631 \u0625\u0644\u0649 \u0645\u0646 \u0644\u0627 \u064A\u0631\u0627\u0647\u0627) \u00B7 \u2264 \u0662\u0660
 function momMen(raw, aud, uid) {
   const out = [], names = {};
   for (const x of (Array.isArray(raw) ? raw : []).slice(0, 40)) {
@@ -4572,12 +4572,12 @@ function momMen(raw, aud, uid) {
   }
   return { men: out, menN: names };
 }
-const MOM_NOTE_ACT = { comment: "علّق على لحظتك", reply: "ردّ على تعليقك", mention: "أشار إليك في لحظة", mentionc: "أشار إليك في تعليق", creact: "أعجبه تعليقك", like: "أعجبته لحظتك" };   // C152
+const MOM_NOTE_ACT = { comment: "\u0639\u0644\u0651\u0642 \u0639\u0644\u0649 \u0644\u062D\u0638\u062A\u0643", reply: "\u0631\u062F\u0651 \u0639\u0644\u0649 \u062A\u0639\u0644\u064A\u0642\u0643", mention: "\u0623\u0634\u0627\u0631 \u0625\u0644\u064A\u0643 \u0641\u064A \u0644\u062D\u0638\u0629", mentionc: "\u0623\u0634\u0627\u0631 \u0625\u0644\u064A\u0643 \u0641\u064A \u062A\u0639\u0644\u064A\u0642", creact: "\u0623\u0639\u062C\u0628\u0647 \u062A\u0639\u0644\u064A\u0642\u0643", like: "\u0623\u0639\u062C\u0628\u062A\u0647 \u0644\u062D\u0638\u062A\u0643" };   // C152
 const MOM_NOTE_TXT = {
-  like: (me) => me + " أعجبته لحظتك", comment: (me) => me + " علّق على لحظتك", reply: (me) => me + " ردّ على تعليقك",
-  mention: (me) => me + " أشار إليك في لحظة", mentionc: (me) => me + " أشار إليك في تعليق", creact: (me) => me + " أعجبه تعليقك",
+  like: (me) => me + " \u0623\u0639\u062C\u0628\u062A\u0647 \u0644\u062D\u0638\u062A\u0643", comment: (me) => me + " \u0639\u0644\u0651\u0642 \u0639\u0644\u0649 \u0644\u062D\u0638\u062A\u0643", reply: (me) => me + " \u0631\u062F\u0651 \u0639\u0644\u0649 \u062A\u0639\u0644\u064A\u0642\u0643",
+  mention: (me) => me + " \u0623\u0634\u0627\u0631 \u0625\u0644\u064A\u0643 \u0641\u064A \u0644\u062D\u0638\u0629", mentionc: (me) => me + " \u0623\u0634\u0627\u0631 \u0625\u0644\u064A\u0643 \u0641\u064A \u062A\u0639\u0644\u064A\u0642", creact: (me) => me + " \u0623\u0639\u062C\u0628\u0647 \u062A\u0639\u0644\u064A\u0642\u0643",
 };
-// rcp: { uid: kind } — يُستبعد الفاعل ومن ليس في الجمهور ومن بيني وبينه حظر · الإعجاب بالتعليق: داخل التطبيق فقط (بلا إشعار هاتف)
+// rcp: { uid: kind } \u2014 \u064A\u064F\u0633\u062A\u0628\u0639\u062F \u0627\u0644\u0641\u0627\u0639\u0644 \u0648\u0645\u0646 \u0644\u064A\u0633 \u0641\u064A \u0627\u0644\u062C\u0645\u0647\u0648\u0631 \u0648\u0645\u0646 \u0628\u064A\u0646\u064A \u0648\u0628\u064A\u0646\u0647 \u062D\u0638\u0631 \u00B7 \u0627\u0644\u0625\u0639\u062C\u0627\u0628 \u0628\u0627\u0644\u062A\u0639\u0644\u064A\u0642: \u062F\u0627\u062E\u0644 \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0641\u0642\u0637 (\u0628\u0644\u0627 \u0625\u0634\u0639\u0627\u0631 \u0647\u0627\u062A\u0641)
 async function momNotes(token, env, ctx, doc, uid, claims, rcp, extra) {
   const aud = fsArr(doc, "aud"), pid = doc.name.split("/").pop();
   let to = Object.keys(rcp || {}).filter(u => u && u !== uid && aud.indexOf(u) >= 0);
@@ -4587,7 +4587,7 @@ async function momNotes(token, env, ctx, doc, uid, claims, rcp, extra) {
   const blk = to.length ? await blockedSet(token, to, uid) : new Set();
   to = to.filter(u => !blk.has(u));
   if (!to.length) return 0;
-  const me = String((await myName(token, uid, claims)) || "مستخدم سوا").slice(0, 80), now = Date.now();
+  const me = String((await myName(token, uid, claims)) || "\u0645\u0633\u062A\u062E\u062F\u0645 \u0633\u0648\u0627").slice(0, 80), now = Date.now();
   const snip = String((extra && extra.text) || fstr(doc, "text") || "").replace(/\s+/g, " ").slice(0, 140);
   const writes = to.map(u => {
     const f = { k: { stringValue: rcp[u] }, pid: { stringValue: pid }, from: { stringValue: uid }, name: { stringValue: me }, text: { stringValue: snip }, ts: { integerValue: String(now) } };
@@ -4598,9 +4598,9 @@ async function momNotes(token, env, ctx, doc, uid, claims, rcp, extra) {
   await fsCommit(token, writes).catch(e => console.log("mnote:", e && e.message));
   const ak = await ackSig(env, "av|" + uid);
   const jobs = to.filter(u => rcp[u] !== "creact").map(u => {
-    // C152: كإشعارات انستجرام — العنوان اسم الفاعل (وصورته بجانبه) والنصّ ما فعله
-    const k = rcp[u], title = me, e = (extra && extra.e) || "❤️";
-    const body = k === "like" ? e + (e === "❤️" ? " أعجبته لحظتك" : " تفاعل مع لحظتك") + (snip ? " · " + snip.slice(0, 70) : "") : MOM_NOTE_ACT[k] + (snip ? ": " + snip.slice(0, 110) : "");
+    // C152: \u0643\u0625\u0634\u0639\u0627\u0631\u0627\u062A \u0627\u0646\u0633\u062A\u062C\u0631\u0627\u0645 \u2014 \u0627\u0644\u0639\u0646\u0648\u0627\u0646 \u0627\u0633\u0645 \u0627\u0644\u0641\u0627\u0639\u0644 (\u0648\u0635\u0648\u0631\u062A\u0647 \u0628\u062C\u0627\u0646\u0628\u0647) \u0648\u0627\u0644\u0646\u0635\u0651 \u0645\u0627 \u0641\u0639\u0644\u0647
+    const k = rcp[u], title = me, e = (extra && extra.e) || "\u2764\uFE0F";
+    const body = k === "like" ? e + (e === "\u2764\uFE0F" ? " \u0623\u0639\u062C\u0628\u062A\u0647 \u0644\u062D\u0638\u062A\u0643" : " \u062A\u0641\u0627\u0639\u0644 \u0645\u0639 \u0644\u062D\u0638\u062A\u0643") + (snip ? " \u00B7 " + snip.slice(0, 70) : "") : MOM_NOTE_ACT[k] + (snip ? ": " + snip.slice(0, 110) : "");
     const d = { t: "moment", pid, from: uid, ak, k, title, body, ts: now }; if (extra && extra.cm) d.cm = extra.cm;
     return pushTo(token, [u], strData(d)).catch(e => console.log("push:", e && e.message));
   });
@@ -4611,7 +4611,7 @@ async function momNotes(token, env, ctx, doc, uid, claims, rcp, extra) {
 async function opMomentLike(uid, payload, env, claims, ctx) {
   if (!codeRate(uid, "moml", 300)) throw new Error("rate_limited");
   const pid = String((payload && payload.pid) || ""), on = !!(payload && payload.on);
-  const e = MOM_RX.indexOf(String((payload && payload.e) || "")) >= 0 ? String(payload.e) : "❤️";
+  const e = MOM_RX.indexOf(String((payload && payload.e) || "")) >= 0 ? String(payload.e) : "\u2764\uFE0F";
   if (!momPidOk(pid)) throw new Error("bad id");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const doc = await momGet(token, pid);
@@ -4633,7 +4633,7 @@ async function opMomentComment(uid, payload, env, claims, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const doc = await momGet(token, pid);
   if (!momCanSee(doc, uid)) throw new Error("not found");
-  // الردّ: سلسلةٌ بمستوى واحد — الردّ على ردٍّ يُعلَّق تحت التعليق الأصل ويُبلَّغ صاحب الردّ
+  // \u0627\u0644\u0631\u062F\u0651: \u0633\u0644\u0633\u0644\u0629\u064C \u0628\u0645\u0633\u062A\u0648\u0649 \u0648\u0627\u062D\u062F \u2014 \u0627\u0644\u0631\u062F\u0651 \u0639\u0644\u0649 \u0631\u062F\u064D\u0651 \u064A\u064F\u0639\u0644\u064E\u0651\u0642 \u062A\u062D\u062A \u0627\u0644\u062A\u0639\u0644\u064A\u0642 \u0627\u0644\u0623\u0635\u0644 \u0648\u064A\u064F\u0628\u0644\u064E\u0651\u063A \u0635\u0627\u062D\u0628 \u0627\u0644\u0631\u062F\u0651
   let re = null, reBy = null, reName = "";
   if (p.re) {
     const r0 = String(p.re);
@@ -4673,7 +4673,7 @@ async function opMomentUncomment(uid, payload, env, claims) {
   const cm = await fsGet(token, "moments/" + pid + "/cm/" + cmid).catch(() => null);
   if (!doc || !cm || !cm.fields) return { deleted: false };
   if (fstr(cm, "by") !== uid && fstr(doc, "by") !== uid && !isAdmin(env, claims)) throw new Error("not yours");
-  // حذف تعليقٍ أصل يحذف ردوده معه
+  // \u062D\u0630\u0641 \u062A\u0639\u0644\u064A\u0642\u064D \u0623\u0635\u0644 \u064A\u062D\u0630\u0641 \u0631\u062F\u0648\u062F\u0647 \u0645\u0639\u0647
   const del = [cm.name];
   if (!fstr(cm, "re")) {
     const all = await fsList(token, "moments/" + pid + "/cm").catch(() => []);
@@ -4685,11 +4685,11 @@ async function opMomentUncomment(uid, payload, env, claims) {
     updateMask: { fieldPaths: ["cc", "lastC"] }, currentDocument: { exists: true } }]).catch(() => {});
   return { deleted: true, n: del.length };
 }
-// الإعجاب بتعليق (يراه صاحبه في إشعارات اللحظات — بلا إشعار هاتف)
+// \u0627\u0644\u0625\u0639\u062C\u0627\u0628 \u0628\u062A\u0639\u0644\u064A\u0642 (\u064A\u0631\u0627\u0647 \u0635\u0627\u062D\u0628\u0647 \u0641\u064A \u0625\u0634\u0639\u0627\u0631\u0627\u062A \u0627\u0644\u0644\u062D\u0638\u0627\u062A \u2014 \u0628\u0644\u0627 \u0625\u0634\u0639\u0627\u0631 \u0647\u0627\u062A\u0641)
 async function opMomentCReact(uid, payload, env, claims, ctx) {
   if (!codeRate(uid, "momr", 300)) throw new Error("rate_limited");
   const pid = String((payload && payload.pid) || ""), cmid = String((payload && payload.cmid) || ""), on = !!(payload && payload.on);
-  const e = MOM_RX.indexOf(String((payload && payload.e) || "")) >= 0 ? String(payload.e) : "❤️";   // C136: تفاعلٌ على التعليق
+  const e = MOM_RX.indexOf(String((payload && payload.e) || "")) >= 0 ? String(payload.e) : "\u2764\uFE0F";   // C136: \u062A\u0641\u0627\u0639\u0644\u064C \u0639\u0644\u0649 \u0627\u0644\u062A\u0639\u0644\u064A\u0642
   if (!momPidOk(pid) || !momCmidOk(cmid)) throw new Error("bad id");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const doc = await momGet(token, pid);
@@ -4705,7 +4705,7 @@ async function opMomentCReact(uid, payload, env, claims, ctx) {
   if (on && !had) await momNotes(token, env, ctx, doc, uid, claims, { [fstr(cm, "by")]: "creact" }, { text: fstr(cm, "text"), cm: cmid, e });
   return { on, e };
 }
-// C136: تعديل تعليقي أو ردّي (والإشارات) — يُبلَّغ من أُضيفت الإشارة إليه فقط
+// C136: \u062A\u0639\u062F\u064A\u0644 \u062A\u0639\u0644\u064A\u0642\u064A \u0623\u0648 \u0631\u062F\u0651\u064A (\u0648\u0627\u0644\u0625\u0634\u0627\u0631\u0627\u062A) \u2014 \u064A\u064F\u0628\u0644\u064E\u0651\u063A \u0645\u0646 \u0623\u064F\u0636\u064A\u0641\u062A \u0627\u0644\u0625\u0634\u0627\u0631\u0629 \u0625\u0644\u064A\u0647 \u0641\u0642\u0637
 async function opMomentCEdit(uid, payload, env, claims, ctx) {
   if (!codeRate(uid, "momce", 60)) throw new Error("rate_limited");
   const p = payload || {}, pid = String(p.pid || ""), cmid = String(p.cmid || "");
@@ -4729,7 +4729,7 @@ async function opMomentCEdit(uid, payload, env, claims, ctx) {
   if (Object.keys(rcp).length) await momNotes(token, env, ctx, doc, uid, claims, rcp, { text, cm: cmid });
   return { edited: now };
 }
-// تعديل نصّ لحظتي (والإشارات) — يُبلَّغ من أُضيفت الإشارة إليه فقط
+// \u062A\u0639\u062F\u064A\u0644 \u0646\u0635\u0651 \u0644\u062D\u0638\u062A\u064A (\u0648\u0627\u0644\u0625\u0634\u0627\u0631\u0627\u062A) \u2014 \u064A\u064F\u0628\u0644\u064E\u0651\u063A \u0645\u0646 \u0623\u064F\u0636\u064A\u0641\u062A \u0627\u0644\u0625\u0634\u0627\u0631\u0629 \u0625\u0644\u064A\u0647 \u0641\u0642\u0637
 async function opMomentEdit(uid, payload, env, claims, ctx) {
   if (!codeRate(uid, "mome", 60)) throw new Error("rate_limited");
   const p = payload || {}, pid = String(p.pid || "");
@@ -4748,7 +4748,7 @@ async function opMomentEdit(uid, payload, env, claims, ctx) {
   if (Object.keys(rcp).length) await momNotes(token, env, ctx, doc, uid, claims, rcp, { text });
   return { edited: now, men: men.length };
 }
-// فتحتُ الإشعارات ⇒ وقت آخر اطّلاع (يُزامَن على كلّ أجهزتي) + تنظيف ما تجاوز ٣٠ يوماً
+// \u0641\u062A\u062D\u062A\u064F \u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062A \u21D2 \u0648\u0642\u062A \u0622\u062E\u0631 \u0627\u0637\u0651\u0644\u0627\u0639 (\u064A\u064F\u0632\u0627\u0645\u064E\u0646 \u0639\u0644\u0649 \u0643\u0644\u0651 \u0623\u062C\u0647\u0632\u062A\u064A) + \u062A\u0646\u0638\u064A\u0641 \u0645\u0627 \u062A\u062C\u0627\u0648\u0632 \u0663\u0660 \u064A\u0648\u0645\u0627\u064B
 async function opMomentSeen(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const ts = Math.min(Date.now(), Math.floor(Number(payload && payload.ts) || Date.now()));
@@ -4777,7 +4777,7 @@ async function opMomentVote(uid, payload, env) {
     updateMask: { fieldPaths: [fp("votes", uid)] }, currentDocument: { exists: true } }]);
   return { idx };
 }
-// Cron: حجوزات رفعٍ متروكة (لحظةٌ لم تُنشر) ⇒ حذف وسائطها
+// Cron: \u062D\u062C\u0648\u0632\u0627\u062A \u0631\u0641\u0639\u064D \u0645\u062A\u0631\u0648\u0643\u0629 (\u0644\u062D\u0638\u0629\u064C \u0644\u0645 \u062A\u064F\u0646\u0634\u0631) \u21D2 \u062D\u0630\u0641 \u0648\u0633\u0627\u0626\u0637\u0647\u0627
 async function momentqGc(env, max) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
@@ -4790,7 +4790,7 @@ async function momentqGc(env, max) {
   }
   return { gc: n };
 }
-// Cron: إزالة المنتهية ووسائطها
+// Cron: \u0625\u0632\u0627\u0644\u0629 \u0627\u0644\u0645\u0646\u062A\u0647\u064A\u0629 \u0648\u0648\u0633\u0627\u0626\u0637\u0647\u0627
 async function storyGc(env, max) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const now = Date.now();
@@ -4810,8 +4810,8 @@ async function storyGc(env, max) {
   }
   return { gc: n };
 }
-// v58: رموز سوا (١٠ أرقام) لجهات اتّصالي — بدل «عضو · A1B2». لجهات اتّصالي فقط (acl/{uid})، ولمن لم يُخفِ رمزه.
-//      من لا رمز له بعد يُنشأ له (حتّى ٥ في الطلب).
+// v58: \u0631\u0645\u0648\u0632 \u0633\u0648\u0627 (\u0661\u0660 \u0623\u0631\u0642\u0627\u0645) \u0644\u062C\u0647\u0627\u062A \u0627\u062A\u0651\u0635\u0627\u0644\u064A \u2014 \u0628\u062F\u0644 \u00AB\u0639\u0636\u0648 \u00B7 A1B2\u00BB. \u0644\u062C\u0647\u0627\u062A \u0627\u062A\u0651\u0635\u0627\u0644\u064A \u0641\u0642\u0637 (acl/{uid})\u060C \u0648\u0644\u0645\u0646 \u0644\u0645 \u064A\u064F\u062E\u0641\u0650 \u0631\u0645\u0632\u0647.
+//      \u0645\u0646 \u0644\u0627 \u0631\u0645\u0632 \u0644\u0647 \u0628\u0639\u062F \u064A\u064F\u0646\u0634\u0623 \u0644\u0647 (\u062D\u062A\u0651\u0649 \u0665 \u0641\u064A \u0627\u0644\u0637\u0644\u0628).
 async function opCodeOf(uid, payload, env) {
   if (!codeRate(uid, "codeof", 40)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -4839,7 +4839,7 @@ async function opCodeRequests(uid, payload, env) {
   return { incoming: ins.slice(0, 100).map(d => reqOut(d, "in")).sort(by), outgoing: outs.slice(0, 100).map(d => reqOut(d, "out")).sort(by),
     vouches: vins.slice(0, 50).map(d => ({ uid: d.name.split("/").pop(), name: fstr(d, "name") || null, phone: fstr(d, "phone") || null, ts: fsInt(d, "ts") })).sort(by) };
 }
-// القبول: جهتا اتّصال (كالرابط الشخصيّ) + محادثةٌ ثنائيّة أوّل رسائلها رسالة التعريف
+// \u0627\u0644\u0642\u0628\u0648\u0644: \u062C\u0647\u062A\u0627 \u0627\u062A\u0651\u0635\u0627\u0644 (\u0643\u0627\u0644\u0631\u0627\u0628\u0637 \u0627\u0644\u0634\u062E\u0635\u064A\u0651) + \u0645\u062D\u0627\u062F\u062B\u0629\u064C \u062B\u0646\u0627\u0626\u064A\u0651\u0629 \u0623\u0648\u0651\u0644 \u0631\u0633\u0627\u0626\u0644\u0647\u0627 \u0631\u0633\u0627\u0644\u0629 \u0627\u0644\u062A\u0639\u0631\u064A\u0641
 async function acceptReq(token, me, from, claims, ctx) {
   const rq = await fsGet(token, "accounts/" + me + "/creq/" + from);
   const theirName = fstr(rq, "name") || null, text = fstr(rq, "text") || "";
@@ -4876,7 +4876,7 @@ async function acceptReq(token, me, from, claims, ctx) {
     ]).catch(e => console.log("seed msg:", e && e.message));
   }
   await sigTo(token, [from, me], "reqok");
-  const job = pushTo(token, [from], strData({ t: "reqok", from: me, cid: cid, title: myNm || "سوا", body: "قبل طلب التواصل — يمكنكما المراسلة الآن ✓", ts: now }))
+  const job = pushTo(token, [from], strData({ t: "reqok", from: me, cid: cid, title: myNm || "\u0633\u0648\u0627", body: "\u0642\u0628\u0644 \u0637\u0644\u0628 \u0627\u0644\u062A\u0648\u0627\u0635\u0644 \u2014 \u064A\u0645\u0643\u0646\u0643\u0645\u0627 \u0627\u0644\u0645\u0631\u0627\u0633\u0644\u0629 \u0627\u0644\u0622\u0646 \u2713", ts: now }))
     .catch(e => console.log("push:", e && e.message));
   if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
   return { cid, uid: from, name: theirName };
@@ -4890,7 +4890,7 @@ async function opCodeRespond(uid, payload, env, claims, ctx) {
     if (!(await fsGet(token, "accounts/" + uid + "/creq/" + from))) throw new Error("request not found");
     return Object.assign({ accepted: true }, await acceptReq(token, uid, from, claims, ctx));
   }
-  // الرفض: يُحذف الطلب عندي وحدي — يبقى عنده «بانتظار الموافقة» فلا يعرف أنّه رُفض ولا يكرّر الطلب
+  // \u0627\u0644\u0631\u0641\u0636: \u064A\u064F\u062D\u0630\u0641 \u0627\u0644\u0637\u0644\u0628 \u0639\u0646\u062F\u064A \u0648\u062D\u062F\u064A \u2014 \u064A\u0628\u0642\u0649 \u0639\u0646\u062F\u0647 \u00AB\u0628\u0627\u0646\u062A\u0638\u0627\u0631 \u0627\u0644\u0645\u0648\u0627\u0641\u0642\u0629\u00BB \u0641\u0644\u0627 \u064A\u0639\u0631\u0641 \u0623\u0646\u0651\u0647 \u0631\u064F\u0641\u0636 \u0648\u0644\u0627 \u064A\u0643\u0631\u0651\u0631 \u0627\u0644\u0637\u0644\u0628
   await fsCommit(token, [{ delete: DOC_ROOT + "/accounts/" + uid + "/creq/" + from }]);
   if (action === "block") {
     const path = "accounts/" + uid + "/chatprefs/main";
@@ -4926,14 +4926,14 @@ async function opCodePrivacy(uid, payload, env) {
   return { findable };
 }
 
-/* ---------- 32) حذف الحساب (شرط Google Play) ----------
-   account.delete: فوراً — بيانات الحساب كلّها، روابط جهات الاتّصال والطلبات (في الاتّجاهين)، الرمز، الأجهزة، الإعدادات،
-   المواعيد والدعوات التي أنشأها، عضويّته في المحادثات (رسائله عند الآخرين تبقى باسم «حساب محذوف»)، عضويّته في العائلات
-   التي لا يملكها، الحضور والصلاحيّات في RTDB، ثمّ هويّة Firebase Auth نفسها.
-   ما يحتاج طلباتٍ كثيرة يُكمله الـCron (purge/{id}، حدّ ٥٠ طلباً فرعيّاً لكلّ تشغيل):
-     family — عائلةٌ يملكها: تنتقل ملكيّتها لأعلى عضوٍ رتبةً (محرّر ثمّ مشاهد، الأقدم أوّلاً)، أو تُحذف كاملةً إن كان وحده
-     chat   — محادثته المحفوظة: الأيّام والوسائط وقطعها */
-const DELETED_NAME = "حساب محذوف";
+/* ---------- 32) \u062D\u0630\u0641 \u0627\u0644\u062D\u0633\u0627\u0628 (\u0634\u0631\u0637 Google Play) ----------
+   account.delete: \u0641\u0648\u0631\u0627\u064B \u2014 \u0628\u064A\u0627\u0646\u0627\u062A \u0627\u0644\u062D\u0633\u0627\u0628 \u0643\u0644\u0651\u0647\u0627\u060C \u0631\u0648\u0627\u0628\u0637 \u062C\u0647\u0627\u062A \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 \u0648\u0627\u0644\u0637\u0644\u0628\u0627\u062A (\u0641\u064A \u0627\u0644\u0627\u062A\u0651\u062C\u0627\u0647\u064A\u0646)\u060C \u0627\u0644\u0631\u0645\u0632\u060C \u0627\u0644\u0623\u062C\u0647\u0632\u0629\u060C \u0627\u0644\u0625\u0639\u062F\u0627\u062F\u0627\u062A\u060C
+   \u0627\u0644\u0645\u0648\u0627\u0639\u064A\u062F \u0648\u0627\u0644\u062F\u0639\u0648\u0627\u062A \u0627\u0644\u062A\u064A \u0623\u0646\u0634\u0623\u0647\u0627\u060C \u0639\u0636\u0648\u064A\u0651\u062A\u0647 \u0641\u064A \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0627\u062A (\u0631\u0633\u0627\u0626\u0644\u0647 \u0639\u0646\u062F \u0627\u0644\u0622\u062E\u0631\u064A\u0646 \u062A\u0628\u0642\u0649 \u0628\u0627\u0633\u0645 \u00AB\u062D\u0633\u0627\u0628 \u0645\u062D\u0630\u0648\u0641\u00BB)\u060C \u0639\u0636\u0648\u064A\u0651\u062A\u0647 \u0641\u064A \u0627\u0644\u0639\u0627\u0626\u0644\u0627\u062A
+   \u0627\u0644\u062A\u064A \u0644\u0627 \u064A\u0645\u0644\u0643\u0647\u0627\u060C \u0627\u0644\u062D\u0636\u0648\u0631 \u0648\u0627\u0644\u0635\u0644\u0627\u062D\u064A\u0651\u0627\u062A \u0641\u064A RTDB\u060C \u062B\u0645\u0651 \u0647\u0648\u064A\u0651\u0629 Firebase Auth \u0646\u0641\u0633\u0647\u0627.
+   \u0645\u0627 \u064A\u062D\u062A\u0627\u062C \u0637\u0644\u0628\u0627\u062A\u064D \u0643\u062B\u064A\u0631\u0629 \u064A\u064F\u0643\u0645\u0644\u0647 \u0627\u0644\u0640Cron (purge/{id}\u060C \u062D\u062F\u0651 \u0665\u0660 \u0637\u0644\u0628\u0627\u064B \u0641\u0631\u0639\u064A\u0651\u0627\u064B \u0644\u0643\u0644\u0651 \u062A\u0634\u063A\u064A\u0644):
+     family \u2014 \u0639\u0627\u0626\u0644\u0629\u064C \u064A\u0645\u0644\u0643\u0647\u0627: \u062A\u0646\u062A\u0642\u0644 \u0645\u0644\u0643\u064A\u0651\u062A\u0647\u0627 \u0644\u0623\u0639\u0644\u0649 \u0639\u0636\u0648\u064D \u0631\u062A\u0628\u0629\u064B (\u0645\u062D\u0631\u0651\u0631 \u062B\u0645\u0651 \u0645\u0634\u0627\u0647\u062F\u060C \u0627\u0644\u0623\u0642\u062F\u0645 \u0623\u0648\u0651\u0644\u0627\u064B)\u060C \u0623\u0648 \u062A\u064F\u062D\u0630\u0641 \u0643\u0627\u0645\u0644\u0629\u064B \u0625\u0646 \u0643\u0627\u0646 \u0648\u062D\u062F\u0647
+     chat   \u2014 \u0645\u062D\u0627\u062F\u062B\u062A\u0647 \u0627\u0644\u0645\u062D\u0641\u0648\u0638\u0629: \u0627\u0644\u0623\u064A\u0651\u0627\u0645 \u0648\u0627\u0644\u0648\u0633\u0627\u0626\u0637 \u0648\u0642\u0637\u0639\u0647\u0627 */
+const DELETED_NAME = "\u062D\u0633\u0627\u0628 \u0645\u062D\u0630\u0648\u0641";
 const GROUP_SUBS = ["persons", "relations", "events", "changelog", "photos", "members"];
 async function opAccountDelete(uid, payload, env, claims) {
   if (!payload || payload.confirm !== "DELETE") throw new Error("confirm required");
@@ -4945,7 +4945,7 @@ async function opAccountDelete(uid, payload, env, claims) {
     ...["people", "groups", "devices", "creq", "creqout", "contacts", "schedules"].map(c => fsList(token, "accounts/" + uid + "/" + c).catch(() => [])),
   ]);
   const writes = [], rt = {}, purge = [], now = Date.now();
-  // جهات الاتّصال والطلبات — في الاتّجاهين
+  // \u062C\u0647\u0627\u062A \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 \u0648\u0627\u0644\u0637\u0644\u0628\u0627\u062A \u2014 \u0641\u064A \u0627\u0644\u0627\u062A\u0651\u062C\u0627\u0647\u064A\u0646
   for (const d of people) { writes.push({ delete: d.name }, { delete: P("accounts/" + idOf(d) + "/people/" + uid) }); rt["acl/" + idOf(d) + "/" + uid] = null; }
   for (const d of creq) writes.push({ delete: d.name }, { delete: P("accounts/" + idOf(d) + "/creqout/" + uid) });
   for (const d of creqout) writes.push({ delete: d.name }, { delete: P("accounts/" + idOf(d) + "/creq/" + uid) });
@@ -4953,14 +4953,14 @@ async function opAccountDelete(uid, payload, env, claims) {
   writes.push({ delete: P("accounts/" + uid + "/chatprefs/main") });
   const code = fstr(acc, "code");
   if (code) writes.push({ delete: P("codes/" + code) });
-  // العائلات: لا يملكها ⇒ يخرج الآن · يملكها ⇒ مهمّة للـCron (نقل الملكيّة أو الحذف الكامل)
+  // \u0627\u0644\u0639\u0627\u0626\u0644\u0627\u062A: \u0644\u0627 \u064A\u0645\u0644\u0643\u0647\u0627 \u21D2 \u064A\u062E\u0631\u062C \u0627\u0644\u0622\u0646 \u00B7 \u064A\u0645\u0644\u0643\u0647\u0627 \u21D2 \u0645\u0647\u0645\u0651\u0629 \u0644\u0644\u0640Cron (\u0646\u0642\u0644 \u0627\u0644\u0645\u0644\u0643\u064A\u0651\u0629 \u0623\u0648 \u0627\u0644\u062D\u0630\u0641 \u0627\u0644\u0643\u0627\u0645\u0644)
   for (const d of groups) {
     const gid = idOf(d);
     writes.push({ delete: d.name });
     if (fstr(d, "role") === "owner") purge.push({ id: "fam_" + gid + "_" + uid, kind: "family", gid });
     else writes.push({ delete: P("groups/" + gid + "/members/" + uid) });
   }
-  // المحادثات
+  // \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0627\u062A
   let chats = [];
   try {
     const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
@@ -4984,20 +4984,20 @@ async function opAccountDelete(uid, payload, env, claims) {
     if (!members.length) { fields.deleted = { booleanValue: true }; mask.push("deleted"); }
     writes.push({ update: { name: c.name, fields }, updateMask: { fieldPaths: mask } });
   }
-  // المواعيد التي أنشأها ودعوات «رابطي الشخصيّ»
+  // \u0627\u0644\u0645\u0648\u0627\u0639\u064A\u062F \u0627\u0644\u062A\u064A \u0623\u0646\u0634\u0623\u0647\u0627 \u0648\u062F\u0639\u0648\u0627\u062A \u00AB\u0631\u0627\u0628\u0637\u064A \u0627\u0644\u0634\u062E\u0635\u064A\u0651\u00BB
   for (const s of await fsQueryEq(token, "scheds", { by: uid }, 100).catch(() => [])) writes.push({ delete: s.name });
   for (const s of await fsQueryEq(token, "pinvites", { uid: uid }, 100).catch(() => [])) writes.push({ delete: s.name });
   for (const t of purge) writes.push({ update: { name: P("purge/" + t.id), fields: { kind: { stringValue: t.kind }, uid: { stringValue: uid },
     gid: t.gid ? { stringValue: t.gid } : { nullValue: null }, cid: t.cid ? { stringValue: t.cid } : { nullValue: null }, ts: { integerValue: String(now) } } } });
   writes.push({ delete: P("accounts/" + uid) });
-  writes.push({ delete: P("avatars/" + uid) });   // v37: الصورة
+  writes.push({ delete: P("avatars/" + uid) });   // v37: \u0627\u0644\u0635\u0648\u0631\u0629
   await commitChunks(token, writes);
-  // RTDB: حضوري، صلاحيّاتي، صندوق مكالماتي، ومن كان يرى حضوري
+  // RTDB: \u062D\u0636\u0648\u0631\u064A\u060C \u0635\u0644\u0627\u062D\u064A\u0651\u0627\u062A\u064A\u060C \u0635\u0646\u062F\u0648\u0642 \u0645\u0643\u0627\u0644\u0645\u0627\u062A\u064A\u060C \u0648\u0645\u0646 \u0643\u0627\u0646 \u064A\u0631\u0649 \u062D\u0636\u0648\u0631\u064A
   try { const acl = await rtdbGet(token, "acl/" + uid); for (const o in (acl || {})) rt["acl/" + o + "/" + uid] = null; } catch (e) {}
   Object.assign(rt, { ["status/" + uid]: null, ["acl/" + uid]: null, ["inbox/" + uid]: null, ["blk/" + uid]: null });
   try { await rtdbPatch(token, rt); } catch (e) { console.log("rtdb del:", e && e.message); }
   PROFILE_CACHE.delete(uid);
-  // الهويّة نفسها (Firebase Auth) — آخر خطوة
+  // \u0627\u0644\u0647\u0648\u064A\u0651\u0629 \u0646\u0641\u0633\u0647\u0627 (Firebase Auth) \u2014 \u0622\u062E\u0631 \u062E\u0637\u0648\u0629
   let authDeleted = false;
   try {
     const r = await fetch("https://identitytoolkit.googleapis.com/v1/projects/" + PROJECT_ID + "/accounts:delete", {
@@ -5007,7 +5007,7 @@ async function opAccountDelete(uid, payload, env, claims) {
   } catch (e) { console.log("auth delete:", e && e.message); }
   return { deleted: true, authDeleted, queued: purge.length, chats: chats.length, contacts: people.length };
 }
-// الـCron: يكمل مهامّ purge ضمن حدٍّ من الطلبات الفرعيّة (budget). المهمّة تبقى حتّى تكتمل.
+// \u0627\u0644\u0640Cron: \u064A\u0643\u0645\u0644 \u0645\u0647\u0627\u0645\u0651 purge \u0636\u0645\u0646 \u062D\u062F\u064D\u0651 \u0645\u0646 \u0627\u0644\u0637\u0644\u0628\u0627\u062A \u0627\u0644\u0641\u0631\u0639\u064A\u0651\u0629 (budget). \u0627\u0644\u0645\u0647\u0645\u0651\u0629 \u062A\u0628\u0642\u0649 \u062D\u062A\u0651\u0649 \u062A\u0643\u062A\u0645\u0644.
 async function purgeWork(env, budget) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   let used = 1, done = 0;
@@ -5026,7 +5026,7 @@ async function purgeWork(env, budget) {
   }
   return { purged: done, used };
 }
-// يحذف مستندات مجموعةٍ فرعيّة على دفعات (قائمة ٣٠٠ + commit) — يعيد true إن فرغت
+// \u064A\u062D\u0630\u0641 \u0645\u0633\u062A\u0646\u062F\u0627\u062A \u0645\u062C\u0645\u0648\u0639\u0629\u064D \u0641\u0631\u0639\u064A\u0651\u0629 \u0639\u0644\u0649 \u062F\u0641\u0639\u0627\u062A (\u0642\u0627\u0626\u0645\u0629 \u0663\u0660\u0660 + commit) \u2014 \u064A\u0639\u064A\u062F true \u0625\u0646 \u0641\u0631\u063A\u062A
 async function purgeColl(token, rel, spend) {
   for (;;) {
     if (!spend()) return false;
@@ -5044,7 +5044,7 @@ async function purgeFamily(token, gid, uid, spend) {
   const members = await fsList(token, "groups/" + gid + "/members");
   const live = members.filter(m => m.name.split("/").pop() !== uid && fstr(m, "adoptedFrom") !== uid);
   if (live.length) {
-    // نقل الملكيّة: محرّر قبل مشاهد، والأقدم انضماماً أوّلاً
+    // \u0646\u0642\u0644 \u0627\u0644\u0645\u0644\u0643\u064A\u0651\u0629: \u0645\u062D\u0631\u0651\u0631 \u0642\u0628\u0644 \u0645\u0634\u0627\u0647\u062F\u060C \u0648\u0627\u0644\u0623\u0642\u062F\u0645 \u0627\u0646\u0636\u0645\u0627\u0645\u0627\u064B \u0623\u0648\u0651\u0644\u0627\u064B
     const rank = (m) => ROLE_RANK[fstr(m, "role")] || 0;
     const ts = (m) => { const v = m.fields && m.fields.joinedTs && m.fields.joinedTs.timestampValue; return v ? Date.parse(v) : 0; };
     live.sort((a, b) => rank(b) - rank(a) || ts(a) - ts(b));
@@ -5060,7 +5060,7 @@ async function purgeFamily(token, gid, uid, spend) {
     if (spend(3)) { try { await famChatSync(token, gid); } catch (e) {} }
     return true;
   }
-  // وحده فيها: حذفٌ كامل للشجرة
+  // \u0648\u062D\u062F\u0647 \u0641\u064A\u0647\u0627: \u062D\u0630\u0641\u064C \u0643\u0627\u0645\u0644 \u0644\u0644\u0634\u062C\u0631\u0629
   for (const sub of GROUP_SUBS) if (!(await purgeColl(token, "groups/" + gid + "/" + sub, spend))) return false;
   if (!spend(2)) return false;
   await fsCommit(token, [{ delete: DOC_ROOT + "/groups/" + gid }, { delete: DOC_ROOT + "/chats/fam_" + gid }]).catch(() => {});
@@ -5082,10 +5082,10 @@ async function purgeChat(token, cid, spend) {
   return true;
 }
 
-/* ---------- 33) لوحة الاستهلاك (للمدير) ----------
-   عدّاداتٌ يوميّة في stats/{YYYYMMDD}: الطلبات لكلّ عمليّة (ops.*) · الأخطاء (err.*) · الإشعارات المرسلة · بيانات TURN المُعطاة لكلّ مزوّد.
-   تُجمَع في الذاكرة وتُرسَل دفعةً (كلّ ٤٠ حدثاً أو ٥ دقائق) بزياداتٍ ذرّيّة — كتابةٌ واحدة بدل كتابةٍ لكلّ طلب.
-   admin.stats: للمدير وحده (السرّ ADMIN_EMAIL = بريد حسابه في Google، مؤكَّد). */
+/* ---------- 33) \u0644\u0648\u062D\u0629 \u0627\u0644\u0627\u0633\u062A\u0647\u0644\u0627\u0643 (\u0644\u0644\u0645\u062F\u064A\u0631) ----------
+   \u0639\u062F\u0651\u0627\u062F\u0627\u062A\u064C \u064A\u0648\u0645\u064A\u0651\u0629 \u0641\u064A stats/{YYYYMMDD}: \u0627\u0644\u0637\u0644\u0628\u0627\u062A \u0644\u0643\u0644\u0651 \u0639\u0645\u0644\u064A\u0651\u0629 (ops.*) \u00B7 \u0627\u0644\u0623\u062E\u0637\u0627\u0621 (err.*) \u00B7 \u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062A \u0627\u0644\u0645\u0631\u0633\u0644\u0629 \u00B7 \u0628\u064A\u0627\u0646\u0627\u062A TURN \u0627\u0644\u0645\u064F\u0639\u0637\u0627\u0629 \u0644\u0643\u0644\u0651 \u0645\u0632\u0648\u0651\u062F.
+   \u062A\u064F\u062C\u0645\u064E\u0639 \u0641\u064A \u0627\u0644\u0630\u0627\u0643\u0631\u0629 \u0648\u062A\u064F\u0631\u0633\u064E\u0644 \u062F\u0641\u0639\u0629\u064B (\u0643\u0644\u0651 \u0664\u0660 \u062D\u062F\u062B\u0627\u064B \u0623\u0648 \u0665 \u062F\u0642\u0627\u0626\u0642) \u0628\u0632\u064A\u0627\u062F\u0627\u062A\u064D \u0630\u0631\u0651\u064A\u0651\u0629 \u2014 \u0643\u062A\u0627\u0628\u0629\u064C \u0648\u0627\u062D\u062F\u0629 \u0628\u062F\u0644 \u0643\u062A\u0627\u0628\u0629\u064D \u0644\u0643\u0644\u0651 \u0637\u0644\u0628.
+   admin.stats: \u0644\u0644\u0645\u062F\u064A\u0631 \u0648\u062D\u062F\u0647 (\u0627\u0644\u0633\u0631\u0651 ADMIN_EMAIL = \u0628\u0631\u064A\u062F \u062D\u0633\u0627\u0628\u0647 \u0641\u064A Google\u060C \u0645\u0624\u0643\u064E\u0651\u062F). */
 const STATS = { day: null, n: 0, at: Date.now(), m: {} };
 const HEAVY_OPS = new Set(["boot", "people.list", "profile.set", "account.delete", "gcall.start", "gcall.add", "sched.set", "bulk.import", "account.adopt", "group.members"]);
 function stat(key, k) {
@@ -5112,7 +5112,7 @@ async function opAdminStats(uid, payload, env, claims) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const days = (await fsList(token, "stats").catch(() => [])).map(d => ({ day: d.name.split("/").pop(), v: fsToJs({ mapValue: { fields: d.fields || {} } }) || {} }))
     .sort((a, b) => b.day.localeCompare(a.day)).slice(0, 14);
-  const cnt = async (c) => {   // عدّ مجموعةٍ في الجذر (قراءةٌ واحدة لكلّ ١٠٠٠ وثيقة)
+  const cnt = async (c) => {   // \u0639\u062F\u0651 \u0645\u062C\u0645\u0648\u0639\u0629\u064D \u0641\u064A \u0627\u0644\u062C\u0630\u0631 (\u0642\u0631\u0627\u0621\u0629\u064C \u0648\u0627\u062D\u062F\u0629 \u0644\u0643\u0644\u0651 \u0661\u0660\u0660\u0660 \u0648\u062B\u064A\u0642\u0629)
     try {
       const res = await fetch(FS_BASE + ":runAggregationQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
         body: JSON.stringify({ structuredAggregationQuery: { structuredQuery: { from: [{ collectionId: c }] }, aggregations: [{ alias: "n", count: {} }] } }) });
@@ -5126,10 +5126,10 @@ async function opAdminStats(uid, payload, env, claims) {
   return { admin: true, days, totals: { accounts, chats, groups, purgePending: purge, openReports }, ver: VER };
 }
 
-/* ---------- 34) البلاغات (سياسة Google Play للمحتوى من المستخدمين) ----------
-   report.create {cid?, target?, reason, note}: المبلِّغ عضوٌ في المحادثة ⇒ يُرفق آخر ٢٠ رسالة (نصوصها مقتطعة) ليراجعها المدير.
-   reports/{id} = { by, byName, target, cid, type, reason, note, sample(JSON), ts, status: open|closed } — للخادم وحده.
-   admin.reports / admin.reportClose: للمدير (ADMIN_EMAIL). */
+/* ---------- 34) \u0627\u0644\u0628\u0644\u0627\u063A\u0627\u062A (\u0633\u064A\u0627\u0633\u0629 Google Play \u0644\u0644\u0645\u062D\u062A\u0648\u0649 \u0645\u0646 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645\u064A\u0646) ----------
+   report.create {cid?, target?, reason, note}: \u0627\u0644\u0645\u0628\u0644\u0650\u0651\u063A \u0639\u0636\u0648\u064C \u0641\u064A \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629 \u21D2 \u064A\u064F\u0631\u0641\u0642 \u0622\u062E\u0631 \u0662\u0660 \u0631\u0633\u0627\u0644\u0629 (\u0646\u0635\u0648\u0635\u0647\u0627 \u0645\u0642\u062A\u0637\u0639\u0629) \u0644\u064A\u0631\u0627\u062C\u0639\u0647\u0627 \u0627\u0644\u0645\u062F\u064A\u0631.
+   reports/{id} = { by, byName, target, cid, type, reason, note, sample(JSON), ts, status: open|closed } \u2014 \u0644\u0644\u062E\u0627\u062F\u0645 \u0648\u062D\u062F\u0647.
+   admin.reports / admin.reportClose: \u0644\u0644\u0645\u062F\u064A\u0631 (ADMIN_EMAIL). */
 const REPORT_REASONS = ["spam", "harassment", "hate", "violence", "sexual", "scam", "impersonation", "other"];
 async function recentMsgs(token, cid, n) {
   const res = await fetch(FS_BASE + "/chats/" + cid + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
@@ -5153,11 +5153,11 @@ async function opReportCreate(uid, payload, env, claims) {
     type = fstr(c, "type");
     if (!target && type === "dm") target = fsArr(c, "members").find(x => x !== uid) || null;
     try { sample = await recentMsgs(token, cid, 20); } catch (e) {}
-    // v36: السرّيّة لا يقرؤها الخادم — المُبلِّغ يرفق آخر رسائلها من جهازه (مفكوكةً) ليراجعها فريقنا
+    // v36: \u0627\u0644\u0633\u0631\u0651\u064A\u0651\u0629 \u0644\u0627 \u064A\u0642\u0631\u0624\u0647\u0627 \u0627\u0644\u062E\u0627\u062F\u0645 \u2014 \u0627\u0644\u0645\u064F\u0628\u0644\u0650\u0651\u063A \u064A\u0631\u0641\u0642 \u0622\u062E\u0631 \u0631\u0633\u0627\u0626\u0644\u0647\u0627 \u0645\u0646 \u062C\u0647\u0627\u0632\u0647 (\u0645\u0641\u0643\u0648\u0643\u0629\u064B) \u0644\u064A\u0631\u0627\u062C\u0639\u0647\u0627 \u0641\u0631\u064A\u0642\u0646\u0627
     if (e2eOf(c) && Array.isArray(payload.e2eSample)) sample = payload.e2eSample.slice(-20).map(x => ({ by: segOk(String((x && x.by) || "")) ? x.by : null,
       type: "text", text: String((x && x.text) || "").slice(0, 300), ts: Number((x && x.ts) || 0) || 0, e2e: true }));
   }
-  // C150: الإبلاغ عن لحظة أو تعليق — يُرفق نصّها، ويُسجَّل المبلِّغ عليها؛ ٣ مبلِّغين مختلفين ⇒ تُحجب عن الجميع (held) حتّى يراجعها المدير
+  // C150: \u0627\u0644\u0625\u0628\u0644\u0627\u063A \u0639\u0646 \u0644\u062D\u0638\u0629 \u0623\u0648 \u062A\u0639\u0644\u064A\u0642 \u2014 \u064A\u064F\u0631\u0641\u0642 \u0646\u0635\u0651\u0647\u0627\u060C \u0648\u064A\u064F\u0633\u062C\u064E\u0651\u0644 \u0627\u0644\u0645\u0628\u0644\u0650\u0651\u063A \u0639\u0644\u064A\u0647\u0627\u061B \u0663 \u0645\u0628\u0644\u0650\u0651\u063A\u064A\u0646 \u0645\u062E\u062A\u0644\u0641\u064A\u0646 \u21D2 \u062A\u064F\u062D\u062C\u0628 \u0639\u0646 \u0627\u0644\u062C\u0645\u064A\u0639 (held) \u062D\u062A\u0651\u0649 \u064A\u0631\u0627\u062C\u0639\u0647\u0627 \u0627\u0644\u0645\u062F\u064A\u0631
   let pid = null, cmid = null;
   if (payload.moment && typeof payload.moment === "object") {
     pid = String(payload.moment.pid || ""); cmid = payload.moment.cmid ? String(payload.moment.cmid) : null;
@@ -5187,9 +5187,9 @@ async function opReportCreate(uid, payload, env, claims) {
   stat("report");
   return { id };
 }
-/* ---------- C131) تقييم جودة المكالمات ----------
-   qa.rate: المختبِر (أو المدير) يقيّم المكالمة بعد انتهائها مع قياساتها ⇒ qa/{id} = { by, byName, ts, d(JSON) } — للخادم وحده.
-   admin.qa: آخر التقييمات للمدير (ADMIN_EMAIL) ليقارن المحرّكات والنسخ بالأرقام لا بالانطباع. */
+/* ---------- C131) \u062A\u0642\u064A\u064A\u0645 \u062C\u0648\u062F\u0629 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062A ----------
+   qa.rate: \u0627\u0644\u0645\u062E\u062A\u0628\u0650\u0631 (\u0623\u0648 \u0627\u0644\u0645\u062F\u064A\u0631) \u064A\u0642\u064A\u0651\u0645 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u0628\u0639\u062F \u0627\u0646\u062A\u0647\u0627\u0626\u0647\u0627 \u0645\u0639 \u0642\u064A\u0627\u0633\u0627\u062A\u0647\u0627 \u21D2 qa/{id} = { by, byName, ts, d(JSON) } \u2014 \u0644\u0644\u062E\u0627\u062F\u0645 \u0648\u062D\u062F\u0647.
+   admin.qa: \u0622\u062E\u0631 \u0627\u0644\u062A\u0642\u064A\u064A\u0645\u0627\u062A \u0644\u0644\u0645\u062F\u064A\u0631 (ADMIN_EMAIL) \u0644\u064A\u0642\u0627\u0631\u0646 \u0627\u0644\u0645\u062D\u0631\u0651\u0643\u0627\u062A \u0648\u0627\u0644\u0646\u0633\u062E \u0628\u0627\u0644\u0623\u0631\u0642\u0627\u0645 \u0644\u0627 \u0628\u0627\u0644\u0627\u0646\u0637\u0628\u0627\u0639. */
 function qaNum(v, lo, hi) { const n = Number(v); return isFinite(n) ? Math.max(lo, Math.min(hi, Math.round(n * 10) / 10)) : null; }
 function qaStatClean(x) { if (!x || typeof x !== "object") return null; return { med: qaNum(x.med, 0, 1e5), p90: qaNum(x.p90, 0, 1e5), max: qaNum(x.max, 0, 1e5), n: qaNum(x.n, 0, 1e4) }; }
 async function opQaRate(uid, payload, env, claims) {
@@ -5234,7 +5234,7 @@ async function opAdminReportClose(uid, payload, env, claims) {
   const id = payload && payload.id;
   if (!segOk(String(id || ""))) throw new Error("id required");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
-  // C150: «لا مخالفة» ⇒ تُرفع الحجب عن اللحظة/التعليق ويُصفَّر عدّاد المبلِّغين
+  // C150: \u00AB\u0644\u0627 \u0645\u062E\u0627\u0644\u0641\u0629\u00BB \u21D2 \u062A\u064F\u0631\u0641\u0639 \u0627\u0644\u062D\u062C\u0628 \u0639\u0646 \u0627\u0644\u0644\u062D\u0638\u0629/\u0627\u0644\u062A\u0639\u0644\u064A\u0642 \u0648\u064A\u064F\u0635\u0641\u064E\u0651\u0631 \u0639\u062F\u0651\u0627\u062F \u0627\u0644\u0645\u0628\u0644\u0650\u0651\u063A\u064A\u0646
   if (payload.release) {
     const rp = await fsGet(token, "reports/" + id).catch(() => null), pid = rp && fstr(rp, "pid"), cmid = rp && fstr(rp, "cmid");
     if (pid && momPidOk(pid)) await fsCommit(token, [{ update: { name: DOC_ROOT + "/moments/" + pid + (cmid ? "/cm/" + cmid : ""), fields: { held: { booleanValue: false }, reps: { arrayValue: { values: [] } } } },
@@ -5245,8 +5245,8 @@ async function opAdminReportClose(uid, payload, env, claims) {
   return { admin: true, closed: id };
 }
 
-/* ---------- حدود الطلبات والمعرّفات ---------- */
-const RL = new Map(), RL_WINDOW = 5 * 60 * 1000, RL_MAX = 400;   // ٤٠٠ طلب / ٥ دقائق لكلّ مستخدم
+/* ---------- \u062D\u062F\u0648\u062F \u0627\u0644\u0637\u0644\u0628\u0627\u062A \u0648\u0627\u0644\u0645\u0639\u0631\u0651\u0641\u0627\u062A ---------- */
+const RL = new Map(), RL_WINDOW = 5 * 60 * 1000, RL_MAX = 400;   // \u0664\u0660\u0660 \u0637\u0644\u0628 / \u0665 \u062F\u0642\u0627\u0626\u0642 \u0644\u0643\u0644\u0651 \u0645\u0633\u062A\u062E\u062F\u0645
 function rateOk(uid) {
   const now = Date.now(); let e = RL.get(uid);
   if (!e || now - e.t > RL_WINDOW) { e = { t: now, n: 0 }; RL.set(uid, e); }
@@ -5254,7 +5254,7 @@ function rateOk(uid) {
   if (RL.size > 5000) { for (const [k, v] of RL) if (now - v.t > RL_WINDOW) RL.delete(k); }
   return e.n <= RL_MAX;
 }
-// كلّ معرّفٍ يدخل مسار Firestore: بلا «/» ولا «..» ولا طولٍ مفرط
+// \u0643\u0644\u0651 \u0645\u0639\u0631\u0651\u0641\u064D \u064A\u062F\u062E\u0644 \u0645\u0633\u0627\u0631 Firestore: \u0628\u0644\u0627 \u00AB/\u00BB \u0648\u0644\u0627 \u00AB..\u00BB \u0648\u0644\u0627 \u0637\u0648\u0644\u064D \u0645\u0641\u0631\u0637
 const ID_KEYS = ["groupId", "personId", "eventId", "relationId", "reviewId", "token", "uid", "from", "to", "cid"];
 function badIds(p) {
   if (!p || typeof p !== "object") return null;
@@ -5264,8 +5264,8 @@ function badIds(p) {
 }
 
 export default {
-  // Cron (wrangler.toml: [triggers] crons = ["*/5 * * * *"]): تذكيرات المواعيد كلّ تشغيل؛ والتنظيف بالتناوب
-  // (حدّ ٥٠ طلباً فرعيّاً لكلّ تشغيل: لا تنظيف في تشغيلٍ أرسل تذكيراً)
+  // Cron (wrangler.toml: [triggers] crons = ["*/5 * * * *"]): \u062A\u0630\u0643\u064A\u0631\u0627\u062A \u0627\u0644\u0645\u0648\u0627\u0639\u064A\u062F \u0643\u0644\u0651 \u062A\u0634\u063A\u064A\u0644\u061B \u0648\u0627\u0644\u062A\u0646\u0638\u064A\u0641 \u0628\u0627\u0644\u062A\u0646\u0627\u0648\u0628
+  // (\u062D\u062F\u0651 \u0665\u0660 \u0637\u0644\u0628\u0627\u064B \u0641\u0631\u0639\u064A\u0651\u0627\u064B \u0644\u0643\u0644\u0651 \u062A\u0634\u063A\u064A\u0644: \u0644\u0627 \u062A\u0646\u0638\u064A\u0641 \u0641\u064A \u062A\u0634\u063A\u064A\u0644\u064D \u0623\u0631\u0633\u0644 \u062A\u0630\u0643\u064A\u0631\u0627\u064B)
   async scheduled(event, env, ctx) {
     PUSH_ENV = env; notifyChat.env = env;
     ctx.waitUntil((async () => {
@@ -5275,7 +5275,7 @@ export default {
       try { r = await schedReminders(env); } catch (e) { console.log("reminders:", e && e.message); }
       try { await taskReminders(env); } catch (e) { console.log("taskrem:", e && e.message); }   // C173
       const job = (name, f) => f().catch(e => console.log(name + ":", e && e.message));
-      if (L.free) {   // المجّانيّة: ٥٠ طلباً فرعيّاً ⇒ مهمّةٌ واحدة في كلّ تشغيل (كما في C178)
+      if (L.free) {   // \u0627\u0644\u0645\u062C\u0651\u0627\u0646\u064A\u0651\u0629: \u0665\u0660 \u0637\u0644\u0628\u0627\u064B \u0641\u0631\u0639\u064A\u0651\u0627\u064B \u21D2 \u0645\u0647\u0645\u0651\u0629\u064C \u0648\u0627\u062D\u062F\u0629 \u0641\u064A \u0643\u0644\u0651 \u062A\u0634\u063A\u064A\u0644 (\u0643\u0645\u0627 \u0641\u064A C178)
         if (r.reminders) return;
         const slot = Math.floor(new Date(event.scheduledTime || Date.now()).getUTCMinutes() / 5) % 4;
         if (slot === 3) return job("health", () => healthRun(env));
@@ -5284,16 +5284,16 @@ export default {
         else await job("purge", () => purgeWork(env, L.purge));
         return;
       }
-      // C180: الخطّة المدفوعة — كلّ المهامّ في كلّ تشغيل (المراقبة كلّ ٥ دقائق)
-      await Promise.all([job("health", () => healthRun(env)), job("cleanup", () => cleanupDisappearing(env)), job("calls cleanup", () => cleanupCalls(env)), job("quality", () => qualityWatch(env))]);   // C181: ملخّص الجودة
+      // C180: \u0627\u0644\u062E\u0637\u0651\u0629 \u0627\u0644\u0645\u062F\u0641\u0648\u0639\u0629 \u2014 \u0643\u0644\u0651 \u0627\u0644\u0645\u0647\u0627\u0645\u0651 \u0641\u064A \u0643\u0644\u0651 \u062A\u0634\u063A\u064A\u0644 (\u0627\u0644\u0645\u0631\u0627\u0642\u0628\u0629 \u0643\u0644\u0651 \u0665 \u062F\u0642\u0627\u0626\u0642)
+      await Promise.all([job("health", () => healthRun(env)), job("cleanup", () => cleanupDisappearing(env)), job("calls cleanup", () => cleanupCalls(env)), job("quality", () => qualityWatch(env))]);   // C181: \u0645\u0644\u062E\u0651\u0635 \u0627\u0644\u062C\u0648\u062F\u0629
       await job("media gc", () => mediaGc(env, L.media)); await job("story gc", () => storyGc(env, L.story));
       await job("storyq gc", () => storyqGc(env, L.q)); await job("momentq gc", () => momentqGc(env, L.q)); await job("tel gc", () => telGc(env, 200));
-      await job("purge", () => purgeWork(env, L.purge));   // حذف الحسابات: ما تبقّى من عائلاتٍ ومحادثات
+      await job("purge", () => purgeWork(env, L.purge));   // \u062D\u0630\u0641 \u0627\u0644\u062D\u0633\u0627\u0628\u0627\u062A: \u0645\u0627 \u062A\u0628\u0642\u0651\u0649 \u0645\u0646 \u0639\u0627\u0626\u0644\u0627\u062A\u064D \u0648\u0645\u062D\u0627\u062F\u062B\u0627\u062A
     })());
   },
   async fetch(request, env, ctx) {
     PUSH_ENV = env;   // C151
-    notifyChat.env = env;   // v65: توقيع إقرار «وصلت» في إشعارات الرسائل
+    notifyChat.env = env;   // v65: \u062A\u0648\u0642\u064A\u0639 \u0625\u0642\u0631\u0627\u0631 \u00AB\u0648\u0635\u0644\u062A\u00BB \u0641\u064A \u0625\u0634\u0639\u0627\u0631\u0627\u062A \u0627\u0644\u0631\u0633\u0627\u0626\u0644
     try { const u0 = new URL(request.url); if (isAuthProxyPath(u0.pathname)) return await authProxy(request, u0); } catch (e) { return new Response("auth proxy error", { status: 502 }); }
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
     try { if (new URL(request.url).pathname === "/wa/webhook") return await waWebhook(request, env, ctx); } catch (e) { return new Response("webhook error", { status: 500 }); }
@@ -5307,19 +5307,19 @@ export default {
       let claims = await verifyIdToken(m[1]);
       const uid = claims.sub;
 
-      // حدٌّ لكلّ مستخدم (تقريبيّ، لكلّ نسخةٍ من الـWorker): يحمي الحصّة المجانيّة من عميلٍ معطوب أو مسيء
+      // \u062D\u062F\u064C\u0651 \u0644\u0643\u0644\u0651 \u0645\u0633\u062A\u062E\u062F\u0645 (\u062A\u0642\u0631\u064A\u0628\u064A\u0651\u060C \u0644\u0643\u0644\u0651 \u0646\u0633\u062E\u0629\u064D \u0645\u0646 \u0627\u0644\u0640Worker): \u064A\u062D\u0645\u064A \u0627\u0644\u062D\u0635\u0651\u0629 \u0627\u0644\u0645\u062C\u0627\u0646\u064A\u0651\u0629 \u0645\u0646 \u0639\u0645\u064A\u0644\u064D \u0645\u0639\u0637\u0648\u0628 \u0623\u0648 \u0645\u0633\u064A\u0621
       if (!rateOk(uid)) return json({ ok: false, error: "rate_limited" }, 429);
       let body = {};
       try { body = await request.json(); } catch (e) {}
       const op = body.op || "whoami";
       statOp = String(op).replace(/[^a-z0-9._-]/gi, "").slice(0, 40) || "?";
       stat("ops:" + statOp); stat("req");
-      // العمليّات الثقيلة قريبة من حدّ ٥٠ طلباً فرعيّاً — لا نضيف إليها الإرسال
+      // \u0627\u0644\u0639\u0645\u0644\u064A\u0651\u0627\u062A \u0627\u0644\u062B\u0642\u064A\u0644\u0629 \u0642\u0631\u064A\u0628\u0629 \u0645\u0646 \u062D\u062F\u0651 \u0665\u0660 \u0637\u0644\u0628\u0627\u064B \u0641\u0631\u0639\u064A\u0651\u0627\u064B \u2014 \u0644\u0627 \u0646\u0636\u064A\u0641 \u0625\u0644\u064A\u0647\u0627 \u0627\u0644\u0625\u0631\u0633\u0627\u0644
       if (ctx && ctx.waitUntil && !HEAVY_OPS.has(statOp)) ctx.waitUntil(flushStats(env));
       const bad = badIds(body.payload);
       if (bad) return json({ ok: false, error: "bad id: " + bad }, 400);
 
-      // اسم «سوا» المحفوظ يسبق اسم Google في كلّ العمليّات (ذاكرة مؤقّتة — لا قراءة في كلّ طلب)
+      // \u0627\u0633\u0645 \u00AB\u0633\u0648\u0627\u00BB \u0627\u0644\u0645\u062D\u0641\u0648\u0638 \u064A\u0633\u0628\u0642 \u0627\u0633\u0645 Google \u0641\u064A \u0643\u0644\u0651 \u0627\u0644\u0639\u0645\u0644\u064A\u0651\u0627\u062A (\u0630\u0627\u0643\u0631\u0629 \u0645\u0624\u0642\u0651\u062A\u0629 \u2014 \u0644\u0627 \u0642\u0631\u0627\u0621\u0629 \u0641\u064A \u0643\u0644\u0651 \u0637\u0644\u0628)
       if (op !== "whoami" && op !== "rtc.ice" && op !== "chat.mark" && env.SA_JSON) {
         try { const pr = await profileOf(await getAccessToken(JSON.parse(env.SA_JSON)), uid); claims = Object.assign({}, claims, { sawaName: pr.name || null, sawaPhone: pr.phone || null }); } catch (e) {}
       }
@@ -5328,7 +5328,7 @@ export default {
       if (op === "phone.start") { const r = await opPhoneStart(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
       if (op === "phone.status") { const r = await opPhoneStatus(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "find.phone") { const r = await opFindBy(uid, body.payload, env, "phone"); return json({ ok: true, ...r }); }
-      // C53: طلبٌ واحد عند الإقلاع بدل ثلاثة (people.list + chat.prefs + code.requests) — يوفّر رحلتين إلى الخادم على الشبكات البطيئة
+      // C53: \u0637\u0644\u0628\u064C \u0648\u0627\u062D\u062F \u0639\u0646\u062F \u0627\u0644\u0625\u0642\u0644\u0627\u0639 \u0628\u062F\u0644 \u062B\u0644\u0627\u062B\u0629 (people.list + chat.prefs + code.requests) \u2014 \u064A\u0648\u0641\u0651\u0631 \u0631\u062D\u0644\u062A\u064A\u0646 \u0625\u0644\u0649 \u0627\u0644\u062E\u0627\u062F\u0645 \u0639\u0644\u0649 \u0627\u0644\u0634\u0628\u0643\u0627\u062A \u0627\u0644\u0628\u0637\u064A\u0626\u0629
       if (op === "boot") {
         const [people, prefs, requests] = await Promise.all([opPeopleList(uid, {}, env, claims), opChatPrefs(uid, {}, env), opCodeRequests(uid, {}, env)]);
         return json({ ok: true, people, prefs, requests });
@@ -5344,7 +5344,7 @@ export default {
       if (op === "vouch.request") { const r = await opVouchRequest(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "vouch.respond") { const r = await opVouchRespond(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
       if (op === "whoami")
-        return json({ ok: true, uid, provider: claims.firebase && claims.firebase.sign_in_provider, admin: isAdmin(env, claims) });   // v37: «فحص الاتّصال» للمدير وحده
+        return json({ ok: true, uid, provider: claims.firebase && claims.firebase.sign_in_provider, admin: isAdmin(env, claims) });   // v37: \u00AB\u0641\u062D\u0635 \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644\u00BB \u0644\u0644\u0645\u062F\u064A\u0631 \u0648\u062D\u062F\u0647
       if (op === "group.create") {
         const r = await opGroupCreate(uid, body.payload, env, claims);
         return json({ ok: true, uid, op, ...r });
