@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062D\u0635 \u06
    \u26A0\uFE0F \u0625\u0646 \u0623\u064F\u0639\u064A\u062F \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064D \u062C\u062F\u064A\u062F\u060C \u063A\u064A\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v103-story";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C207: \u0627\u0644\u062D\u0638\u0631 \u0641\u064A \u0627\u0644\u0642\u0635\u0635)
+const VER = "v104-calls";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C208: \u0627\u0644\u0641\u0627\u0626\u062A\u0629 \u0627\u0644\u062D\u0642\u064A\u0642\u064A\u0651\u0629 \u0648\u0627\u0644\u062D\u0638\u0631 \u0641\u064A \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u0627\u0644\u062C\u0645\u0627\u0639\u064A\u0651\u0629)
 // C197: \u0627\u0644\u0633\u062C\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064E\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u062D\u062F\u062B { lvl, ev, ts, ...\u062D\u0642\u0648\u0644 } (Workers Logs \u062A\u0641\u0647\u0631\u0633 \u0627\u0644\u062D\u0642\u0648\u0644 \u0644\u0644\u0628\u062D\u062B \u0648\u0627\u0644\u062A\u0635\u0641\u064A\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -3164,12 +3164,12 @@ async function opGcallStart(uid, payload, env, claims, ctx) {
     if (!to.length || to.some(u => !segOk(u))) throw new Error("bad call");
     for (const u of to) if (!(await sharesContact(token, uid, u))) throw new Error("not a contact");
     const quiet = Array.isArray(payload.quiet) ? payload.quiet.map(String) : [];
-    allow = [uid].concat(to);
-    ring = to.filter(u => quiet.indexOf(u) < 0);
-    // \u0627\u0644\u0625\u0634\u0639\u0627\u0631 \u0644\u0627 \u064A\u0635\u0644 \u0644\u0645\u0646 \u062D\u0638\u0631\u0643 (\u0627\u0644\u0631\u0646\u064A\u0646 \u062F\u0627\u062E\u0644 \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u064A\u064F\u0633\u0642\u0637\u0647 \u062C\u0647\u0627\u0632\u0647 \u0623\u064A\u0636\u0627\u064B) \u2014 \u064A\u064F\u0641\u062D\u0635 \u0644\u0645\u0646 \u0633\u064A\u0635\u0644\u0647\u0645 \u0625\u0634\u0639\u0627\u0631 \u0641\u0642\u0637
-    const pushable = [];
-    for (const u of ring.slice(0, LIM(env).contacts)) if (!(await blockedBy(token, u, uid))) pushable.push(u);
-    payload.__push = pushable;
+    // C208: \u0645\u0646 \u062D\u0638\u0631\u0646\u064A \u0644\u0627 \u064A\u064F\u062F\u0639\u0649 \u0623\u0635\u0644\u0627\u064B (\u0644\u0627 \u0631\u0646\u064A\u0646 \u062F\u0627\u062E\u0644 \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0648\u0644\u0627 \u0625\u0634\u0639\u0627\u0631 \u0648\u0644\u0627 \u0625\u0630\u0646 \u062F\u062E\u0648\u0644) \u2014 \u0643\u0645\u0627 \u0641\u064A gcall.add\u061B \u0648\u0627\u0644\u0631\u062F\u0651 \u0646\u0641\u0633\u0647 \u0641\u0644\u0627 \u064A\u0639\u0631\u0641 \u0627\u0644\u0645\u062D\u0638\u0648\u0631
+    const blk = await blockedSet(token, to, uid);
+    const reach = to.filter(u => !blk.has(u));
+    allow = [uid].concat(reach);
+    ring = reach.filter(u => quiet.indexOf(u) < 0);
+    payload.__push = ring.slice(0, LIM(env).contacts);
     title = typeof payload.title === "string" ? payload.title.slice(0, 80) : "";
   } else throw new Error("bad call");
   if (allow.indexOf(uid) < 0) allow.unshift(uid);
@@ -4031,6 +4031,8 @@ async function opCallRing(uid, payload, env, claims, ctx) {
   // v33: \u0644\u0627 \u0625\u0634\u0639\u0627\u0631 \u00AB\u0645\u0643\u0627\u0644\u0645\u0629 \u0648\u0627\u0631\u062F\u0629\u00BB \u0628\u0644\u0627 \u0645\u0643\u0627\u0644\u0645\u0629\u064D \u062D\u0642\u064A\u0642\u064A\u0651\u0629 \u062A\u0631\u0646\u0651 \u0645\u0646\u0651\u064A \u0625\u0644\u064A\u0647 (\u0643\u0627\u0646 \u064A\u0645\u0643\u0646 \u0625\u063A\u0631\u0627\u0642 \u0623\u062D\u062F\u064D \u0628\u0625\u0634\u0639\u0627\u0631\u0627\u062A \u0631\u0646\u064A\u0646\u064D \u0648\u0647\u0645\u064A\u0651\u0629)
   const call = await rtdbGet(token, "calls/" + callId).catch(() => null);
   if (!call || call.from !== uid || call.to !== to || call.state !== "ringing") return { queued: true };
+  // C208: \u0627\u0644\u0645\u062A\u0651\u0635\u0644 \u064A\u0633\u062A\u0637\u064A\u0639 \u0625\u0646\u0634\u0627\u0621 \u0633\u062C\u0644\u0651\u0627\u062A \u0645\u0643\u0627\u0644\u0645\u0627\u062A\u064D \u0628\u0646\u0641\u0633\u0647 (\u0642\u0648\u0627\u0639\u062F RTDB) \u21D2 \u062D\u062F\u064C\u0651 \u0645\u0634\u062A\u0631\u0643 \u0644\u0643\u0644\u0651 (\u0645\u062A\u0651\u0635\u0644\u060C \u0645\u0633\u062A\u0642\u0628\u0650\u0644): \u0662\u0660 \u0631\u0646\u064A\u0646\u0627\u064B \u0641\u064A \u0627\u0644\u0633\u0627\u0639\u0629
+  if (!(await rateGate(token, [["ring:" + uid + ":" + to, 20, 3600]]))) return { queued: true };
   const name = memberIdFields(claims).name.stringValue || "\u0633\u0648\u0627";
   const video = payload.type === "video";
   const rk = await ackSig(env, "r|" + callId + "|" + to);   // v65: \u0627\u0644\u062C\u0647\u0627\u0632 \u064A\u064F\u0642\u0631\u0651 \u00AB\u0631\u0646\u0651\u062A\u00BB \u21D2 \u0627\u0644\u0645\u062A\u0651\u0635\u0644 \u064A\u0631\u0649 \u00AB\u064A\u0631\u0646\u0651\u2026\u00BB
@@ -4196,8 +4198,16 @@ async function opCallMissed(uid, payload, env, claims, ctx) {
   const pr = await fsGet(token, "accounts/" + to + "/chatprefs/main");
   const blocked = pr && fstr(pr, "data") ? (JSON.parse(fstr(pr, "data")).blocked || []) : [];
   if (blocked.indexOf(uid) >= 0) return { sent: 0 };
+  // C208: \u00AB\u0641\u0627\u0626\u062A\u0629\u00BB \u0644\u0645\u0643\u0627\u0644\u0645\u0629\u064D \u062D\u0642\u064A\u0642\u064A\u0651\u0629 \u0645\u0646\u0651\u064A \u0625\u0644\u064A\u0647 \u0644\u0645 \u064A\u064F\u0631\u062F\u0651 \u0639\u0644\u064A\u0647\u0627\u060C \u0648\u0645\u0631\u0651\u0629\u064B \u0648\u0627\u062D\u062F\u0629 (\u0643\u0627\u0646 \u0623\u064A\u0651 \u062C\u0647\u0629 \u0627\u062A\u0651\u0635\u0627\u0644 \u064A\u0633\u062A\u0637\u064A\u0639 \u0625\u063A\u0631\u0627\u0642 \u063A\u064A\u0631\u0647 \u0628\u0625\u0634\u0639\u0627\u0631\u0627\u062A \u00AB\u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u0627\u0626\u062A\u0629\u00BB)
+  //       \u0627\u0644\u0645\u062A\u0651\u0635\u0644 \u064A\u0631\u0633\u0644\u0647\u0627 \u0641\u0648\u0631 \u0625\u0646\u0647\u0627\u0621 \u0627\u0644\u0631\u0646\u064A\u0646 \u0648\u064A\u062D\u0630\u0641 \u0627\u0644\u0633\u062C\u0644\u0651 \u0628\u0639\u062F \u0664 \u062B\u0648\u0627\u0646\u064D\u061B \u0642\u062F \u062A\u0643\u0648\u0646 \u0627\u0644\u062D\u0627\u0644\u0629 \u0645\u0627 \u0632\u0627\u0644\u062A ringing \u0625\u0646 \u0633\u0628\u0642 \u0627\u0644\u0637\u0644\u0628\u064F \u062A\u062D\u062F\u064A\u062B\u064E\u0647\u0627
+  const callId = String((payload && payload.callId) || "");
+  if (!/^[A-Za-z0-9_-]{6,40}$/.test(callId)) return { sent: 0 };
+  const call = await rtdbGet(token, "calls/" + callId).catch(() => null);
+  if (!call || call.from !== uid || call.to !== to || call.acc || ["ringing", "missed", "ended"].indexOf(call.state) < 0 || call.missedPush) return { sent: 0 };
+  if (!(await rateGate(token, [["miss:" + uid + ":" + to, 20, 3600]]))) return { sent: 0 };   // C208: \u0643\u0627\u0644\u0631\u0646\u064A\u0646
+  await rtdbPatch(token, { ["calls/" + callId + "/missedPush"]: Date.now() }).catch(() => {});
   const name = memberIdFields(claims).name.stringValue || "\u0633\u0648\u0627";
-  const job = pushTo(token, [to], strData({ t: "missed", call: String((payload && payload.callId) || ""), from: uid, cid: dmId(uid, to), title: name,
+  const job = pushTo(token, [to], strData({ t: "missed", call: callId, from: uid, cid: dmId(uid, to), title: name,
     body: payload.type === "video" ? "\uD83D\uDCF9 \u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u064A\u062F\u064A\u0648 \u0641\u0627\u0626\u062A\u0629" : "\uD83D\uDCDE \u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u0627\u0626\u062A\u0629", ts: Date.now() }));
   if (ctx && ctx.waitUntil) { ctx.waitUntil(job); return { queued: true }; }
   return { sent: await job };
