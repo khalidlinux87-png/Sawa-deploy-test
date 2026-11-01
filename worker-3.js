@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062D\u0635 \u06
    \u26A0\uFE0F \u0625\u0646 \u0623\u064F\u0639\u064A\u062F \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064D \u062C\u062F\u064A\u062F\u060C \u063A\u064A\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v106-delete";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C210: \u062D\u0630\u0641 \u0627\u0644\u062D\u0633\u0627\u0628 \u0643\u0627\u0645\u0644\u0627\u064B)
+const VER = "v108-sched";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C212: \u0645\u0632\u0627\u0645\u0646\u0629 \u0627\u0644\u0645\u0648\u0627\u0639\u064A\u062F)
 // C197: \u0627\u0644\u0633\u062C\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064E\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u062D\u062F\u062B { lvl, ev, ts, ...\u062D\u0642\u0648\u0644 } (Workers Logs \u062A\u0641\u0647\u0631\u0633 \u0627\u0644\u062D\u0642\u0648\u0644 \u0644\u0644\u0628\u062D\u062B \u0648\u0627\u0644\u062A\u0635\u0641\u064A\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -2839,7 +2839,18 @@ function langData(d, en) {
   return o;
 }
 // \u0646\u0635\u0651 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0646\u0641\u0633\u0647 \u0644\u0627 \u064A\u064F\u062A\u0631\u062C\u0645 \u2014 \u0641\u0642\u0637 \u0648\u0635\u0641 \u0627\u0644\u0645\u0631\u0641\u0642\u0627\u062A (\u00AB\uD83D\uDCF7 \u0635\u0648\u0631\u0629\u00BB\u2026) \u0648\u0631\u0633\u0627\u0644\u0629 \u0627\u0644\u062A\u0634\u0641\u064A\u0631
-function enMsgBody(b) { return enText(b); }
+// C211: \u0643\u0627\u0646\u062A \u0643\u0644\u0651 \u0642\u0648\u0627\u0639\u062F \u0627\u0644\u062A\u0631\u062C\u0645\u0629 \u062A\u064F\u0637\u0628\u064E\u0651\u0642 \u0639\u0644\u0649 \u0646\u0635\u0651 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u21D2 \u0631\u0633\u0627\u0644\u0629\u064C \u0646\u0635\u0651\u0647\u0627 \u00AB\u0633\u0648\u0627\u00BB \u062A\u0635\u0644 \u00ABSawa\u00BB\u060C \u0648\u00AB\u0642\u0631\u064A\u0628\u0643 \u0648\u0635\u0644\u2026\u00BB \u062A\u0635\u0644 \u00ABYour relative \u0648\u0635\u0644\u2026\u00BB.
+//       \u0627\u0644\u0622\u0646: \u0627\u0644\u0648\u0635\u0641 \u0648\u062D\u062F\u0647 (\u00AB\uD83D\uDCF7 \u0635\u0648\u0631\u0629\u00BB \u0623\u0648 \u00AB\u0627\u0644\u0627\u0633\u0645: \uD83D\uDCF7 \u0635\u0648\u0631\u0629\u00BB) \u0648\u062F\u0639\u0648\u0629 \u0627\u0644\u062F\u0631\u062F\u0634\u0629 \u0627\u0644\u0635\u0648\u062A\u064A\u0651\u0629\u060C \u0648\u0645\u0627 \u0633\u0648\u0627\u0647\u0627 \u064A\u0628\u0642\u0649 \u0643\u0645\u0627 \u0643\u062A\u0628\u0647 \u0627\u0644\u0645\u0631\u0633\u0644.
+const EN_LABELS = { "\uD83D\uDD12 \u0631\u0633\u0627\u0644\u0629 \u0645\u0634\u0641\u0651\u0631\u0629": "\uD83D\uDD12 Encrypted message", "\uD83D\uDCF7 \u0635\u0648\u0631\u0629": "\uD83D\uDCF7 Photo", "\uD83C\uDFA5 \u0641\u064A\u062F\u064A\u0648": "\uD83C\uDFA5 Video", "\uD83C\uDFA4 \u0631\u0633\u0627\u0644\u0629 \u0635\u0648\u062A\u064A\u0651\u0629": "\uD83C\uDFA4 Voice message", "\uD83D\uDCCE \u0645\u0644\u0641\u0651": "\uD83D\uDCCE File",
+  "\uD83D\uDCCA \u0627\u0633\u062A\u0637\u0644\u0627\u0639": "\uD83D\uDCCA Poll", "\uD83E\uDDFE \u0641\u0627\u062A\u0648\u0631\u0629": "\uD83E\uDDFE Bill", "\uD83D\uDC9D \u062A\u0628\u0631\u0651\u0639\u0627\u062A": "\uD83D\uDC9D Fundraiser", "\u2705 \u0645\u0647\u0627\u0645\u0651": "\u2705 Tasks", "\uD83D\uDC64 \u062C\u0647\u0629 \u0627\u062A\u0651\u0635\u0627\u0644": "\uD83D\uDC64 Contact", "\uD83D\uDCCD \u0645\u0648\u0642\u0639": "\uD83D\uDCCD Location", "\u0631\u0633\u0627\u0644\u0629": "Message" };
+function enMsgBody(b) {
+  b = String(b == null ? "" : b);
+  if (EN_LABELS[b]) return EN_LABELS[b];
+  const i = b.lastIndexOf(": ");
+  if (i > 0 && EN_LABELS[b.slice(i + 2)]) return b.slice(0, i + 2) + EN_LABELS[b.slice(i + 2)];
+  if (/^\uD83C\uDF99 .* \u0628\u062F\u0623 \u062F\u0631\u062F\u0634\u0629 \u0635\u0648\u062A\u064A\u0651\u0629 \u2014 \u0627\u0646\u0636\u0645\u0651 \u0645\u062A\u0649 \u0634\u0626\u062A$/.test(b)) return enText(b);
+  return b;
+}
 function apnsOf(d) {
   const call = d.t === "call", ttl = call ? 45 : d.t === "test" ? 120 : 86400;
   const alert = { title: String(d.title || "\u0633\u0648\u0627").slice(0, 120), body: String(d.body || "").slice(0, 400) };
@@ -4218,6 +4229,8 @@ async function opCallMissed(uid, payload, env, claims, ctx) {
 /* ---------- 23) schedules.sync \u2014 \u0645\u0648\u0627\u0639\u064A\u062F \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u0627\u0644\u0634\u062E\u0635\u064A\u0651\u0629 \u0628\u064A\u0646 \u0623\u062C\u0647\u0632\u062A\u0647 ----------
    accounts/{uid}/schedules/{gid} = { data: JSON { id: item } }. \u062F\u0645\u062C\u064C \u0645\u0648\u0639\u062F\u0627\u064B \u0645\u0648\u0639\u062F\u0627\u064B: \u0644\u0643\u0644\u0651 \u0645\u0648\u0639\u062F _u (\u0648\u0642\u062A \u062A\u0639\u062F\u064A\u0644\u0647)\u060C
    \u0648\u0627\u0644\u0623\u062D\u062F\u062B \u064A\u063A\u0644\u0628\u061B \u0627\u0644\u062D\u0630\u0641 \u0639\u0644\u0627\u0645\u0629 { id, _deleted, _u } \u062D\u062A\u0651\u0649 \u0644\u0627 \u064A\u0639\u0648\u062F \u0627\u0644\u0645\u062D\u0630\u0648\u0641 \u0645\u0646 \u062C\u0647\u0627\u0632\u064D \u0622\u062E\u0631. */
+const SCHED_ID = /^[A-Za-z0-9_.:-]{1,80}$/, SCHED_BAD_ID = new Set(["__proto__", "constructor", "prototype"]);
+const SCHED_ITEM_MAX = 8000, SCHED_DOC_MAX = 850000, SCHED_TOMB_TTL = 60 * 86400000, SCHED_SKEW = 10 * 60000;
 async function opSchedulesSync(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const groupId = payload && payload.groupId;
@@ -4225,14 +4238,22 @@ async function opSchedulesSync(uid, payload, env) {
   const m = await fsGet(token, "groups/" + groupId + "/members/" + uid);
   if (!m) throw new Error("not a member");
   const doc = await fsGet(token, "accounts/" + uid + "/schedules/" + groupId);
-  const map = doc ? JSON.parse(fstr(doc, "data") || "{}") : {};
+  // C212: \u062E\u0631\u064A\u0637\u0629\u064C \u0628\u0644\u0627 \u0646\u0645\u0648\u0630\u062C (__proto__ \u0644\u0627 \u064A\u063A\u064A\u0651\u0631 \u0634\u064A\u0626\u0627\u064B) \u00B7 \u0645\u0639\u0631\u0651\u0641\u0627\u062A\u064C \u0633\u0644\u064A\u0645\u0629 \u00B7 \u0645\u0648\u0639\u062F\u064C \u0648\u0627\u062D\u062F \u0644\u0627 \u064A\u0643\u0648\u0646 \u0636\u062E\u0645\u0627\u064B \u00B7 \u0633\u0627\u0639\u0629 \u0627\u0644\u0647\u0627\u062A\u0641 \u0627\u0644\u0645\u062A\u0642\u062F\u0651\u0645\u0629 \u0644\u0627 \u062A\u062C\u0645\u0651\u062F \u0627\u0644\u0645\u0648\u0639\u062F \u00B7
+  //       \u0627\u0644\u0634\u0648\u0627\u0647\u062F \u0627\u0644\u0623\u0642\u062F\u0645 \u0645\u0646 \u0666\u0660 \u064A\u0648\u0645\u0627\u064B \u062A\u064F\u0646\u0638\u064E\u0651\u0641 \u00B7 \u062D\u062C\u0645 \u0627\u0644\u0648\u062B\u064A\u0642\u0629 \u0645\u062D\u0631\u0648\u0633 (\u062D\u062F\u0651 Firestore \u0661 \u0645.\u0628 \u2014 \u062A\u062C\u0627\u0648\u0632\u0647 \u0643\u0627\u0646 \u064A\u0643\u0633\u0631 \u0627\u0644\u0645\u0632\u0627\u0645\u0646\u0629 \u0625\u0644\u0649 \u0627\u0644\u0623\u0628\u062F)
+  const now = Date.now(), uOf = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.min(n, now + SCHED_SKEW) : 0; };
+  const map = Object.create(null);
+  try { const o = doc ? JSON.parse(fstr(doc, "data") || "{}") : {}; for (const k of Object.keys(o)) if (SCHED_ID.test(k) && o[k] && typeof o[k] === "object") map[k] = o[k]; } catch (e) {}
   const changes = Array.isArray(payload.changes) ? payload.changes.slice(0, 500) : [];
   let changed = 0;
   for (const ch of changes) {
-    if (!ch || !ch.id) continue;
+    if (!ch || typeof ch !== "object" || typeof ch.id !== "string" || !SCHED_ID.test(ch.id) || SCHED_BAD_ID.has(ch.id)) continue;
+    const item = Object.assign(capVal(ch), { id: ch.id, _u: uOf(ch._u) });
+    if (JSON.stringify(item).length > SCHED_ITEM_MAX) continue;
     const ex = map[ch.id];
-    if (!ex || (Number(ch._u) || 0) >= (Number(ex._u) || 0)) { map[ch.id] = ch; changed++; }
+    if (!ex || item._u >= uOf(ex._u)) { map[ch.id] = item; changed++; }
   }
+  for (const k of Object.keys(map)) if (map[k]._deleted && now - uOf(map[k]._u) > SCHED_TOMB_TTL) { delete map[k]; changed++; }
+  if (changed && JSON.stringify(map).length > SCHED_DOC_MAX) throw new Error("schedules too large");
   if (changed) {
     await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid + "/schedules/" + groupId,
       fields: { data: { stringValue: JSON.stringify(map) }, updatedTs: { timestampValue: new Date().toISOString() } } } }]);
