@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062D\u0635 \u06
    \u26A0\uFE0F \u0625\u0646 \u0623\u064F\u0639\u064A\u062F \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064D \u062C\u062F\u064A\u062F\u060C \u063A\u064A\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v102-owner";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C206: \u0646\u0642\u0644 \u0645\u0644\u0643\u064A\u0651\u0629 \u0627\u0644\u0639\u0627\u0626\u0644\u0629)
+const VER = "v103-story";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C207: \u0627\u0644\u062D\u0638\u0631 \u0641\u064A \u0627\u0644\u0642\u0635\u0635)
 // C197: \u0627\u0644\u0633\u062C\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064E\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u062D\u062F\u062B { lvl, ev, ts, ...\u062D\u0642\u0648\u0644 } (Workers Logs \u062A\u0641\u0647\u0631\u0633 \u0627\u0644\u062D\u0642\u0648\u0644 \u0644\u0644\u0628\u062D\u062B \u0648\u0627\u0644\u062A\u0635\u0641\u064A\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -2060,6 +2060,7 @@ async function opChatPrefs(uid, payload, env) {
   const cur = await fsGet(token, path);
   let data = {}; try { data = cur && fstr(cur, "data") ? JSON.parse(fstr(cur, "data")) : {}; } catch (e) { data = {}; }
   const set = payload && payload.set;
+  const prevBl = Array.isArray(data.blocked) ? data.blocked.filter(x => segOk(String(x))) : [];   // C207
   if (set && typeof set === "object") {
     if ("muted" in set) await syncMutedBy(token, uid, data.muted, set.muted);
     for (const k of PREF_KEYS) if (k in set) data[k] = k === "nick" ? capNick(set[k]) : capVal(set[k]);
@@ -2070,7 +2071,11 @@ async function opChatPrefs(uid, payload, env) {
   // \u0627\u0644\u062D\u0638\u0631 \u064A\u064F\u0646\u0641\u064E\u0651\u0630 \u0623\u064A\u0636\u0627\u064B \u0641\u064A \u0642\u0648\u0627\u0639\u062F RTDB (blk/{\u0623\u0646\u0627}/{\u0647\u0648}): \u0644\u0627 \u064A\u0631\u0649 \u062D\u0636\u0648\u0631\u064A\u060C \u0648\u0644\u0627 \u064A\u062A\u0651\u0635\u0644 \u0628\u064A\u060C \u0648\u0644\u0627 \u064A\u0631\u0646\u0651 \u0635\u0646\u062F\u0648\u0642\u064A
   const bl = Array.isArray(data.blocked) ? data.blocked.filter(x => segOk(String(x))).slice(0, 500) : [];
   if ((set && "blocked" in set) || bl.length) {
-    try { await rtdbPatch(token, { ["blk/" + uid]: bl.length ? Object.fromEntries(bl.map(x => [x, true])) : null }); } catch (e) { slog("warn", "blk", { err: e && e.message }); }
+    // C207: + \u0641\u0647\u0631\u0633\u064C \u0639\u0643\u0633\u064A\u0651 blkby/{\u0647\u0648}/{\u0623\u0646\u0627} (\u0644\u0644\u062E\u0627\u062F\u0645 \u0648\u062D\u062F\u0647) \u0644\u064A\u0639\u0631\u0641 \u00AB\u0645\u0646 \u062D\u0638\u0631\u0646\u064A\u00BB \u0628\u0642\u0631\u0627\u0621\u0629\u064D \u0648\u0627\u062D\u062F\u0629 (\u0627\u0644\u0642\u0635\u0635)
+    const rev = {}; bl.forEach(x => { rev["blkby/" + x + "/" + uid] = true; }); prevBl.filter(x => bl.indexOf(x) < 0).forEach(x => { rev["blkby/" + x + "/" + uid] = null; });
+    try { await rtdbPatch(token, Object.assign({ ["blk/" + uid]: bl.length ? Object.fromEntries(bl.map(x => [x, true])) : null }, rev)); } catch (e) { slog("warn", "blk", { err: e && e.message }); }
+    const added = bl.filter(x => prevBl.indexOf(x) < 0);
+    if (added.length) { await storyStrip(token, uid, added); for (const x of added.slice(0, 20)) await storyStrip(token, x, [uid]); }   // \u0627\u0644\u0642\u0635\u0635 \u0627\u0644\u062D\u0627\u0644\u064A\u0651\u0629 \u0628\u0627\u0644\u0627\u062A\u0651\u062C\u0627\u0647\u064A\u0646
     if (set && "blocked" in set && bl.length) { try { await momStrip(token, uid, bl); } catch (e) { slog("warn", "momStrip", { err: e && e.message }); } }   // C133b: \u0627\u0644\u0645\u062D\u0638\u0648\u0631 \u0644\u0627 \u064A\u0631\u0649 \u0644\u062D\u0638\u0627\u062A\u064A \u0627\u0644\u0633\u0627\u0628\u0642\u0629
   }
   return { prefs: data };
@@ -4465,9 +4470,20 @@ function storyItems(doc) {
   return arr.filter(x => x && x.id);
 }
 async function storyAud(token, uid, hide) {
-  const acl = (await rtdbGet(token, "acl/" + uid).catch(() => null)) || {};
-  const h = new Set(hide || []);
-  return Object.keys(acl).filter(u => acl[u] === true && u !== uid && segOk(u) && !h.has(u)).slice(0, 2000);
+  // C207: \u0627\u0644\u062D\u0638\u0631 \u0628\u0627\u0644\u0627\u062A\u0651\u062C\u0627\u0647\u064A\u0646 (\u0643\u0645\u0627 \u0641\u064A \u0627\u0644\u0644\u062D\u0638\u0627\u062A) \u2014 \u0643\u0627\u0646 \u0627\u0644\u0645\u062D\u0638\u0648\u0631 \u0648\u0645\u0646 \u062D\u0638\u0631\u0646\u064A \u064A\u0631\u064A\u0627\u0646 \u0642\u0635\u0635\u064A
+  const [acl, mine, by] = await Promise.all([rtdbGet(token, "acl/" + uid).catch(() => null), rtdbGet(token, "blk/" + uid).catch(() => null), rtdbGet(token, "blkby/" + uid).catch(() => null)]);
+  const h = new Set(hide || []), bl = Object.assign({}, mine || {}, by || {});
+  let list = Object.keys(acl || {}).filter(u => acl[u] === true && u !== uid && segOk(u) && !h.has(u) && bl[u] !== true).slice(0, 2000);
+  // \u062D\u0638\u0631\u064C \u0642\u062F\u064A\u0645 (\u0642\u0628\u0644 \u0641\u0647\u0631\u0633 blkby): \u0641\u062D\u0635\u064C \u0645\u0628\u0627\u0634\u0631 \u062D\u064A\u0646 \u062A\u0643\u0648\u0646 \u0627\u0644\u0642\u0627\u0626\u0645\u0629 \u0635\u063A\u064A\u0631\u0629
+  if (list.length && list.length <= 150) { const b2 = await blockedSet(token, list, uid).catch(() => new Set()); list = list.filter(u => !b2.has(u)); }
+  return list;
+}
+// C207: \u0625\u0632\u0627\u0644\u0629 \u0623\u0634\u062E\u0627\u0635\u064D \u0645\u0646 \u062C\u0645\u0647\u0648\u0631 \u0642\u0635\u0635\u064A \u0627\u0644\u062D\u0627\u0644\u064A\u0651\u0629 (\u0639\u0646\u062F \u0627\u0644\u062D\u0638\u0631)
+async function storyStrip(token, owner, uids) {
+  uids = (uids || []).filter(u => segOk(String(u)) && u !== owner);
+  if (!uids.length || !segOk(String(owner))) return;
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/stories/" + owner }, updateMask: { fieldPaths: [] },
+    updateTransforms: [{ fieldPath: "aud", removeAllFromArray: { values: uids.map(u => ({ stringValue: u })) } }], currentDocument: { exists: true } }]).catch(() => {});
 }
 function storyMinExp(items) { return items.length ? Math.min(...items.map(x => Number(x.exp) || 0)) : 0; }
 async function storyWrite(token, uid, name, aud, hide, items) {
