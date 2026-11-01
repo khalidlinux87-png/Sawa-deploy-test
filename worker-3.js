@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062D\u0635 \u06
    \u26A0\uFE0F \u0625\u0646 \u0623\u064F\u0639\u064A\u062F \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064D \u062C\u062F\u064A\u062F\u060C \u063A\u064A\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v99-tasks";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C203: \u0645\u0633\u0624\u0648\u0644 \u0627\u0644\u0645\u0647\u0645\u0651\u0629 \u0639\u0636\u0648\u064C \u0641\u064A \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629)
+const VER = "v102-owner";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C206: \u0646\u0642\u0644 \u0645\u0644\u0643\u064A\u0651\u0629 \u0627\u0644\u0639\u0627\u0626\u0644\u0629)
 // C197: \u0627\u0644\u0633\u062C\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064E\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u062D\u062F\u062B { lvl, ev, ts, ...\u062D\u0642\u0648\u0644 } (Workers Logs \u062A\u0641\u0647\u0631\u0633 \u0627\u0644\u062D\u0642\u0648\u0644 \u0644\u0644\u0628\u062D\u062B \u0648\u0627\u0644\u062A\u0635\u0641\u064A\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -551,12 +551,14 @@ async function opRelationAdd(uid, payload, env) {
     // \u062D\u0627\u0631\u0633 \u0645\u0642\u0639\u062F \u0627\u0644\u0648\u0627\u0644\u062F \u0628\u0627\u0644\u062C\u0646\u0633 (v173): \u0644\u0627 \u0648\u0627\u0644\u062F\u064E\u064A\u0646 \u0645\u0646 \u0646\u0641\u0633 \u0627\u0644\u062C\u0646\u0633 \u0644\u0644\u0627\u0628\u0646
     const parent = await fsGet(token, "groups/" + groupId + "/persons/" + from);
     const pGender = fstr(parent, "gender");
-    const existingParents = (await parentsOf([to])).map(r => r.from);
+    const existingParents = [...new Set((await parentsOf([to])).map(r => r.from))];
+    // C205: \u0648\u0627\u0644\u062F\u0627\u0646 \u0639\u0644\u0649 \u0627\u0644\u0623\u0643\u062B\u0631 \u2014 \u0643\u0627\u0646 \u0648\u0627\u0644\u062F\u064C \u062B\u0627\u0644\u062B \u0628\u0644\u0627 \u062C\u0646\u0633\u064D (\u0623\u0648 \u062C\u0646\u0633\u064D \u0645\u062E\u062A\u0644\u0641 \u0639\u0646 \u0627\u0644\u0645\u0648\u062C\u0648\u062F\u064E\u064A\u0646) \u064A\u064F\u0636\u0627\u0641 \u0645\u0628\u0627\u0634\u0631\u0629\u064B \u0644\u0623\u0646\u0651 \u0627\u0644\u062D\u0627\u0631\u0633 \u064A\u0642\u0627\u0631\u0646 \u0627\u0644\u062C\u0646\u0633 \u0641\u0642\u0637
     for (const pp of existingParents) {
       const ppDoc = await fsGet(token, "groups/" + groupId + "/persons/" + pp);
       const g = fstr(ppDoc, "gender");
       if (g && pGender && g === pGender) { conflict = "parent slot of this gender already taken"; break; }
     }
+    if (!conflict && existingParents.length >= 2) conflict = "child already has two parents";
     // \u062D\u0627\u0631\u0633 \u0627\u0644\u062F\u0648\u0631\u0627\u062A: \u0644\u0648 \u0643\u0627\u0646 \u0627\u0644\u0627\u0628\u0646 \u0623\u0635\u0644\u0627\u064B \u0645\u0646 \u0623\u0633\u0644\u0627\u0641 \u0627\u0644\u0648\u0627\u0644\u062F \u2192 \u062F\u0648\u0631\u0629
     // \u062C\u064A\u0644\u0627\u064B \u0628\u0639\u062F \u062C\u064A\u0644 (\u0627\u0633\u062A\u0639\u0644\u0627\u0645\u064C \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u062C\u064A\u0644\u060C \u2264 \u0661\u0662 \u062C\u064A\u0644\u0627\u064B \u2014 \u064A\u0628\u0642\u0649 \u062A\u062D\u062A \u062D\u062F\u0651 \u0665\u0660 \u0637\u0644\u0628\u0627\u064B \u0641\u0631\u0639\u064A\u0651\u0627\u064B)
     if (!conflict) {
@@ -1327,6 +1329,35 @@ async function opMemberSetRole(uid, payload, env) {
   ]);
   return { groupId: gid, uid: target, role };
 }
+/* C206: \u0646\u0642\u0644 \u0645\u0644\u0643\u064A\u0651\u0629 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u2014 \u0627\u0644\u0645\u0627\u0644\u0643 \u064A\u062E\u062A\u0627\u0631 \u0639\u0636\u0648\u0627\u064B (\u0628\u062D\u0633\u0627\u0628\u060C \u0644\u0627 \u0636\u064A\u0641\u0627\u064B) \u0645\u0627\u0644\u0643\u0627\u064B \u062C\u062F\u064A\u062F\u0627\u064B\u060C \u0648\u064A\u0635\u064A\u0631 \u0647\u0648 \u0645\u062D\u0631\u0651\u0631\u0627\u064B \u0623\u0648 \u0645\u0634\u0627\u0647\u062F\u0627\u064B.
+   \u0645\u0627\u0644\u0643\u064C \u0648\u0627\u062D\u062F \u062F\u0627\u0626\u0645\u0627\u064B: \u0627\u0644\u062F\u0648\u0631\u0627\u0646 \u064A\u062A\u0628\u062F\u0651\u0644\u0627\u0646 \u0641\u064A commit \u0648\u0627\u062D\u062F (\u0645\u0639 \u0627\u0634\u062A\u0631\u0627\u0637 \u0648\u062C\u0648\u062F \u0627\u0644\u0639\u0636\u0648\u064A\u0651\u062A\u064A\u0646). */
+async function opMemberTransferOwner(uid, payload, env, claims, ctx) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const gid = payload && payload.groupId, target = payload && payload.uid;
+  const mine = payload && payload.myRole === "viewer" ? "viewer" : "editor";
+  if (!segOk(gid) || !segOk(target)) throw new Error("groupId/uid required");
+  if (target === uid) throw new Error("pick another member");
+  await requireOwner(token, gid, uid);
+  const [g, t] = await Promise.all([fsGet(token, "groups/" + gid), fsGet(token, "groups/" + gid + "/members/" + target)]);
+  if (!g || fbool(g, "deleted")) throw new Error("family not found");
+  if (!t) throw new Error("not a member");
+  if (fbool(t, "anon")) throw new Error("a guest can't own a family");   // \u0627\u0644\u0636\u064A\u0641 \u0642\u062F \u064A\u0641\u0642\u062F \u062D\u0633\u0627\u0628\u0647 \u0628\u0645\u0633\u062D \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0641\u062A\u0636\u064A\u0639 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u0628\u0644\u0627 \u0645\u0627\u0644\u0643
+  const now = new Date().toISOString(), gname = fstr(g, "name") || "\u0639\u0627\u0626\u0644\u062A\u064A";
+  const roleW = (u, role) => ({ update: { name: DOC_ROOT + "/groups/" + gid + "/members/" + u, fields: { role: { stringValue: role } } },
+    updateMask: { fieldPaths: ["role"] }, currentDocument: { exists: true } });
+  await fsCommit(token, [
+    roleW(target, "owner"), roleW(uid, mine),
+    { update: { name: DOC_ROOT + "/groups/" + gid, fields: { ownerUid: { stringValue: target }, ownerTs: { timestampValue: now } } }, updateMask: { fieldPaths: ["ownerUid", "ownerTs"] } },
+    indexWrite(target, gid, gname, "owner", now), indexWrite(uid, gid, gname, mine, now),
+    { update: { name: DOC_ROOT + "/groups/" + gid + "/changelog/" + crypto.randomUUID(),
+      fields: { ts: { timestampValue: now }, by: { stringValue: uid }, op: { stringValue: "owner.transfer" }, to: { stringValue: target }, myRole: { stringValue: mine } } } },
+  ]);
+  const me = String((await myName(token, uid, claims)) || "\u0645\u0627\u0644\u0643 \u0627\u0644\u0639\u0627\u0626\u0644\u0629").slice(0, 80);
+  const job = pushTo(token, [target], strData({ t: "famowner", title: "\u0635\u0631\u062A\u064E \u0645\u0627\u0644\u0643 \u0639\u0627\u0626\u0644\u0629 \u00AB" + gname + "\u00BB", body: me + " \u0646\u0642\u0644 \u0625\u0644\u064A\u0643 \u0645\u0644\u0643\u064A\u0651\u0629 \u0627\u0644\u0639\u0627\u0626\u0644\u0629", ts: Date.now() })).catch(e => slog("warn", "push", { err: e && e.message }));
+  if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
+  stat("fam:transfer");
+  return { groupId: gid, owner: target, myRole: mine };
+}
 async function opMemberRemove(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const gid = payload && payload.groupId, target = payload && payload.uid;
@@ -1712,6 +1743,30 @@ function cleanMsg(m, uid, ts) {
   if (out.text === undefined && type === "text") throw new Error("empty message");
   return out;
 }
+/* C204: \u0627\u0644\u0641\u0627\u062A\u0648\u0631\u0629 \u0648\u0627\u0644\u062A\u0628\u0631\u0651\u0639 \u2014 \u0643\u0627\u0646 \u0627\u0644\u062E\u0627\u062F\u0645 \u064A\u062D\u0641\u0638 \u0645\u0627 \u064A\u0631\u0633\u0644\u0647 \u0627\u0644\u062C\u0647\u0627\u0632 \u0643\u0645\u0627 \u0647\u0648 (\u0645\u0628\u0627\u0644\u063A \u0633\u0627\u0644\u0628\u0629 \u0623\u0648 \u0646\u0635\u0651\u064A\u0651\u0629\u060C \u0645\u0634\u0627\u0631\u0643\u064C \u0645\u0643\u0631\u0651\u0631\u060C \u0645\u0634\u0627\u0631\u0643\u0648\u0646 \u0644\u064A\u0633\u0648\u0627 \u0641\u064A \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629).
+   \u0627\u0644\u0645\u0628\u0627\u0644\u063A: \u0623\u0631\u0642\u0627\u0645\u064C \u2265 \u0660 \u0628\u0645\u0646\u0632\u0644\u062A\u064A\u0646 \u0639\u0634\u0631\u064A\u0651\u062A\u064A\u0646 \u00B7 \u0627\u0644\u0645\u0634\u0627\u0631\u0643\u0648\u0646: \u0623\u0639\u0636\u0627\u0621 \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629\u060C \u0645\u0631\u0651\u0629\u064B \u0648\u0627\u062D\u062F\u0629 \u00B7 \u0627\u0644\u0645\u0648\u0639\u062F: \u0631\u0642\u0645\u064C \u0623\u0648 null. */
+function moneyOf(v) { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.min(Math.round(n * 100) / 100, 1e12) : 0; }
+function normMoneyMsg(msg, members) {
+  const x = msg.extra = msg.extra && typeof msg.extra === "object" ? msg.extra : {};
+  if (msg.type === "bill") {
+    x.description = String(x.description || "").slice(0, 300);
+    x.totalAmount = moneyOf(x.totalAmount);
+    x.splitType = String(x.splitType || "equal").slice(0, 20);
+    const seen = new Set(), out = [];
+    for (const p of Array.isArray(x.participants) ? x.participants : []) {
+      const u = String((p && p.uid) || "");
+      if (!segOk(u) || members.indexOf(u) < 0 || seen.has(u)) continue;
+      seen.add(u); out.push({ uid: u, name: String((p && p.name) || "").slice(0, 80), share: moneyOf(p && p.share) });
+    }
+    if (!out.length) throw new Error("bad bill: no participants in this chat");   // \u00ABbad \u00BB \u21D2 \u0646\u0647\u0627\u0626\u064A\u0651 \u0641\u064A \u0637\u0627\u0628\u0648\u0631 \u0627\u0644\u062C\u0647\u0627\u0632 (PERMANENT) \u0641\u0644\u0627 \u064A\u064F\u0639\u0627\u062F
+    x.participants = out;
+  } else {
+    x.cause = String(x.cause || "").slice(0, 300);
+    x.goal = moneyOf(x.goal);
+    const dl = Number(x.deadline);
+    x.deadline = Number.isFinite(dl) && dl > 0 ? dl : null;
+  }
+}
 function previewOf(msg) {
   if (msg.type === "text" || msg.type === "sticker") return (msg.text || "").slice(0, 120);
   return "";   // \u0627\u0644\u0639\u0645\u064A\u0644 \u064A\u062A\u0631\u062C\u0645 \u0627\u0644\u0646\u0648\u0639 (\uD83C\uDFA4 \u0631\u0633\u0627\u0644\u0629 \u0635\u0648\u062A\u064A\u0651\u0629\u2026)
@@ -1727,6 +1782,7 @@ async function opChatSend(uid, payload, env, ctx) {
   }
   const ts = Date.now(), e2e = e2eOf(c);
   const msg = e2e ? cleanEncMsg(payload.msg, uid, ts, e2e) : cleanMsg(payload.msg, uid, ts);
+  if (!e2e && (msg.type === "bill" || msg.type === "fund")) normMoneyMsg(msg, fsArr(c, "members"));   // C204
   let sh = shardOf(c, ts, JSON.stringify(msg).length + 200), day = sh.key;
   const metaP = msg.extra && msg.extra.mid ? fsGet(token, "chats/" + cid + "/media/" + msg.extra.mid) : Promise.resolve(undefined);   // C55
   // v33: \u0645\u0639\u0631\u0651\u0641 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0644\u0627 \u064A\u064F\u0639\u0627\u062F \u0627\u0633\u062A\u0639\u0645\u0627\u0644\u0647 \u2014 \u0643\u0627\u0646 \u0623\u064A\u0651 \u0639\u0636\u0648\u064D \u064A\u0633\u062A\u0628\u062F\u0644 \u0631\u0633\u0627\u0644\u0629 \u063A\u064A\u0631\u0647 (\u0623\u0648 \u0631\u0633\u0627\u0644\u0629 \u0646\u0638\u0627\u0645) \u0628\u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u0645\u0639\u0631\u0651\u0641 \u0646\u0641\u0633\u0647.
@@ -5781,6 +5837,7 @@ export default {
       if (op === "member.banned") { const r = await opMemberBanned(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "member.unban") { const r = await opMemberUnban(uid, body.payload, env); return json({ ok: true, ...r }); }
       if (op === "member.remove") { const r = await opMemberRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
+      if (op === "member.transferOwner") { const r = await opMemberTransferOwner(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }   // C206
       if (op === "group.settings") { const r = await opGroupSettings(uid, body.payload, env); return json({ ok: true, ...r }); }
       return json({ ok: false, error: "unknown op: " + op }, 400);
     } catch (e) {
