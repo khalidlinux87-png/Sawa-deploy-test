@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062D\u0635 \u06
    \u26A0\uFE0F \u0625\u0646 \u0623\u064F\u0639\u064A\u062F \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064D \u062C\u062F\u064A\u062F\u060C \u063A\u064A\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v98-link";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C200: \u0645\u0639\u0627\u064A\u0646\u0629 \u0627\u0644\u0631\u0648\u0627\u0628\u0637)
+const VER = "v99-tasks";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C203: \u0645\u0633\u0624\u0648\u0644 \u0627\u0644\u0645\u0647\u0645\u0651\u0629 \u0639\u0636\u0648\u064C \u0641\u064A \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629)
 // C197: \u0627\u0644\u0633\u062C\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064E\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u062D\u062F\u062B { lvl, ev, ts, ...\u062D\u0642\u0648\u0644 } (Workers Logs \u062A\u0641\u0647\u0631\u0633 \u0627\u0644\u062D\u0642\u0648\u0644 \u0644\u0644\u0628\u062D\u062B \u0648\u0627\u0644\u062A\u0635\u0641\u064A\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -2611,10 +2611,10 @@ async function opChatTasksEdit(uid, payload, env, ctx) {
       updateMask: { fieldPaths: [fp("msgs", id, "enc"), fp("msgs", id, "edited")] } }]);
     return { edited: now };
   }
-  const title = String(payload.title || "").replace(/\s+/g, " ").trim().slice(0, 200);
+  const title = String(payload.title || "").replace(/\s+/g, " ").trim().slice(0, 200), mem = fsArr(c, "members");
   const tasks = (Array.isArray(payload.tasks) ? payload.tasks : []).slice(0, 50).map(t => ({
     id: /^[A-Za-z0-9_-]{1,40}$/.test(String(t && t.id || "")) ? String(t.id) : "t" + Math.random().toString(36).slice(2, 10),
-    text: String(t && t.text || "").slice(0, 300), assigneeId: segOk(String(t && t.assigneeId || "")) ? String(t.assigneeId) : null,
+    text: String(t && t.text || "").slice(0, 300), assigneeId: segOk(String(t && t.assigneeId || "")) && mem.indexOf(String(t.assigneeId)) >= 0 ? String(t.assigneeId) : null,   // C203: \u0639\u0636\u0648\u064C \u0641\u064A \u0627\u0644\u0645\u062D\u0627\u062F\u062B\u0629 \u0641\u0642\u0637 (\u0643\u0645\u0627 \u0641\u064A \u0627\u0644\u0625\u0636\u0627\u0641\u0629 \u0627\u0644\u0633\u0631\u064A\u0639\u0629)
     assigneeName: String(t && t.assigneeName || "").slice(0, 80), dueAt: Number(t && t.dueAt) > 0 ? Number(t.dueAt) : null })).filter(t => t.text.trim());
   if (!title || !tasks.length) throw new Error("title and one task required");
   // C173: \u062A\u0628\u0642\u0649 \u00AB\u0623\u0636\u0627\u0641\u0647\u0627\u00BB \u0644\u0644\u0645\u0647\u0627\u0645\u0651 \u0627\u0644\u062A\u064A \u0628\u0642\u064A\u062A
