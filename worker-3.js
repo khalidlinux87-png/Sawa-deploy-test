@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062D\u0635 \u06
    \u26A0\uFE0F \u0625\u0646 \u0623\u064F\u0639\u064A\u062F \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064D \u062C\u062F\u064A\u062F\u060C \u063A\u064A\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v104-calls";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C208: \u0627\u0644\u0641\u0627\u0626\u062A\u0629 \u0627\u0644\u062D\u0642\u064A\u0642\u064A\u0651\u0629 \u0648\u0627\u0644\u062D\u0638\u0631 \u0641\u064A \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u0627\u0644\u062C\u0645\u0627\u0639\u064A\u0651\u0629)
+const VER = "v105-contacts";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C209: \u0627\u0644\u062D\u0638\u0631 \u0645\u0646 \u0627\u0644\u0637\u0644\u0628\u0627\u062A \u0648\u0627\u0644\u0631\u0648\u0627\u0628\u0637)
 // C197: \u0627\u0644\u0633\u062C\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064E\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u062D\u062F\u062B { lvl, ev, ts, ...\u062D\u0642\u0648\u0644 } (Workers Logs \u062A\u0641\u0647\u0631\u0633 \u0627\u0644\u062D\u0642\u0648\u0644 \u0644\u0644\u0628\u062D\u062B \u0648\u0627\u0644\u062A\u0635\u0641\u064A\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -1455,6 +1455,8 @@ async function opPeopleAccept(uid, payload, env, claims) {
   const other = fstr(inv, "uid");
   if (!other) throw new Error("invite not found");
   if (other === uid) return { self: true };
+  // C209: \u0635\u0627\u062D\u0628 \u0627\u0644\u0631\u0627\u0628\u0637 \u062D\u0638\u0631\u0646\u064A \u21D2 \u0644\u0627 \u0623\u0635\u064A\u0631 \u062C\u0647\u0629 \u0627\u062A\u0651\u0635\u0627\u0644\u0647 \u0628\u0631\u0627\u0628\u0637\u0647 \u0627\u0644\u0639\u0627\u0645\u0651 (\u0627\u0644\u0631\u062F\u0651 \u0643\u0631\u0627\u0628\u0637\u064D \u063A\u064A\u0631 \u0645\u0648\u062C\u0648\u062F)
+  if (await blockedBy(token, other, uid).catch(() => false)) throw new Error("invite not found");
   const now = new Date().toISOString(), mine = memberIdFields(claims);
   const theirs = { name: fstr(inv, "name") ? { stringValue: fstr(inv, "name") } : { nullValue: null }, anon: { booleanValue: fbool(inv, "anon") } };
   await fsCommit(token, [
@@ -5134,7 +5136,10 @@ async function opCodeRespond(uid, payload, env, claims, ctx) {
     if (bl.indexOf(from) < 0) bl.push(from);
     data.blocked = bl.slice(-500);
     await fsCommit(token, [{ update: { name: DOC_ROOT + "/" + path, fields: { data: { stringValue: JSON.stringify(data) }, ts: { integerValue: String(Date.now()) } } } }]);
-    try { await rtdbPatch(token, { ["blk/" + uid + "/" + from]: true }); } catch (e) {}
+    // C209: \u0643\u0627\u0644\u062D\u0638\u0631 \u0645\u0646 \u0627\u0644\u0625\u0639\u062F\u0627\u062F\u0627\u062A (chat.prefs) \u2014 \u0627\u0644\u0641\u0647\u0631\u0633 \u0627\u0644\u0639\u0643\u0633\u064A\u0651 (C207) \u0648\u0625\u062E\u0631\u0627\u062C\u0647 \u0645\u0646 \u0642\u0635\u0635\u064A \u0648\u0644\u062D\u0638\u0627\u062A\u064A \u0627\u0644\u062D\u0627\u0644\u064A\u0651\u0629 \u0648\u0625\u062E\u0631\u0627\u062C\u064A \u0645\u0646 \u0642\u0635\u0635\u0647
+    try { await rtdbPatch(token, { ["blk/" + uid + "/" + from]: true, ["blkby/" + from + "/" + uid]: true }); } catch (e) {}
+    await storyStrip(token, uid, [from]); await storyStrip(token, from, [uid]);
+    await momStrip(token, uid, [from]).catch(() => 0);
   }
   return { done: action };
 }
