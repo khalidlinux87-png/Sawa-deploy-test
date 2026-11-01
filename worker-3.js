@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u06
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v112-tel";       // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C216: \u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u0644\u0627 \u064a\u0636\u064a\u0639 \u00b7 \u064a\u0634\u0645\u0644 C214/C215)
+const VER = "v113-ans";       // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C217: \u0627\u0644\u0646\u062c\u0627\u062d \u0628\u0639\u062f \u0627\u0644\u0631\u062f\u0651 \u00b7 IPv6 \u0641\u064a \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C216)
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -4183,6 +4183,7 @@ async function opCallRing(uid, payload, env, claims, ctx) {
 //       \u0644\u0644\u0645\u062f\u064a\u0631: admin.tel \u064a\u062c\u0645\u0639\u0647\u0627 \u0628\u0627\u0644\u0645\u0639\u0631\u0651\u0641 (\u0646\u0633\u0628\u0629 \u0627\u0644\u0645\u0631\u0648\u0631 \u0639\u0628\u0631 TURN \u00b7 UDP \u00b7 \u0632\u0645\u0646 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 RTT/\u0627\u0644\u0641\u0642\u062f/\u0627\u0644\u062a\u0630\u0628\u0630\u0628 \u00b7 \u0623\u0633\u0628\u0627\u0628 \u0627\u0644\u0641\u0634\u0644). \u062a\u064f\u062d\u0630\u0641 \u0628\u0639\u062f \u0663\u0660 \u064a\u0648\u0645\u0627\u064b.
 const TEL_ID = /^[A-Za-z0-9_-]{4,60}$/;
 const TEL_NAT = new Set(["sym", "eim", "none"]), TEL_CAND = new Set(["host", "srflx", "prflx", "relay"]);   // C215
+const TEL_FAIL = new Set(["failed", "error", "lost", "unfinished"]);   // C217: \u0623\u0633\u0628\u0627\u0628 \u00ab\u0641\u0634\u0644\u064c \u062a\u0642\u0646\u064a\u0651\u00bb (\u0644\u0627 \u00ab\u0644\u0645 \u064a\u064f\u0631\u064e\u062f\u0651\u00bb)
 async function telWrite(token, cid, side, uid, d) {
   const id = (cid + "~" + side).replace(/[^A-Za-z0-9_~-]/g, "").slice(0, 120);
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/tel/" + id, fields: { cid: { stringValue: cid }, side: { stringValue: side }, by: { stringValue: uid }, ts: { integerValue: String(Date.now()) }, d: { stringValue: JSON.stringify(d).slice(0, 3000) } } } }]);
@@ -4199,7 +4200,8 @@ async function opCallTel(uid, payload, env) {
     // C215: \u0646\u0648\u0639 NAT \u0641\u064a \u0634\u0628\u0643\u0629 \u0627\u0644\u0647\u0627\u062a\u0641 (\u0642\u064a\u0627\u0633\u0647 \u0642\u0628\u0644 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629) \u0648\u0646\u0648\u0639 \u0627\u0644\u0639\u0646\u0648\u0627\u0646\u064a\u0646 \u0627\u0644\u0645\u062e\u062a\u0627\u0631\u064a\u0646 \u2014 \u064a\u0641\u0633\u0651\u0631 \u0644\u0645\u0627\u0630\u0627 \u0644\u0645 \u064a\u0643\u0646 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u0645\u0628\u0627\u0634\u0631\u0627\u064b
     nat: TEL_NAT.has(p.nat) ? p.nat : "", nsx: num(p.nsx, 0, 20), v6: p.v6 ? 1 : 0,
     lct: TEL_CAND.has(p.lct) ? p.lct : "", rct: TEL_CAND.has(p.rct) ? p.rct : "", fam: p.fam === "4" || p.fam === "6" ? p.fam : "",
-    qd: num(p.qd, 0, 4320) };   // C216: \u062f\u0642\u0627\u0626\u0642 \u062a\u0623\u062e\u0651\u0631 \u0627\u0644\u0633\u062c\u0644\u0651 \u0641\u064a \u0637\u0627\u0628\u0648\u0631 \u0627\u0644\u0647\u0627\u062a\u0641 (\u0623\u064f\u0639\u064a\u062f \u0625\u0631\u0633\u0627\u0644\u0647 \u0644\u0627\u062d\u0642\u0627\u064b)
+    qd: num(p.qd, 0, 4320),
+    v6l: p.v6l ? 1 : 0, v6r: p.v6r ? 1 : 0 };   // C217: \u0639\u0631\u0636 \u0647\u0630\u0627 \u0627\u0644\u0637\u0631\u0641 / \u0627\u0644\u0637\u0631\u0641 \u0627\u0644\u0622\u062e\u0631 \u0639\u0646\u0648\u0627\u0646 IPv6 \u0639\u0627\u0645\u0651\u0627\u064b \u0641\u064a \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629   // C216: \u062f\u0642\u0627\u0626\u0642 \u062a\u0623\u062e\u0651\u0631 \u0627\u0644\u0633\u062c\u0644\u0651 \u0641\u064a \u0637\u0627\u0628\u0648\u0631 \u0627\u0644\u0647\u0627\u062a\u0641 (\u0623\u064f\u0639\u064a\u062f \u0625\u0631\u0633\u0627\u0644\u0647 \u0644\u0627\u062d\u0642\u0627\u064b)
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   await telWrite(token, cid, uid.slice(0, 10), uid, d);
   stat("tel:" + (d.ok ? (d.route || "ok") : "fail"));
@@ -4242,7 +4244,15 @@ async function telAnalyze(token, since) {
     // C215: \u0646\u0648\u0639 NAT \u0644\u0643\u0644\u0651 \u0637\u0631\u0641\u064d \u0623\u0631\u0633\u0644 \u0633\u062c\u0644\u0651\u0647 (\u0644\u0627 \u0644\u0643\u0644\u0651 \u0645\u0643\u0627\u0644\u0645\u0629) \u2014 unk = \u0646\u0633\u062e\u0629 \u0623\u0642\u062f\u0645 \u0644\u0627 \u062a\u0642\u064a\u0633\u0647
     const nat = { sym: 0, eim: 0, none: 0, unk: 0, v6: 0 };
     list.forEach(c => c.sides.forEach(x => { if (TEL_NAT.has(x.nat)) nat[x.nat]++; else nat.unk++; if (x.v6) nat.v6++; }));
-    return { n: list.length, conn: conn.length, relay: relay.length, tcp: tcp.length, nat, setup: med(conn.map(c => med(c.sides.map(x => x.setup)))), setup90: p90(conn.map(c => med(c.sides.map(x => x.setup)))),
+    // C217: \u0627\u0644\u0646\u062c\u0627\u062d \u0645\u0646 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062a \u0627\u0644\u062a\u064a \u0631\u064f\u062f\u0651 \u0639\u0644\u064a\u0647\u0627: \u0641\u0634\u0644\u064c \u062a\u0642\u0646\u064a\u0651 (failed \u00b7 error \u00b7 lost \u00b7 unfinished) \u0645\u0642\u0627\u0628\u0644 \u00ab\u0644\u0645 \u064a\u064f\u0631\u064e\u062f\u0651\u00bb (\u0644\u0645 \u064a\u064f\u062c\u0628 \u00b7 \u0645\u0634\u063a\u0648\u0644 \u00b7 \u0631\u064f\u0641\u0636\u062a \u00b7 \u0623\u064f\u0644\u063a\u064a\u062a \u00b7 \u2026)
+    //       \u0648\u00abupgraded\u00bb (\u062a\u062d\u0648\u0651\u0644\u062a \u0625\u0644\u0649 \u062c\u0645\u0627\u0639\u064a\u0651\u0629) \u0644\u0627 \u062a\u064f\u062d\u0633\u0628 \u0641\u064a \u0623\u064a\u064d\u0651 \u0645\u0646\u0647\u0645\u0627.
+    const notConn = list.filter(c => !c.sides.some(x => x.ok));
+    const fail = notConn.filter(c => c.sides.some(x => TEL_FAIL.has(x.reason))).length;
+    const moved = notConn.filter(c => !c.sides.some(x => TEL_FAIL.has(x.reason)) && c.sides.some(x => x.reason === "upgraded")).length;
+    // C217: IPv6 \u0645\u0646 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062a \u0627\u0644\u0645\u062a\u0651\u0635\u0644\u0629 \u0646\u0641\u0633\u0647\u0627 \u2014 \u0639\u0631\u0636\u0647 \u0627\u0644\u0637\u0631\u0641\u0627\u0646 (\u0645\u0646 \u0623\u064a\u0651 \u062c\u0647\u0629) \u00b7 \u0648\u0627\u062a\u0651\u0635\u0644\u062a \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629 \u0639\u0628\u0631\u0647 (fam 6)
+    const v6both = conn.filter(c => c.sides.some(x => x.v6l && x.v6r)).length;
+    const v6used = conn.filter(c => c.sides.some(x => x.fam === "6")).length;
+    return { n: list.length, conn: conn.length, fail, unans: notConn.length - fail - moved, v6both, v6used, relay: relay.length, tcp: tcp.length, nat, setup: med(conn.map(c => med(c.sides.map(x => x.setup)))), setup90: p90(conn.map(c => med(c.sides.map(x => x.setup)))),
       rtt: med(sv("rtt")), loss: med(sv("loss")), jit: med(sv("jit")), fps: med(conn.filter(c => /video/.test(c.sides[0].k)).map(c => med(c.sides.map(x => x.fps && x.fps.med)))), reasons,
       ringOk: list.filter(c => c.srv && c.srv.sent > 0).length, ringN: list.filter(c => c.srv).length };
   };
