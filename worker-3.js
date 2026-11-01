@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062D\u0635 \u06
    \u26A0\uFE0F \u0625\u0646 \u0623\u064F\u0639\u064A\u062F \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064D \u062C\u062F\u064A\u062F\u060C \u063A\u064A\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v105-contacts";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C209: \u0627\u0644\u062D\u0638\u0631 \u0645\u0646 \u0627\u0644\u0637\u0644\u0628\u0627\u062A \u0648\u0627\u0644\u0631\u0648\u0627\u0628\u0637)
+const VER = "v106-delete";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C210: \u062D\u0630\u0641 \u0627\u0644\u062D\u0633\u0627\u0628 \u0643\u0627\u0645\u0644\u0627\u064B)
 // C197: \u0627\u0644\u0633\u062C\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064E\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u062D\u062F\u062B { lvl, ev, ts, ...\u062D\u0642\u0648\u0644 } (Workers Logs \u062A\u0641\u0647\u0631\u0633 \u0627\u0644\u062D\u0642\u0648\u0644 \u0644\u0644\u0628\u062D\u062B \u0648\u0627\u0644\u062A\u0635\u0641\u064A\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -4551,7 +4551,7 @@ async function opStoryPost(uid, payload, env, claims) {
     if (!/^[a-z0-9]{6,32}$/.test(mid)) throw new Error("bad id: mid");
     const md = await fsGet(token, "stories/" + uid + "/media/" + mid);
     if (!md || fstr(md, "by") !== uid || !fbool(md, "done")) throw new Error("media not uploaded");
-    Object.assign(item, { mid, mime: fstr(md, "mime").slice(0, 100), size: fsInt(md, "size"), n: fsInt(md, "n") });
+    Object.assign(item, { mid, mime: (fstr(md, "mime") || "").slice(0, 100), size: fsInt(md, "size"), n: fsInt(md, "n") });
     if (p.thumb && typeof p.thumb === "string" && p.thumb.length <= 8000 && /^data:image\/(jpeg|png|webp);base64,/.test(p.thumb)) item.thumb = p.thumb;
     if (Number(p.w) > 0 && Number(p.h) > 0) { item.w = Math.round(Number(p.w)); item.h = Math.round(Number(p.h)); }
     if (t === "video") item.dur = Math.max(1, Math.min(31, Math.round(Number(p.dur) || 15)));
@@ -4699,7 +4699,7 @@ async function opMomentPost(uid, payload, env, claims, ctx) {
     if (!momMidOk(mid)) throw new Error("bad id: mid");
     const md = await fsGet(token, "moments/" + pid + "/media/" + mid).catch(() => null);
     if (!md || fstr(md, "by") !== uid || !fbool(md, "done")) throw new Error("media not uploaded");
-    const it = { mid, t, mime: fstr(md, "mime").slice(0, 100), size: fsInt(md, "size"), n: fsInt(md, "n") };
+    const it = { mid, t, mime: (fstr(md, "mime") || "").slice(0, 100), size: fsInt(md, "size"), n: fsInt(md, "n") };
     if (m.thumb && typeof m.thumb === "string" && m.thumb.length <= 8000 && /^data:image\/(jpeg|png|webp);base64,/.test(m.thumb)) it.thumb = m.thumb;
     // C137: \u063A\u0644\u0627\u0641 \u0627\u0644\u0641\u064A\u062F\u064A\u0648 \u0627\u0644\u0648\u0627\u0636\u062D (\u2264 \u0661\u0662\u0660 \u0623\u0644\u0641 \u062D\u0631\u0641 \u2248 \u0669\u0660 \u0643\u064A\u0644\u0648\u0628\u0627\u064A\u062A) \u2014 \u0641\u064A\u062F\u064A\u0648 \u0648\u0627\u062D\u062F \u0641\u064A \u0627\u0644\u0644\u062D\u0638\u0629 \u0641\u064A\u0628\u0642\u0649 \u0627\u0644\u0645\u0633\u062A\u0646\u062F \u0635\u063A\u064A\u0631\u0627\u064B
     if (t === "video" && m.poster && typeof m.poster === "string" && m.poster.length <= 120000 && /^data:image\/jpeg;base64,/.test(m.poster)) it.poster = m.poster;
@@ -5179,16 +5179,31 @@ async function opAccountDelete(uid, payload, env, claims) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const P = (rel) => DOC_ROOT + "/" + rel;
   const idOf = (d) => d.name.split("/").pop();
-  const [acc, people, groups, devices, creq, creqout, contacts, schedules] = await Promise.all([
+  const [acc, people, groups, devices, creq, creqout, contacts, schedules, vouches, vouchin] = await Promise.all([
     fsGet(token, "accounts/" + uid).catch(() => null),
-    ...["people", "groups", "devices", "creq", "creqout", "contacts", "schedules"].map(c => fsList(token, "accounts/" + uid + "/" + c).catch(() => [])),
+    ...["people", "groups", "devices", "creq", "creqout", "contacts", "schedules", "vouches", "vouchin"].map(c => fsList(token, "accounts/" + uid + "/" + c).catch(() => [])),
   ]);
+  const prefsDoc = await fsGet(token, "accounts/" + uid + "/chatprefs/main").catch(() => null);
+  let myBlocked = []; try { myBlocked = (JSON.parse(fstr(prefsDoc, "data") || "{}").blocked || []).filter(x => segOk(String(x))); } catch (e) {}
   const writes = [], rt = {}, purge = [], now = Date.now();
   // \u062C\u0647\u0627\u062A \u0627\u0644\u0627\u062A\u0651\u0635\u0627\u0644 \u0648\u0627\u0644\u0637\u0644\u0628\u0627\u062A \u2014 \u0641\u064A \u0627\u0644\u0627\u062A\u0651\u062C\u0627\u0647\u064A\u0646
   for (const d of people) { writes.push({ delete: d.name }, { delete: P("accounts/" + idOf(d) + "/people/" + uid) }); rt["acl/" + idOf(d) + "/" + uid] = null; }
   for (const d of creq) writes.push({ delete: d.name }, { delete: P("accounts/" + idOf(d) + "/creqout/" + uid) });
   for (const d of creqout) writes.push({ delete: d.name }, { delete: P("accounts/" + idOf(d) + "/creq/" + uid) });
-  for (const d of devices.concat(contacts, schedules)) writes.push({ delete: d.name });
+  for (const d of devices.concat(contacts, schedules, vouches, vouchin)) writes.push({ delete: d.name });
+  // C210: \u0645\u0627 \u0643\u0627\u0646 \u064A\u0628\u0642\u0649 \u0628\u0639\u062F \u0627\u0644\u062D\u0630\u0641 \u2014 \u0641\u0647\u0631\u0633\u0627 \u0627\u0644\u0631\u0642\u0645 \u0648\u0627\u0644\u0628\u0631\u064A\u062F (\u064A\u064F\u062D\u0631\u064E\u0651\u0631\u0627\u0646 \u0644\u0635\u0627\u062D\u0628\u0647\u0645\u0627 \u0627\u0644\u062A\u0627\u0644\u064A)\u060C \u0625\u0639\u062F\u0627\u062F\u0627\u062A \u0627\u0644\u0644\u062D\u0638\u0627\u062A\u060C \u0627\u0644\u062D\u0635\u0651\u0629\u060C \u0628\u064A\u0627\u0646\u0627\u062A TURN\u060C \u0637\u0644\u0628\u0627\u062A \u0631\u0628\u0637 \u0627\u0644\u0639\u0627\u0626\u0644\u0629\u060C \u0627\u0644\u0642\u0635\u0651\u0629 \u0627\u0644\u062D\u0627\u0644\u064A\u0651\u0629
+  const ph = fstr(acc, "phone"), eh = fstr(acc, "emailHash");
+  if (ph && fstr(await fsGet(token, "phones/" + ph).catch(() => null), "uid") === uid) writes.push({ delete: P("phones/" + ph) });
+  if (eh && fstr(await fsGet(token, "emails/" + eh).catch(() => null), "uid") === uid) writes.push({ delete: P("emails/" + eh) });
+  for (const k of ["mset", "quota", "turncred", "stories"]) writes.push({ delete: P(k + "/" + uid) });
+  for (const q of [{ uid: uid }, { by: uid }]) for (const d of await fsQueryEq(token, "famreq", q, 100).catch(() => [])) writes.push({ delete: d.name });
+  purge.push({ id: "story_" + uid, kind: "story" }, { id: "moments_" + uid, kind: "moments" });
+  // \u0644\u062D\u0638\u0627\u062A\u064A \u062A\u062E\u062A\u0641\u064A \u0641\u0648\u0631\u0627\u064B (\u062C\u0645\u0647\u0648\u0631\u064C \u0641\u0627\u0631\u063A) \u062B\u0645\u0651 \u062A\u064F\u062D\u0630\u0641 \u0643\u0627\u0645\u0644\u0629\u064B \u0645\u0639 \u0648\u0633\u0627\u0626\u0637\u0647\u0627 \u0648\u062A\u0639\u0644\u064A\u0642\u0627\u062A\u0647\u0627 \u0628\u0627\u0644\u0645\u062C\u062F\u0648\u0650\u0644
+  try {
+    const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "moments" }], where: { fieldFilter: { field: { fieldPath: "by" }, op: "EQUAL", value: { stringValue: uid } } }, limit: 300 } }) });
+    for (const r of ((await res.json()) || []).filter(r => r.document)) writes.push({ update: { name: r.document.name, fields: { aud: { arrayValue: { values: [] } }, gone: { booleanValue: true } } }, updateMask: { fieldPaths: ["aud", "gone"] } });
+  } catch (e) {}
   writes.push({ delete: P("accounts/" + uid + "/chatprefs/main") });
   const code = fstr(acc, "code");
   if (code) writes.push({ delete: P("codes/" + code) });
@@ -5226,14 +5241,15 @@ async function opAccountDelete(uid, payload, env, claims) {
   // \u0627\u0644\u0645\u0648\u0627\u0639\u064A\u062F \u0627\u0644\u062A\u064A \u0623\u0646\u0634\u0623\u0647\u0627 \u0648\u062F\u0639\u0648\u0627\u062A \u00AB\u0631\u0627\u0628\u0637\u064A \u0627\u0644\u0634\u062E\u0635\u064A\u0651\u00BB
   for (const s of await fsQueryEq(token, "scheds", { by: uid }, 100).catch(() => [])) writes.push({ delete: s.name });
   for (const s of await fsQueryEq(token, "pinvites", { uid: uid }, 100).catch(() => [])) writes.push({ delete: s.name });
-  for (const t of purge) writes.push({ update: { name: P("purge/" + t.id), fields: { kind: { stringValue: t.kind }, uid: { stringValue: uid },
+  for (const t of purge) writes.push({ update: { name: P("purge/" + t.id.replace(/[^A-Za-z0-9_-]/g, "_")), fields: { kind: { stringValue: t.kind }, uid: { stringValue: uid },
     gid: t.gid ? { stringValue: t.gid } : { nullValue: null }, cid: t.cid ? { stringValue: t.cid } : { nullValue: null }, ts: { integerValue: String(now) } } } });
   writes.push({ delete: P("accounts/" + uid) });
   writes.push({ delete: P("avatars/" + uid) });   // v37: \u0627\u0644\u0635\u0648\u0631\u0629
   await commitChunks(token, writes);
   // RTDB: \u062D\u0636\u0648\u0631\u064A\u060C \u0635\u0644\u0627\u062D\u064A\u0651\u0627\u062A\u064A\u060C \u0635\u0646\u062F\u0648\u0642 \u0645\u0643\u0627\u0644\u0645\u0627\u062A\u064A\u060C \u0648\u0645\u0646 \u0643\u0627\u0646 \u064A\u0631\u0649 \u062D\u0636\u0648\u0631\u064A
   try { const acl = await rtdbGet(token, "acl/" + uid); for (const o in (acl || {})) rt["acl/" + o + "/" + uid] = null; } catch (e) {}
-  Object.assign(rt, { ["status/" + uid]: null, ["acl/" + uid]: null, ["inbox/" + uid]: null, ["blk/" + uid]: null });
+  Object.assign(rt, { ["status/" + uid]: null, ["acl/" + uid]: null, ["inbox/" + uid]: null, ["blk/" + uid]: null, ["blkby/" + uid]: null });
+  for (const x of myBlocked.slice(0, 500)) rt["blkby/" + x + "/" + uid] = null;   // C210: \u0627\u0644\u0641\u0647\u0631\u0633 \u0627\u0644\u0639\u0643\u0633\u064A\u0651 (C207)
   try { await rtdbPatch(token, rt); } catch (e) { slog("warn", "rtdb.del", { err: e && e.message }); }
   PROFILE_CACHE.delete(uid);
   // \u0627\u0644\u0647\u0648\u064A\u0651\u0629 \u0646\u0641\u0633\u0647\u0627 (Firebase Auth) \u2014 \u0622\u062E\u0631 \u062E\u0637\u0648\u0629
@@ -5259,6 +5275,8 @@ async function purgeWork(env, budget) {
     try {
       if (kind === "family") finished = await purgeFamily(token, fstr(j, "gid"), uid, spend);
       else if (kind === "chat") finished = await purgeChat(token, fstr(j, "cid"), spend);
+      else if (kind === "moments") finished = await purgeMoments(token, uid, spend);   // C210
+      else if (kind === "story") finished = await purgeStory(token, uid, spend);
       else finished = true;
     } catch (e) { slog("warn", "purge", { kind, err: e && e.message }); }
     if (finished && spend()) { await fsCommit(token, [{ delete: j.name }]).catch(() => {}); done++; }
@@ -5305,6 +5323,34 @@ async function purgeFamily(token, gid, uid, spend) {
   await fsCommit(token, [{ delete: DOC_ROOT + "/groups/" + gid }, { delete: DOC_ROOT + "/chats/fam_" + gid }]).catch(() => {});
   try { await rtdbPatch(token, { ["chatm/fam_" + gid]: null }); } catch (e) {}
   return true;
+}
+// C210: \u0644\u062D\u0638\u0627\u062A \u0627\u0644\u062D\u0633\u0627\u0628 \u0627\u0644\u0645\u062D\u0630\u0648\u0641 (\u0627\u0644\u0648\u0633\u0627\u0626\u0637 \u0648\u0623\u062C\u0632\u0627\u0624\u0647\u0627\u060C \u0627\u0644\u062A\u0639\u0644\u064A\u0642\u0627\u062A\u060C \u0627\u0644\u0648\u062B\u064A\u0642\u0629) \u062B\u0645\u0651 \u0625\u0634\u0639\u0627\u0631\u0627\u062A \u0644\u062D\u0638\u0627\u062A\u0647 \u2014 \u0639\u0644\u0649 \u062F\u0641\u0639\u0627\u062A
+async function purgeMoments(token, uid, spend) {
+  if (!segOk(String(uid)) || !spend()) return !segOk(String(uid));
+  const res = await fetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "moments" }], where: { fieldFilter: { field: { fieldPath: "by" }, op: "EQUAL", value: { stringValue: uid } } }, limit: 10 } }) });
+  const docs = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+  for (const d of docs) {
+    const rel = d.name.slice(DOC_ROOT.length + 1);
+    if (!spend()) return false;
+    for (const m of await fsList(token, rel + "/media").catch(() => [])) {
+      if (!(await purgeColl(token, rel + "/media/" + m.name.split("/").pop() + "/c", spend))) return false;
+      if (!spend()) return false; await fsCommit(token, [{ delete: m.name }]).catch(() => {});
+    }
+    if (!(await purgeColl(token, rel + "/cm", spend))) return false;
+    if (!spend()) return false; await fsCommit(token, [{ delete: d.name }]).catch(() => {});
+  }
+  if (docs.length) return false;   // \u062F\u0641\u0639\u0629\u064C \u0623\u062E\u0631\u0649 \u0641\u064A \u0627\u0644\u062A\u0634\u063A\u064A\u0644 \u0627\u0644\u062A\u0627\u0644\u064A
+  return await purgeColl(token, "mnote/" + uid + "/n", spend);
+}
+async function purgeStory(token, uid, spend) {
+  if (!segOk(String(uid))) return true;
+  if (!spend()) return false;
+  for (const m of await fsList(token, "stories/" + uid + "/media").catch(() => [])) {
+    if (!(await purgeColl(token, "stories/" + uid + "/media/" + m.name.split("/").pop() + "/c", spend))) return false;
+    if (!spend()) return false; await fsCommit(token, [{ delete: m.name }]).catch(() => {});
+  }
+  return await purgeColl(token, "stories/" + uid + "/seen", spend);
 }
 async function purgeChat(token, cid, spend) {
   if (!segOk(cid)) return true;
