@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062D\u0635 \u06
    \u26A0\uFE0F \u0625\u0646 \u0623\u064F\u0639\u064A\u062F \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064D \u062C\u062F\u064A\u062F\u060C \u063A\u064A\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v108-sched";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C212: \u0645\u0632\u0627\u0645\u0646\u0629 \u0627\u0644\u0645\u0648\u0627\u0639\u064A\u062F)
+const VER = "v109-admin";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062F\u0627\u0631 \u2014 \u062A\u0638\u0647\u0631 \u0641\u064A \u0643\u0644\u0651 \u0631\u062F\u0651 (C213: \u0627\u0644\u0625\u062F\u0627\u0631\u0629 \u0648\u0627\u0644\u0628\u0644\u0627\u063A\u0627\u062A)
 // C197: \u0627\u0644\u0633\u062C\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064E\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062D\u062F \u0644\u0643\u0644\u0651 \u062D\u062F\u062B { lvl, ev, ts, ...\u062D\u0642\u0648\u0644 } (Workers Logs \u062A\u0641\u0647\u0631\u0633 \u0627\u0644\u062D\u0642\u0648\u0644 \u0644\u0644\u0628\u062D\u062B \u0648\u0627\u0644\u062A\u0635\u0641\u064A\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -5419,11 +5419,12 @@ const ADM_RANK = { viewer: 1, moderator: 2, admin: 3, owner: 4 };
 let TEAM = null, TEAM_AT = 0;
 async function adminTeam(env, fresh) {
   if (!fresh && TEAM && Date.now() - TEAM_AT < 60000) return TEAM;
-  try {
-    const token = await getAccessToken(JSON.parse(env.SA_JSON));
-    const d = await fsGet(token, "config/adminTeam");
-    TEAM = d && fstr(d, "m") ? JSON.parse(fstr(d, "m")) : {};
-  } catch (e) { TEAM = TEAM || {}; }
+  let d;
+  try { const token = await getAccessToken(JSON.parse(env.SA_JSON)); d = await fsGet(token, "config/adminTeam"); }
+  catch (e) { TEAM = TEAM || {}; TEAM_AT = Date.now(); return TEAM; }   // \u0639\u0637\u0644\u064C \u0641\u064A \u0627\u0644\u0642\u0631\u0627\u0621\u0629: \u0622\u062E\u0631 \u0642\u0627\u0626\u0645\u0629\u064D \u0645\u0639\u0631\u0648\u0641\u0629
+  // C213: \u0642\u0627\u0626\u0645\u0629\u064C \u062A\u0627\u0644\u0641\u0629 \u21D2 \u0644\u0627 \u0623\u062D\u062F \u063A\u064A\u0631 \u0627\u0644\u0645\u0627\u0644\u0643 (\u0643\u0627\u0646\u062A \u062A\u064F\u0628\u0642\u064A \u0627\u0644\u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0633\u0627\u0628\u0642\u0629 \u0645\u0646 \u0627\u0644\u0630\u0627\u0643\u0631\u0629) \u2014 \u0648\u0627\u0644\u0642\u064A\u0645\u0629 \u064A\u062C\u0628 \u0623\u0646 \u062A\u0643\u0648\u0646 \u0643\u0627\u0626\u0646\u0627\u064B
+  try { const t = d && fstr(d, "m") ? JSON.parse(fstr(d, "m")) : {}; TEAM = t && typeof t === "object" && !Array.isArray(t) ? t : {}; }
+  catch (e) { TEAM = {}; slog("error", "admin.team.corrupt", { err: e && e.message }); }
   TEAM_AT = Date.now(); return TEAM;
 }
 async function adminRole(env, claims) {
