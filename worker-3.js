@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u06
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v114-fast";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
+const VER = "v115-pins";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -2103,6 +2103,7 @@ async function opChatReact(uid, payload, env) {
     updateMask: { fieldPaths: [fp("msgs", id, "re", uid)] }, currentDocument: { exists: true } }]);
   return { ok: true };
 }
+const PIN_MAX = 3;   // C227
 async function opChatPin(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const cid = payload && payload.cid;
@@ -2111,8 +2112,17 @@ async function opChatPin(uid, payload, env) {
   if (fstr(c, "type") === "group" && (fbool(c, "infoAdminsOnly") || fbool(c, "adminsOnly")) && fsArr(c, "admins").indexOf(uid) < 0) throw new Error("only admins can change this");
   if (await dmBlocked(token, c, uid)) throw new Error("blocked");   // v61
   const id = payload.id && MSG_ID.test(String(payload.id)) ? String(payload.id) : null;
-  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { pinned: id ? { stringValue: id } : { nullValue: null } } }, updateMask: { fieldPaths: ["pinned"] } }]);
-  return { pinned: id };
+  // C227: \u062a\u062b\u0628\u064a\u062a \u062d\u062a\u0651\u0649 \u0663 \u0631\u0633\u0627\u0626\u0644 (\u0627\u0644\u0623\u062d\u062f\u062b \u0623\u0648\u0651\u0644\u0627\u064b) \u0641\u064a \u00abpins\u00bb \u2014 \u0648\u00abpinned\u00bb = \u0623\u0648\u0651\u0644\u0647\u0627 \u0644\u0644\u0646\u0633\u062e \u0627\u0644\u0623\u0642\u062f\u0645 \u0645\u0646 \u0627\u0644\u062a\u0637\u0628\u064a\u0642
+  //   \u0627\u0644\u062c\u062f\u064a\u062f \u064a\u0631\u0633\u0644 toggle:true (\u062a\u0628\u062f\u064a\u0644 \u0627\u0644\u0631\u0633\u0627\u0644\u0629) \u00b7 \u0627\u0644\u0623\u0642\u062f\u0645 \u064a\u0631\u0633\u0644 id (\u062a\u062b\u0628\u064a\u062a) \u0623\u0648 null (\u0625\u0644\u063a\u0627\u0621 \u0627\u0644\u0645\u062b\u0628\u0651\u062a\u0629 \u0627\u0644\u0638\u0627\u0647\u0631\u0629 \u0639\u0646\u062f\u0647 = \u0627\u0644\u0623\u0648\u0644\u0649)
+  let pins = fsArr(c, "pins").filter((x) => MSG_ID.test(String(x || "")));
+  const old = fstr(c, "pinned"); if (!pins.length && old) pins = [old];
+  if (payload.toggle) { if (!id) throw new Error("bad id"); pins = pins.indexOf(id) >= 0 ? pins.filter((x) => x !== id) : [id].concat(pins); }
+  else if (id) pins = [id].concat(pins.filter((x) => x !== id));
+  else pins = pins.slice(1);
+  pins = pins.slice(0, PIN_MAX);
+  const first = pins[0] || null;
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { pinned: first ? { stringValue: first } : { nullValue: null }, pins: { arrayValue: { values: pins.map((x) => ({ stringValue: x })) } } } }, updateMask: { fieldPaths: ["pinned", "pins"] } }]);
+  return { pinned: first, pins };
 }
 // \u00ab\u0648\u0635\u0644\u062a/\u0642\u064f\u0631\u0626\u062a\u00bb: \u0643\u0644\u0651 \u0645\u0633\u062a\u062e\u062f\u0645\u064d \u064a\u0643\u062a\u0628 \u062d\u0642\u0648\u0644\u0647 \u0641\u0642\u0637 (delivered.me \u00b7 reads.me \u00b7 readCnt.me). \u062d\u062a\u0651\u0649 \u0663\u0660 \u0645\u062d\u0627\u062f\u062b\u0629 \u0641\u064a \u0637\u0644\u0628\u064d \u0648\u0627\u062d\u062f.
 async function opChatMark(uid, payload, env) {
