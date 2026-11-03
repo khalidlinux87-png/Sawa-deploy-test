@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u06
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v115-pins";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
+const VER = "v116-geo";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -4066,13 +4066,13 @@ async function opAdminRelay(uid, payload, env, claims) {
   if (!role) return { admin: false };
   if (payload && payload.primary !== undefined) {
     if (ADM_RANK[role] < ADM_RANK.admin) throw new Error("view only");
-    const v = payload.primary === "m" || payload.primary === "cf" ? payload.primary : "";
+    const v = payload.primary === "m" || payload.primary === "cf" || payload.primary === "p" ? payload.primary : "";   // C228: p = \u0627\u0644\u0623\u0642\u0631\u0628 \u0644\u0644\u0637\u0631\u0641\u064a\u0646
     const token = await getAccessToken(JSON.parse(env.SA_JSON));
     await fsCommit(token, [{ update: { name: DOC_ROOT + "/config/relay", fields: { primary: { stringValue: v }, by: { stringValue: uid }, ts: { integerValue: String(Date.now()) } } } }]);
     RELAY_CFG = v; RELAY_AT = Date.now();
     await adminLog(env, uid, claims, role, "relay", v || "auto");
   }
-  return { admin: true, role, primary: await relayPref(env), envDefault: env.TURN_PROVIDER === "cloudflare" ? "cf" : "m",
+  return { admin: true, role, primary: await relayPref(env), envDefault: env.TURN_PROVIDER === "cloudflare" ? "cf" : env.TURN_PROVIDER === "pair" ? "p" : "m",
     has: { m: !!((env.METERED_USER && env.METERED_PASS) || (env.METERED_KEY && env.METERED_APP)), cf: !!(env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN) } };
 }
 const HAS_CONTACT = new Map();
@@ -4141,7 +4141,13 @@ async function opRtcIce(uid, payload, env, claims, request) {
     } catch (e) { slog("warn", "TURN_EXTRA", { err: String(e.message || e) }); }
   }
   // C165: Metered \u0647\u0648 \u0627\u0644\u0648\u0633\u064a\u0637 \u0627\u0644\u0623\u0633\u0627\u0633\u064a\u0651 \u0648 Cloudflare \u0627\u062d\u062a\u064a\u0627\u0637\u064c \u0625\u0646 \u0641\u0634\u0644 (\u0644\u0644\u0645\u0642\u0627\u0631\u0646\u0629) \u00b7 TURN_PROVIDER = "cloudflare" \u064a\u0639\u0643\u0633 \u0627\u0644\u062a\u0631\u062a\u064a\u0628
-  const want = (await relayPref(env).catch(() => "")) || (env.TURN_PROVIDER === "cloudflare" ? "cf" : "m");   // C175: \u0627\u062e\u062a\u064a\u0627\u0631 \u0627\u0644\u0645\u062f\u064a\u0631 \u064a\u063a\u0644\u0628
+  const want = (await relayPref(env).catch(() => "")) || (env.TURN_PROVIDER === "cloudflare" ? "cf" : env.TURN_PROVIDER === "pair" ? "p" : "m");   // C175: \u0627\u062e\u062a\u064a\u0627\u0631 \u0627\u0644\u0645\u062f\u064a\u0631 \u064a\u063a\u0644\u0628
+  // C228: \u00abp\u00bb = \u0627\u0644\u0623\u0642\u0631\u0628 \u0644\u0644\u0637\u0631\u0641\u064a\u0646 \u2014 \u0644\u0627 \u0648\u0633\u064a\u0637 \u0645\u0641\u0636\u064e\u0651\u0644\u061b \u0627\u0644\u0647\u0627\u062a\u0641\u0627\u0646 \u064a\u062e\u062a\u0627\u0631\u0627\u0646 \u0645\u0639\u0627\u064b \u0628\u0642\u064a\u0627\u0633\u0627\u062a\u0647\u0645\u0627 (rtc.peer)
+  if (want === "p" && relays.length) {
+    stat("turn:pair");
+    const all0 = []; relays.slice(0, 2).forEach(r => r.iceServers.forEach(x => all0.push(x)));
+    return Object.assign({ turn: true, provider: "pair", primary: "p", iceServers: stun.concat(all0), relays }, cfErr ? { cfErr } : {});
+  }
   const hasM = relays.some(r => /^m/.test(r.id)), hasCf = relays.some(r => r.id === "cf");
   const primary = (want === "cf" && hasCf) || !hasM ? "cf" : "m";
   const isP = (r) => primary === "cf" ? r.id === "cf" : /^m/.test(r.id);
@@ -4153,6 +4159,46 @@ async function opRtcIce(uid, payload, env, claims, request) {
   const prim = relays.filter(isP), base = prim.length ? prim : relays;
   const bl = []; base.forEach(r => r.iceServers.forEach(x => bl.push(x)));
   return Object.assign({ turn: true, provider: relays[0].id === "cf" ? "cloudflare" : "metered", primary: primary === "cf" ? "cf" : "m", iceServers: stun.concat(bl), relays }, cfErr ? { cfErr } : {});
+}
+// ---------- C228: \u0642\u064a\u0627\u0633 \u0627\u0644\u0648\u0633\u0637\u0627\u0621 \u0645\u0646 \u0647\u0627\u062a\u0641 \u0643\u0644\u0651 \u0645\u0633\u062a\u062e\u062f\u0645 + \u0627\u062e\u062a\u064a\u0627\u0631 \u0648\u0633\u064a\u0637\u064d \u0648\u0627\u062d\u062f \u064a\u0646\u0627\u0633\u0628 \u0627\u0644\u0637\u0631\u0641\u064a\u0646 ----------
+// \u0627\u0644\u0647\u0627\u062a\u0641 \u064a\u0642\u064a\u0633 \u0632\u0645\u0646 \u062d\u062c\u0632 \u0645\u0646\u0641\u0630\u064d \u0641\u064a \u0643\u0644\u0651 \u0648\u0633\u064a\u0637 (\u0645\u0648\u062c\u0648\u062f\u064c \u0645\u0646\u0630 C94) \u0648\u064a\u0631\u0633\u0644\u0647 \u0647\u0646\u0627 (rtc.probe) \u21d2 \u064a\u064f\u062d\u0641\u0638 \u0641\u064a RTDB rly/{uid} \u0645\u0639 \u062f\u0648\u0644\u0629 \u0627\u0644\u0634\u0628\u0643\u0629
+// \u0648\u0646\u0642\u0637\u0629 Cloudflare (request.cf) \u2014 \u0645\u0633\u0627\u0631\u064c \u0644\u0627 \u064a\u0642\u0631\u0624\u0647 \u0623\u064a\u0651 \u0647\u0627\u062a\u0641 \u0645\u0628\u0627\u0634\u0631\u0629\u064b (\u0644\u0627 \u0642\u0648\u0627\u0639\u062f \u0644\u0647 \u21d2 \u0645\u0645\u0646\u0648\u0639)\u060c \u0648\u0627\u0644\u062e\u0627\u062f\u0645 \u0648\u062d\u062f\u0647 \u064a\u0643\u062a\u0628 \u0648\u064a\u0642\u0631\u0623.
+// \u0627\u0644\u0645\u062a\u0651\u0635\u0644 \u064a\u0637\u0644\u0628 \u0642\u064a\u0627\u0633\u0627\u062a \u0627\u0644\u0637\u0631\u0641 \u0627\u0644\u0622\u062e\u0631 (rtc.peer) \u0644\u062d\u0638\u0629 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u2014 \u0641\u0642\u0637 \u0625\u0646 \u0643\u0627\u0646 \u0645\u0633\u0645\u0648\u062d\u0627\u064b \u0644\u0647 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u0628\u0647 (acl/{peer}/{me}).
+const RLY_ID = /^(cf|metered|m:[a-z0-9.-]{3,80}|x[0-5])$/;
+const RLY_LAST = new Map();
+function rlyClean(ms) {
+  const o = {}; let n = 0;
+  for (const k of Object.keys(ms || {}).slice(0, 12)) {
+    if (!RLY_ID.test(k)) continue;
+    const v = ms[k];
+    if (v === false) o[k] = -1; else if (typeof v === "number" && Number.isFinite(v) && v >= 0) o[k] = Math.min(15000, Math.round(v)); else continue;
+    n++;
+  }
+  return n ? o : null;
+}
+function cfGeo(request) { const cf = (request && request.cf) || {}; return { cc: /^[A-Z]{2}$/.test(String(cf.country || "")) ? cf.country : "", colo: /^[A-Z]{3}$/.test(String(cf.colo || "")) ? cf.colo : "" }; }
+async function opRtcProbe(uid, payload, env, request) {
+  const ms = rlyClean(payload && payload.ms);
+  const geo = cfGeo(request);
+  if (!ms) return { saved: false, ...geo };
+  const last = RLY_LAST.get(uid); if (last && Date.now() - last < 60000) return { saved: false, limited: true, ...geo };
+  RLY_LAST.set(uid, Date.now()); if (RLY_LAST.size > 5000) RLY_LAST.clear();
+  const nat = TEL_NAT.has(payload && payload.nat) ? payload.nat : "";
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  await rtdbPatch(token, { ["rly/" + uid]: { j: JSON.stringify(ms), cc: geo.cc, colo: geo.colo, nat, at: Date.now() } });
+  return { saved: true, ...geo };
+}
+async function opRtcPeer(uid, payload, env, request) {
+  const peer = String((payload && payload.peer) || "");
+  if (!/^[A-Za-z0-9_-]{6,64}$/.test(peer) || peer === uid) throw new Error("bad peer");
+  if (!codeRate(uid, "rpeer", 120)) return { ok: false, limited: true };
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const [allow, r] = await Promise.all([rtdbGet(token, "acl/" + peer + "/" + uid).catch(() => null), rtdbGet(token, "rly/" + peer).catch(() => null)]);
+  const me = cfGeo(request);
+  if (allow !== true) return { ok: false, me };
+  if (!r || !r.at || Date.now() - r.at > 24 * 3600000) return { ok: true, ms: null, me };
+  let ms = null; try { ms = rlyClean(JSON.parse(r.j || "{}")); } catch (e) { }
+  return { ok: true, ms, cc: r.cc || "", colo: r.colo || "", nat: r.nat || "", age: Math.round((Date.now() - r.at) / 1000), me };
 }
 const RING_REPEATS = 3, RING_GAP_MS = (typeof globalThis !== "undefined" && globalThis.__RING_GAP_MS) || 8000;
 async function opCallRing(uid, payload, env, claims, ctx) {
@@ -4198,7 +4244,7 @@ async function telWrite(token, cid, side, uid, d) {
   const id = (cid + "~" + side).replace(/[^A-Za-z0-9_~-]/g, "").slice(0, 120);
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/tel/" + id, fields: { cid: { stringValue: cid }, side: { stringValue: side }, by: { stringValue: uid }, ts: { integerValue: String(Date.now()) }, d: { stringValue: JSON.stringify(d).slice(0, 3000) } } } }]);
 }
-async function opCallTel(uid, payload, env) {
+async function opCallTel(uid, payload, env, request) {
   if (!codeRate(uid, "tel", 80)) return { ok: false };
   const p = payload || {}, cid = String(p.id || "");
   if (!TEL_ID.test(cid)) throw new Error("bad id");
@@ -4211,7 +4257,9 @@ async function opCallTel(uid, payload, env) {
     nat: TEL_NAT.has(p.nat) ? p.nat : "", nsx: num(p.nsx, 0, 20), v6: p.v6 ? 1 : 0,
     lct: TEL_CAND.has(p.lct) ? p.lct : "", rct: TEL_CAND.has(p.rct) ? p.rct : "", fam: p.fam === "4" || p.fam === "6" ? p.fam : "",
     qd: num(p.qd, 0, 4320),
-    v6l: p.v6l ? 1 : 0, v6r: p.v6r ? 1 : 0, pw: p.pw ? 1 : 0 };   // C218: pw = \u0627\u0644\u0645\u0633\u062a\u0642\u0628\u0650\u0644 \u0627\u0633\u062a\u0639\u0645\u0644 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u0627\u0644\u0645\u064f\u062c\u0647\u064e\u0651\u0632 \u0623\u062b\u0646\u0627\u0621 \u0627\u0644\u0631\u0646\u064a\u0646   // C217: \u0639\u0631\u0636 \u0647\u0630\u0627 \u0627\u0644\u0637\u0631\u0641 / \u0627\u0644\u0637\u0631\u0641 \u0627\u0644\u0622\u062e\u0631 \u0639\u0646\u0648\u0627\u0646 IPv6 \u0639\u0627\u0645\u0651\u0627\u064b \u0641\u064a \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629   // C216: \u062f\u0642\u0627\u0626\u0642 \u062a\u0623\u062e\u0651\u0631 \u0627\u0644\u0633\u062c\u0644\u0651 \u0641\u064a \u0637\u0627\u0628\u0648\u0631 \u0627\u0644\u0647\u0627\u062a\u0641 (\u0623\u064f\u0639\u064a\u062f \u0625\u0631\u0633\u0627\u0644\u0647 \u0644\u0627\u062d\u0642\u0627\u064b)
+    v6l: p.v6l ? 1 : 0, v6r: p.v6r ? 1 : 0, pw: p.pw ? 1 : 0,
+    // C228: \u0627\u0644\u062f\u0648\u0644\u0629 \u0648\u0646\u0642\u0637\u0629 Cloudflare (\u0645\u0646 \u0627\u0644\u062e\u0627\u062f\u0645 \u0644\u0627 \u0645\u0646 \u0627\u0644\u0647\u0627\u062a\u0641) \u00b7 \u0627\u0644\u0648\u0633\u064a\u0637 \u0627\u0644\u0645\u062e\u062a\u0627\u0631 \u0648\u0643\u064a\u0641 \u0627\u062e\u062a\u064a\u0631 (p = \u0644\u0644\u0637\u0631\u0641\u064a\u0646 \u00b7 h = \u0628\u062a\u0648\u062c\u064a\u0647 \u0627\u0644\u0645\u062a\u0651\u0635\u0644 \u00b7 o = \u0642\u064a\u0627\u0633 \u0647\u0627\u062a\u0641\u064a \u0648\u062d\u062f\u0647) \u0648\u0632\u0645\u0646\u0647 \u0639\u0646\u062f \u0627\u0644\u0637\u0631\u0641\u064a\u0646
+    ...cfGeo(request), rsel: RLY_ID.test(String(p.rsel || "")) ? String(p.rsel) : "", psel: /^[pho]$/.test(String(p.psel || "")) ? p.psel : "", rms: num(p.rms, 0, 15000), pms: num(p.pms, 0, 15000) };   // C218: pw = \u0627\u0644\u0645\u0633\u062a\u0642\u0628\u0650\u0644 \u0627\u0633\u062a\u0639\u0645\u0644 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u0627\u0644\u0645\u064f\u062c\u0647\u064e\u0651\u0632 \u0623\u062b\u0646\u0627\u0621 \u0627\u0644\u0631\u0646\u064a\u0646   // C217: \u0639\u0631\u0636 \u0647\u0630\u0627 \u0627\u0644\u0637\u0631\u0641 / \u0627\u0644\u0637\u0631\u0641 \u0627\u0644\u0622\u062e\u0631 \u0639\u0646\u0648\u0627\u0646 IPv6 \u0639\u0627\u0645\u0651\u0627\u064b \u0641\u064a \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629   // C216: \u062f\u0642\u0627\u0626\u0642 \u062a\u0623\u062e\u0651\u0631 \u0627\u0644\u0633\u062c\u0644\u0651 \u0641\u064a \u0637\u0627\u0628\u0648\u0631 \u0627\u0644\u0647\u0627\u062a\u0641 (\u0623\u064f\u0639\u064a\u062f \u0625\u0631\u0633\u0627\u0644\u0647 \u0644\u0627\u062d\u0642\u0627\u064b)
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   await telWrite(token, cid, uid.slice(0, 10), uid, d);
   stat("tel:" + (d.ok ? (d.route || "ok") : "fail"));
@@ -4273,7 +4321,20 @@ async function telAnalyze(token, since) {
   const plats = {}; one.forEach(c => c.sides.forEach(x => { const k = x.plat || "?"; (plats[k] = plats[k] || []).push(c); }));
   const byPlat = {}; for (const k in plats) byPlat[k] = sum(Array.from(new Set(plats[k])));
   const groups = calls.filter(c => !/^(audio|video)$/.test(c.sides[0].k));
-  return { all: sum(one), byPlat, groups: { n: groups.length, sfu: groups.filter(c => c.sides.some(x => x.mode === "sfu")).length, conn: groups.filter(c => c.sides.some(x => x.ok)).length },
+  // C228: \u0627\u0644\u062c\u0648\u062f\u0629 \u062d\u0633\u0628 \u0627\u0644\u0645\u0633\u0627\u0631 (\u062f\u0648\u0644\u062a\u0627 \u0627\u0644\u0637\u0631\u0641\u064a\u0646) \u0648\u062d\u0633\u0628 \u0627\u0644\u0648\u0633\u064a\u0637 \u0627\u0644\u0645\u0633\u062a\u0639\u0645\u064e\u0644 \u2014 \u0645\u0646 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062a \u0627\u0644\u0645\u062a\u0651\u0635\u0644\u0629
+  const routeOf = (c) => { const cc = c.sides.map(x => x.cc || "").filter(Boolean); if (!cc.length) return "?"; if (cc.length === 1) cc.push("?"); return cc.sort().join("-"); };
+  const relayOf = (c) => { const x = c.sides.find(y => y.ok && (y.rsel || y.relay)); return x ? (x.rsel || x.relay) : (c.sides.some(y => y.route === "direct") ? "direct" : "?"); };
+  const qOf = (list) => {
+    const conn = list.filter(c => c.sides.some(x => x.ok)), sv = (k) => conn.map(c => med(c.sides.map(x => x[k] && x[k].med)));
+    const rel = {}; conn.forEach(c => { const r = relayOf(c); rel[r] = (rel[r] || 0) + 1; });
+    const rt = sv("rtt");
+    return { n: list.length, conn: conn.length, rtt: med(rt), rtt90: p90(rt), loss: med(sv("loss")), jit: med(sv("jit")), slow: rt.filter(x => typeof x === "number" && x > 300).length,
+      pair: conn.filter(c => c.sides.some(x => x.psel === "p" || x.psel === "h")).length, relays: rel };
+  };
+  const byKey = (fn) => { const g = {}; one.forEach(c => { const k = fn(c); (g[k] = g[k] || []).push(c); }); const out = {}; Object.keys(g).sort((a, b) => g[b].length - g[a].length).slice(0, 20).forEach(k => { out[k] = qOf(g[k]); }); return out; };
+  const routes = byKey(routeOf);
+  const byRelay = {}; { const g = {}; one.filter(c => c.sides.some(x => x.ok)).forEach(c => { const k = relayOf(c); (g[k] = g[k] || []).push(c); }); Object.keys(g).forEach(k => { byRelay[k] = qOf(g[k]); }); }
+  return { all: sum(one), byPlat, routes, byRelay, groups: { n: groups.length, sfu: groups.filter(c => c.sides.some(x => x.mode === "sfu")).length, conn: groups.filter(c => c.sides.some(x => x.ok)).length },
     recent: calls.slice(0, 40) };
 }
 // C181: \u0645\u0644\u062e\u0651\u0635 \u0627\u0644\u062c\u0648\u062f\u0629 \u0627\u0644\u064a\u0648\u0645\u064a\u0651 \u0644\u0644\u0645\u062f\u064a\u0631 (\u0667 \u0635\u0628\u0627\u062d\u0627\u064b \u0628\u062a\u0648\u0642\u064a\u062a \u0627\u0644\u0633\u0648\u062f\u0627\u0646\u060c \u0639\u0646 \u0622\u062e\u0631 \u0662\u0664 \u0633\u0627\u0639\u0629) + \u062a\u0646\u0628\u064a\u0647\u064c \u0641\u0648\u0631\u064a\u0651 \u0625\u0646 \u0627\u0646\u0647\u0627\u0631\u062a \u0627\u0644\u062c\u0648\u062f\u0629 \u0641\u064a \u0622\u062e\u0631 \u0633\u0627\u0639\u062a\u064a\u0646.
@@ -6032,7 +6093,9 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "moment.edit") { const r = await opMomentEdit(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
     if (op === "moment.seen") { const r = await opMomentSeen(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "moment.prefs") { const r = await opMomentPrefs(uid, body.payload, env); return json({ ok: true, ...r }); }
-    if (op === "call.tel") { const r = await opCallTel(uid, body.payload, env); return json({ ok: true, ...r }); }   // C179
+    if (op === "rtc.probe") { const r = await opRtcProbe(uid, body.payload, env, request); return json({ ok: true, ...r }); }   // C228
+    if (op === "rtc.peer") { const r = await opRtcPeer(uid, body.payload, env, request); return json({ ok: true, ...r }); }   // C228
+    if (op === "call.tel") { const r = await opCallTel(uid, body.payload, env, request); return json({ ok: true, ...r }); }   // C179
     if (op === "admin.qcfg") { const r = await opAdminQcfg(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C181
     if (op === "admin.tel") { const r = await opAdminTel(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C179
     if (op === "qa.rate") { const r = await opQaRate(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
