@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u06
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v116-geo";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
+const VER = "v117-answering";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -2510,6 +2510,14 @@ async function deviceAck(request, env) {
     const c = await rtdbGet(token, "calls/" + call).catch(() => null);
     if (c && c.to === to && c.state === "ringing" && !c.acc) await rtdbPatch(token, { ["calls/" + call + "/state"]: "declined" });
     stat("ack:decline");
+    return json({ ok: true });
+  }
+  if (k === "a") {   // C229: «ردّ» من شاشة النظام والتطبيق ما زال يُفتح — المتّصل يمدّ الانتظار بدل «لم يُجب»
+    const call = String(b.call || "");
+    if (!/^[A-Za-z0-9_-]{6,40}$/.test(call) || !ctEq(sg, await ackSig(env, "r|" + call + "|" + to))) return json({ ok: false }, 403);
+    const c = await rtdbGet(token, "calls/" + call).catch(() => null);
+    if (c && c.to === to && c.state === "ringing" && !c.acc && !c.answering) await rtdbPatch(token, { ["calls/" + call + "/answering"]: Date.now() });
+    stat("ack:answering");
     return json({ ok: true });
   }
   if (k === "d") {   // \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0648\u0635\u0644\u062a \u062c\u0647\u0627\u0632\u0647
