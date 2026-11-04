@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u06
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v117-answering";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
+const VER = "v118-tools";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -2631,7 +2631,7 @@ async function opChatTask(uid, payload, env, ctx) {
     if (!m.enc && eff0 && eff0 !== uid && !boss) throw new Error("only the assignee can change this task");
     next.status = payload.status;
     if (payload.status === "done") { next.doneBy = uid; next.doneAt = Date.now(); if (!eff0 && !m.enc && payload.owner === undefined) next.owner = uid; }
-    else { delete next.doneBy; delete next.doneAt; }
+    else { delete next.doneBy; delete next.doneAt; if (next.pct === 100 && payload.pct === undefined) delete next.pct; }   // C232: «غير منجزة» لا تبقى ١٠٠٪ (كانت تُحسب منجزةً في نسبة القائمة)
   }
   if (payload.note != null) next.note = String(payload.note).slice(0, 300);
   if (payload.pct !== undefined) {   // C188: \u0646\u0633\u0628\u0629 \u0625\u0646\u062c\u0627\u0632 \u0627\u0644\u0645\u0647\u0645\u0651\u0629 0\u2013100 \u2014 \u064a\u064f\u063a\u064a\u0651\u0631\u0647\u0627 \u0627\u0644\u0645\u0633\u0624\u0648\u0644 (\u0623\u0648 \u0627\u0644\u0645\u0646\u0634\u0626/\u0627\u0644\u0645\u0634\u0631\u0641)
