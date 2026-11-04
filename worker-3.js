@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u06
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v119-tasks";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
+const VER = "v120-marriage";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -626,6 +626,55 @@ async function opPersonSet(uid, payload, env) {
 }
 
 /* ---------- 8) \u0627\u0644\u0639\u0645\u0644\u064a\u0651\u0629: relation.add (\u0628\u0646\u064a\u0648\u064a\u0651 \u2014 \u062d\u0627\u0631\u0633\u064c \u062b\u0645 \u0645\u0631\u0627\u062c\u0639\u0629) ---------- */
+/* C203 (v120): \u0642\u0648\u0627\u0639\u062f \u0627\u0644\u0632\u0648\u0627\u062c \u0639\u0644\u0649 \u0627\u0644\u062e\u0627\u062f\u0645 \u2014 \u0646\u0633\u062e\u0629\u064c \u0645\u0646 marriageCheck \u0641\u064a app.p3.js\u060c \u0641\u0644\u0627 \u064a\u062a\u062c\u0627\u0648\u0632\u0647\u0627 \u0639\u0645\u064a\u0644\u064c \u0642\u062f\u064a\u0645 \u0623\u0648 \u0645\u0639\u0637\u0648\u0628.
+   \u0646\u0642\u064a\u0651\u0629: \u062a\u0623\u062e\u0630 \u0627\u0644\u062d\u0642\u0627\u0626\u0642 \u0627\u0644\u0645\u062c\u0645\u0648\u0639\u0629 \u0648\u062a\u0639\u064a\u062f \u0627\u0644\u0633\u0628\u0628 (\u0646\u0635\u0651\u0627\u064b \u0625\u0646\u062c\u0644\u064a\u0632\u064a\u0651\u0627\u064b \u064a\u062d\u0648\u064a \u00abnot allowed\u00bb \u21d0 \u0631\u0641\u0636\u064c \u0646\u0647\u0627\u0626\u064a\u0651 \u0641\u064a \u0637\u0627\u0628\u0648\u0631 sawa-sync) \u0623\u0648 null. */
+const MARRIAGE_MAX_WIVES = 4;
+function marriageRule(f) {
+  // f = { type, gFrom, gTo, directKin, wifeOtherHusbands, husbandOtherWives }
+  if (f.type !== "spouse" && f.type !== "ex_spouse") return null;
+  const ok = (g) => g === "male" || g === "female";
+  if (!ok(f.gFrom) || !ok(f.gTo)) return "both genders must be set";
+  if (f.gFrom === f.gTo) return "same gender";
+  if (f.directKin) return "direct kin (ancestor, descendant, sibling, aunt/uncle or niece/nephew)";
+  if (f.type === "spouse") {
+    if (f.wifeOtherHusbands > 0) return "wife already has a current husband";
+    if (f.husbandOtherWives >= MARRIAGE_MAX_WIVES) return "husband already has four current wives";
+  }
+  return null;
+}
+// \u064a\u062c\u0645\u0639 \u062d\u0642\u0627\u0626\u0642 marriageRule \u0645\u0646 Firestore: \u0627\u0644\u0623\u0632\u0648\u0627\u062c \u0627\u0644\u062d\u0627\u0644\u064a\u0651\u0648\u0646 \u0644\u0644\u0637\u0631\u0641\u064a\u0646\u060c \u0648\u0627\u0644\u0642\u0631\u0627\u0628\u0629 \u0627\u0644\u0645\u0628\u0627\u0634\u0631\u0629 (\u0623\u0635\u0644/\u0641\u0631\u0639 \u062d\u062a\u0649 \u0661\u0662 \u062c\u064a\u0644\u0627\u064b\u060c \u0623\u0648 \u0625\u062e\u0648\u0629)
+async function marriageFacts(type, from, to, gFrom, gTo, q, parentsOf) {
+  const curSp = async (id) => {
+    const a = await q([["type", "EQUAL", "spouse"], ["from", "EQUAL", id]], 50, A => A.filter(r => r.type === "spouse" && r.from === id));
+    const b = await q([["type", "EQUAL", "spouse"], ["to", "EQUAL", id]], 50, A => A.filter(r => r.type === "spouse" && r.to === id));
+    return [...new Set(a.map(r => r.to).concat(b.map(r => r.from)))];
+  };
+  const ancestors = async (id) => {
+    const seen = new Set(); let gen = [id];
+    for (let d = 0; d < 12 && gen.length; d++) {
+      const next = [];
+      for (const p of (await parentsOf(gen)).map(r => r.from)) if (!seen.has(p)) { seen.add(p); next.push(p); }
+      gen = next.slice(0, 30);
+    }
+    return seen;
+  };
+  const [aF, aT] = await Promise.all([ancestors(from), ancestors(to)]);
+  const [pF, pT] = await Promise.all([parentsOf([from]), parentsOf([to])]);
+  const shareParent = pF.some(r => pT.some(x => x.from === r.from));
+  const sib = await q([["type", "EQUAL", "sibling"], ["from", "IN", [from, to]]], 50, A => A.filter(r => r.type === "sibling" && (r.from === from || r.from === to)));
+  // \u0648\u0627\u0644\u062f\u064f \u0623\u062d\u062f\u0647\u0645\u0627 \u0645\u0646 \u0623\u0635\u0648\u0644 \u0627\u0644\u0622\u062e\u0631 \u21d2 \u0625\u062e\u0648\u0629 \u0623\u0648 \u0639\u0645\u0651/\u062e\u0627\u0644 \u0648\u0627\u0628\u0646 \u0623\u062e\u064a\u0647 (\u0644\u0627 \u0623\u0628\u0646\u0627\u0621 \u0627\u0644\u0639\u0645\u0651)
+  const auntNiece = pT.some(r => aF.has(r.from)) || pF.some(r => aT.has(r.from));
+  const directKin = aF.has(to) || aT.has(from) || shareParent || auntNiece || sib.some(r => (r.from === from && r.to === to) || (r.from === to && r.to === from));
+  const facts = { type, gFrom, gTo, directKin, wifeOtherHusbands: 0, husbandOtherWives: 0 };
+  if (type === "spouse" && (gFrom === "male" || gFrom === "female") && gTo && gFrom !== gTo) {
+    const wife = gFrom === "female" ? from : to, husband = wife === from ? to : from;
+    const [hs, ws] = await Promise.all([curSp(wife), curSp(husband)]);
+    facts.wifeOtherHusbands = hs.filter(x => x !== husband).length;
+    facts.husbandOtherWives = ws.filter(x => x !== wife).length;
+  }
+  return facts;
+}
+
 async function opRelationAdd(uid, payload, env) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
@@ -658,6 +707,12 @@ async function opRelationAdd(uid, payload, env) {
   if (same.some(r => r.type === type)) return { applied: false, reason: "exists" };
   const parentsOf = (ids) => { const set = ids.slice(0, 30);
     return q([["type", "EQUAL", "parent"], ["to", "IN", set]], 200, A => A.filter(r => r.type === "parent" && set.indexOf(r.to) >= 0)); };
+
+  // C203 (v120): \u0627\u0644\u0632\u0648\u0627\u062c \u0642\u0627\u0639\u062f\u0629\u064c \u0644\u0627 \u0645\u0631\u0627\u062c\u0639\u0629 \u2014 \u064a\u064f\u0631\u0641\u0636 \u0646\u0647\u0627\u0626\u064a\u0651\u0627\u064b \u0648\u0644\u0627 \u064a\u062f\u062e\u0644 reviewQueue
+  if (type === "spouse" || type === "ex_spouse") {
+    const why = marriageRule(await marriageFacts(type, from, to, fstr(pf, "gender"), fstr(pt, "gender"), q, parentsOf));
+    if (why) throw new Error("marriage not allowed: " + why);
+  }
 
   let conflict = null;
   if (type === "parent") {
@@ -829,15 +884,30 @@ async function opBulkImport(uid, payload, env, claims) {
     personWrites.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/persons/" + fid, fields: f } });
   }
 
+  // C203 (v120): \u0642\u0648\u0627\u0639\u062f \u0627\u0644\u0632\u0648\u0627\u062c \u0641\u064a \u0627\u0644\u0631\u0641\u0639 \u0627\u0644\u0643\u0627\u0645\u0644 \u2014 \u062c\u0646\u0633\u064c \u0648\u0627\u062d\u062f \u064a\u064f\u0633\u0642\u0637\u060c \u0648\u0627\u0644\u0632\u0648\u062c \u0627\u0644\u062b\u0627\u0646\u064a \u0644\u0644\u0645\u0631\u0623\u0629 (\u0623\u0648 \u0627\u0644\u062e\u0627\u0645\u0633\u0629 \u0644\u0644\u0631\u062c\u0644) \u064a\u064f\u062d\u0641\u0638 \u00ab\u0633\u0627\u0628\u0642\u0627\u064b\u00bb
+  const genderOfLocal = {};
+  for (const p of persons) genderOfLocal[p.localId] = p.gender;
+  const curHusbands = {}, curWives = {};
+  let marriageSkipped = 0, marriageDowngraded = 0;
   // \u0625\u0639\u0627\u062f\u0629 \u062a\u0623\u0635\u064a\u0644 \u0627\u0644\u0635\u0644\u0627\u062a\u061b \u0645\u0627 \u0633\u0642\u0637 \u0637\u0631\u0641\u0647 \u064a\u064f\u062a\u062e\u0637\u0651\u0649
   let orphans = 0; const relWrites = [];
   for (const r of relations) {
     const from = map[r.fromLocalId], to = map[r.toLocalId];
     if (!from || !to) { orphans++; continue; }
     if (["parent", "spouse", "ex_spouse", "sibling"].indexOf(r.type) < 0 || from === to) { orphans++; continue; }   // v39
+    let rtype = r.type;
+    if (rtype === "spouse" || rtype === "ex_spouse") {   // C203 (v120)
+      const gA = genderOfLocal[r.fromLocalId], gB = genderOfLocal[r.toLocalId];
+      if (gA && gB && gA === gB) { marriageSkipped++; continue; }
+      if (rtype === "spouse" && gA && gB) {
+        const wife = gA === "female" ? from : to, husband = wife === from ? to : from;
+        if ((curHusbands[wife] || 0) >= 1 || (curWives[husband] || 0) >= MARRIAGE_MAX_WIVES) { rtype = "ex_spouse"; marriageDowngraded++; }
+        else { curHusbands[wife] = (curHusbands[wife] || 0) + 1; curWives[husband] = (curWives[husband] || 0) + 1; }
+      }
+    }
     const rid = (r.localId && segOk(String(r.localId))) ? String(r.localId) : crypto.randomUUID();
     relWrites.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/relations/" + rid,
-      fields: Object.assign({ type: { stringValue: r.type }, from: { stringValue: from }, to: { stringValue: to },
+      fields: Object.assign({ type: { stringValue: rtype }, from: { stringValue: from }, to: { stringValue: to },
                 createdTs: { timestampValue: now }, deleted: { booleanValue: false } },
                 r.inferred ? { inferred: { stringValue: String(r.inferred).slice(0, 60) } } : {},
                 (r.type === "sibling" && (r.half === "father" || r.half === "mother")) ? { half: { stringValue: r.half } } : {}) } });
@@ -892,7 +962,7 @@ async function opBulkImport(uid, payload, env, claims) {
   }
 
   return { groupId: gid, personsImported: personWrites.length,
-           relationsImported: relWrites.length, orphansSkipped: orphans, selfDuplicate: selfDuplicate,
+           relationsImported: relWrites.length, orphansSkipped: orphans, marriageSkipped: marriageSkipped, marriageDowngraded: marriageDowngraded, selfDuplicate: selfDuplicate,
            replaced: replace, existing: existing, removedPersons: removedPersons, removedRelations: removedRelations };
 }
 
@@ -963,6 +1033,22 @@ async function opRelationUpdate(uid, payload, env) {
   const ex = await fsGet(token, "groups/" + groupId + "/relations/" + relId);
   if (!ex) throw new Error("relation not found");
   if (fbool(ex, "deleted")) throw new Error("relation is deleted");
+  // C203 (v120): \u00ab\u0633\u0627\u0628\u0642\u00bb \u21d0 \u00ab\u0642\u0627\u0626\u0645\u00bb (\u062a\u0631\u0627\u062c\u0639\u064c \u0639\u0646 \u0625\u0646\u0647\u0627\u0621 \u0632\u0648\u0627\u062c \u0645\u062b\u0644\u0627\u064b) \u064a\u0645\u0631\u0651 \u0628\u0642\u0648\u0627\u0639\u062f \u0627\u0644\u0632\u0648\u0627\u062c \u0643\u0627\u0644\u0625\u0636\u0627\u0641\u0629
+  if ((type === "spouse" || type === "ex_spouse") && fstr(ex, "type") !== type) {
+    const from = fstr(ex, "from"), to = fstr(ex, "to"), gPath = "groups/" + groupId;
+    const [pf, pt] = await Promise.all([fsGet(token, gPath + "/persons/" + from), fsGet(token, gPath + "/persons/" + to)]);
+    const live = docs => docs.filter(d => !fbool(d, "deleted") && d.name.split("/").pop() !== relId).map(d => ({ type: fstr(d, "type"), from: fstr(d, "from"), to: fstr(d, "to") }));
+    let all = null;
+    const q = async (filters, lim, fallback) => {
+      if (all) return fallback(all);
+      try { return live(await fsQuerySub(token, gPath, "relations", filters, lim)); }
+      catch (e) { all = live(await fsList(token, gPath + "/relations")); return fallback(all); }
+    };
+    const parentsOf = (ids) => { const set = ids.slice(0, 30);
+      return q([["type", "EQUAL", "parent"], ["to", "IN", set]], 200, A => A.filter(r => r.type === "parent" && set.indexOf(r.to) >= 0)); };
+    const why = marriageRule(await marriageFacts(type, from, to, fstr(pf, "gender"), fstr(pt, "gender"), q, parentsOf));
+    if (why) throw new Error("marriage not allowed: " + why);
+  }
   const now = new Date().toISOString();
   await fsCommit(token, [
     { update: { name: DOC_ROOT + "/groups/" + groupId + "/relations/" + relId,
