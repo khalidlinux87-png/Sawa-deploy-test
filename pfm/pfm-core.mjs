@@ -160,13 +160,90 @@ export function assertTransition(from, to) {
 }
 
 // Applies one payment. A partial payment keeps the invoice sent/overdue; the last one marks it paid.
+// Partial payments are allowed unless the issuer turned them off for this invoice (allowPartial: false).
 export function applyPayment(inv, amount) {
   if (!["sent", "overdue"].includes(inv.status)) throw new PfmError("not_payable", inv.status);
   if (!Number.isSafeInteger(amount) || amount <= 0) throw new PfmError("bad_amount");
   const due = inv.total - inv.amountPaid;
   if (amount > due) throw new PfmError("overpay", "due " + due);
+  if (inv.allowPartial === false && amount !== due) throw new PfmError("partial_not_allowed", "due " + due);
   const amountPaid = inv.amountPaid + amount;
   return { amountPaid, amountDue: inv.total - amountPaid, status: amountPaid === inv.total ? "paid" : inv.status };
+}
+
+// ---------- invoice numbers (one sequence per issuer, reset every year) ----------
+
+// The year comes from the issue date in the issuer's time zone, so an invoice issued
+// on 31 Dec local time is numbered in that year even if it is already January in UTC.
+export function invoiceNumber(prefix, issueDate, seq) {
+  const y = /^(\d{4})-\d{2}-\d{2}$/.exec(issueDate);
+  if (!y) throw new PfmError("bad_date", issueDate);
+  if (!/^[A-Z0-9]{1,8}$/.test(prefix)) throw new PfmError("bad_prefix", prefix);
+  if (!Number.isSafeInteger(seq) || seq < 1) throw new PfmError("bad_seq");
+  return { year: y[1], number: `${prefix}-${y[1]}-${String(seq).padStart(4, "0")}` };
+}
+
+// Today's date as "YYYY-MM-DD" in an IANA time zone. Used for issue dates and the overdue sweep.
+export function localDate(tz, at = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(at);
+}
+
+// ---------- tax policy ----------
+
+// An issuer who is not tax-registered cannot charge tax. The editor hides the tax fields,
+// and the server rejects tax that arrives anyway (a client bug or a crafted request).
+export function applyTaxPolicy(settings, items, opts = {}) {
+  if (settings.taxRegistered) {
+    return { items: items.map((it) => ({ ...it, taxBp: it.taxBp ?? settings.defaultTaxBp ?? 0 })), taxInclusive: !!opts.taxInclusive };
+  }
+  if (items.some((it) => it.taxBp) || opts.taxInclusive) throw new PfmError("tax_not_registered");
+  return { items: items.map((it) => ({ ...it, taxBp: 0 })), taxInclusive: false };
+}
+
+// ---------- receiving accounts ----------
+
+// Where the issuer can be paid besides Sawa Wallet. Bank and mobile-money numbers are
+// stored encrypted and printed on the invoice only when the issuer selects that account.
+export const PAYOUT_TYPES = ["sawa_wallet", "bank", "mobile_money", "other"];
+export function validatePayoutAccount(a) {
+  const t = (s, max) => typeof s === "string" && s.trim().length > 0 && s.length <= max;
+  if (!PAYOUT_TYPES.includes(a.type)) throw new PfmError("bad_account", "type");
+  if (a.type === "sawa_wallet") return { type: a.type, label: a.label || "Sawa Wallet" };
+  if (!t(a.label, 40)) throw new PfmError("bad_account", "label");
+  if (!t(a.holderName, 80)) throw new PfmError("bad_account", "holderName");
+  const number = String(a.number || "").replace(/[\s-]/g, "");
+  if (a.type === "bank") {
+    if (!t(a.bankName, 60)) throw new PfmError("bad_account", "bankName");
+    if (!/^[A-Z0-9]{6,34}$/i.test(number)) throw new PfmError("bad_account", "number");
+    if (/^[A-Z]{2}\d{2}/i.test(number) && !ibanOk(number)) throw new PfmError("bad_account", "iban");
+  } else if (a.type === "mobile_money") {
+    if (!t(a.provider, 40)) throw new PfmError("bad_account", "provider");
+    if (!/^\+?\d{6,15}$/.test(number)) throw new PfmError("bad_account", "number");
+  } else if (!t(a.details, 200)) throw new PfmError("bad_account", "details");
+  return { type: a.type, label: a.label.trim(), holderName: a.holderName.trim(), bankName: a.bankName?.trim(),
+    provider: a.provider?.trim(), number: number.toUpperCase() || undefined, branch: a.branch?.trim(), details: a.details?.trim() };
+}
+// ISO 13616 mod-97 check.
+function ibanOk(iban) {
+  const r = (iban.slice(4) + iban.slice(0, 4)).toUpperCase().replace(/[A-Z]/g, (c) => String(c.charCodeAt(0) - 55));
+  let m = 0; for (const ch of r) m = (m * 10 + Number(ch)) % 97;
+  return m === 1;
+}
+// For lists and previews: "•••• 4321".
+export const maskNumber = (n) => (n && n.length > 4 ? "•••• " + n.slice(-4) : n || "");
+
+// ---------- logo upload check ----------
+
+// Accepts PNG, JPEG or WebP up to 512 KB, judged by the file's bytes and not its name.
+// SVG is refused: it can carry script. Returns the real content type.
+export function sniffLogo(u8) {
+  if (!(u8 instanceof Uint8Array) || u8.length < 16) throw new PfmError("bad_logo", "empty");
+  if (u8.length > 512 * 1024) throw new PfmError("bad_logo", "too_big");
+  const h = (i, ...b) => b.every((x, k) => u8[i + k] === x);
+  if (h(0, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return "image/png";
+  if (h(0, 0xff, 0xd8, 0xff)) return "image/jpeg";
+  if (h(0, 0x52, 0x49, 0x46, 0x46) && h(8, 0x57, 0x45, 0x42, 0x50)) return "image/webp";
+  throw new PfmError("bad_logo", "type");
 }
 
 // The cron calls this. dueDate and today are "YYYY-MM-DD" in the issuer's time zone.

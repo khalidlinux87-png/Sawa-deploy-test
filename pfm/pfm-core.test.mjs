@@ -131,4 +131,48 @@ await t("field encryption round-trips and is bound to the uid", async () => {
   assert.equal(await P.sealField(null, "uidA", k1), null);
 });
 
+await t("partial payments: allowed by default, issuer can turn them off", () => {
+  const inv = { status: "sent", total: 1000, amountPaid: 0 };
+  assert.equal(P.applyPayment(inv, 300).status, "sent");
+  assert.throws(() => P.applyPayment({ ...inv, allowPartial: false }, 300), { code: "partial_not_allowed" });
+  assert.equal(P.applyPayment({ ...inv, allowPartial: false }, 1000).status, "paid");
+});
+
+await t("invoice numbers reset each year, by local issue date", () => {
+  assert.equal(P.invoiceNumber("INV", "2026-11-05", 42).number, "INV-2026-0042");
+  assert.equal(P.invoiceNumber("INV", "2027-01-01", 1).number, "INV-2027-0001");
+  assert.equal(P.invoiceNumber("INV", "2026-01-01", 12345).number, "INV-2026-12345");
+  assert.throws(() => P.invoiceNumber("inv/x", "2026-01-01", 1), { code: "bad_prefix" });
+  // 22:30 UTC on 31 Dec is already 1 Jan in Khartoum (UTC+2)
+  assert.equal(P.localDate("Africa/Khartoum", new Date("2026-12-31T22:30:00Z")), "2027-01-01");
+  assert.equal(P.localDate("America/New_York", new Date("2026-12-31T22:30:00Z")), "2026-12-31");
+});
+
+await t("tax policy follows the issuer's registration", () => {
+  const items = [{ qty: "1", unitPrice: 100 }, { qty: "1", unitPrice: 100, taxBp: 500 }];
+  assert.deepEqual(P.applyTaxPolicy({ taxRegistered: true, defaultTaxBp: 1700 }, items).items.map((i) => i.taxBp), [1700, 500]);
+  assert.throws(() => P.applyTaxPolicy({ taxRegistered: false }, items), { code: "tax_not_registered" });
+  assert.throws(() => P.applyTaxPolicy({ taxRegistered: false }, [{ qty: "1", unitPrice: 1 }], { taxInclusive: true }), { code: "tax_not_registered" });
+  assert.deepEqual(P.applyTaxPolicy({ taxRegistered: false }, [{ qty: "1", unitPrice: 1 }]).items[0].taxBp, 0);
+});
+
+await t("receiving accounts are validated", () => {
+  const bank = P.validatePayoutAccount({ type: "bank", label: "Main", holderName: "Khalid", bankName: "Bank of Khartoum", number: "1234 5678 9012" });
+  assert.equal(bank.number, "123456789012");
+  assert.equal(P.validatePayoutAccount({ type: "bank", label: "EU", holderName: "K", bankName: "X", number: "GB82 WEST 1234 5698 7654 32" }).number, "GB82WEST12345698765432");
+  assert.throws(() => P.validatePayoutAccount({ type: "bank", label: "EU", holderName: "K", bankName: "X", number: "GB00WEST12345698765432" }), { code: "bad_account" });
+  assert.equal(P.validatePayoutAccount({ type: "mobile_money", label: "Bankak", holderName: "K", provider: "Bankak", number: "+249912345678" }).number, "+249912345678");
+  assert.throws(() => P.validatePayoutAccount({ type: "mobile_money", label: "x", holderName: "K", provider: "p", number: "abc" }), { code: "bad_account" });
+  assert.throws(() => P.validatePayoutAccount({ type: "crypto" }), { code: "bad_account" });
+  assert.equal(P.maskNumber("123456789012"), "•••• 9012");
+});
+
+await t("logo check sniffs bytes and refuses SVG", () => {
+  const png = new Uint8Array(64); png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  assert.equal(P.sniffLogo(png), "image/png");
+  const jpg = new Uint8Array(64); jpg.set([0xff, 0xd8, 0xff]); assert.equal(P.sniffLogo(jpg), "image/jpeg");
+  assert.throws(() => P.sniffLogo(new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>')), { code: "bad_logo" });
+  assert.throws(() => P.sniffLogo(new Uint8Array(600 * 1024).fill(0x89)), { code: "bad_logo" });
+});
+
 console.log(process.exitCode ? "FAILED" : `pfm-core: ${n} passed`);

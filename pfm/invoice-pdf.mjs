@@ -7,14 +7,22 @@ import puppeteer from "@cloudflare/puppeteer";
 import { computeInvoice, canonical } from "./pfm-core.mjs";
 import { renderInvoiceHtml } from "./invoice-html.mjs";
 
+const b64 = (u8) => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000)); return btoa(s); };
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 
+// inv.payoutAccounts must already be decrypted (openField) and limited to the accounts the issuer chose for this invoice.
 export async function invoicePdf(env, inv, { qrSvg = "" } = {}) {
   // 1. Recompute the totals on the server. Stored totals are never trusted for output.
   const totals = computeInvoice(inv.items, { currency: inv.currency, invoiceDiscount: inv.invoiceDiscount, taxInclusive: inv.taxInclusive, amountPaid: inv.amountPaid });
   // 2. The content hash is the cache key. A status change or a payment gives a new file.
   //    The same invoice in the same state reuses the stored PDF and never starts a browser.
-  const html = renderInvoiceHtml(inv, totals, qrSvg);
+  // The logo is read from R2 and inlined, because the renderer may not fetch anything.
+  let logoDataUri = null;
+  if (inv.issuer.logoKey) {
+    const obj = await env.PFM_FILES.get(inv.issuer.logoKey);
+    if (obj) logoDataUri = `data:${obj.httpMetadata.contentType};base64,` + b64(new Uint8Array(await obj.arrayBuffer()));
+  }
+  const html = renderInvoiceHtml({ ...inv, issuer: { ...inv.issuer, logoDataUri } }, totals, qrSvg);
   const hash = hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical({ v: 1, html }))));
   const key = `invoices/${inv.issuerUid}/${inv.id}/${hash.slice(0, 32)}.pdf`;
 
