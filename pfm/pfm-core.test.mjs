@@ -24,8 +24,8 @@ await t("allocate sums exactly", () => {
 
 await t("invoice: line discount, invoice discount, mixed tax", () => {
   const r = P.computeInvoice([
-    { description: "Design", qty: "10", unitPrice: 5000_00, taxBp: 1500, discount: { type: "pct", bp: 1000 } }, // 50,000 - 10% = 45,000
-    { description: "Hosting", qty: "2.5", unitPrice: 1999, taxBp: 0 },                                          // 49.975 -> 49.98
+    { description: "Design", qty: "10", unitPrice: 5000_00, taxRate: "15", discount: { type: "pct", rate: "10" } }, // 50,000 - 10% = 45,000
+    { description: "Hosting", qty: "2.5", unitPrice: 1999 },                                          // 49.975 -> 49.98
   ], { currency: "SDG", invoiceDiscount: { type: "amt", minor: 1000_00 } });
   assert.equal(r.grossTotal, 5000000 + 4998);
   assert.equal(r.lines[0].lineDiscount, 500000); assert.equal(r.lines[0].amount, 4500000);
@@ -37,12 +37,12 @@ await t("invoice: line discount, invoice discount, mixed tax", () => {
   assert.equal(r.taxTotal, r.lines.reduce((a, l) => a + l.tax, 0));
   assert.equal(r.total, r.netTotal + r.taxTotal);
   assert.equal(r.lines[0].tax, Math.round(r.lines[0].net * 0.15));
-  assert.deepEqual(r.taxBreakdown.map((b) => b.taxBp), [1500]);
+  assert.deepEqual(r.taxBreakdown.map((b) => b.taxRate), ["15"]);
   assert.equal(r.amountDue, r.total);
 });
 
 await t("invoice: tax-inclusive prices extract tax exactly", () => {
-  const r = P.computeInvoice([{ qty: "1", unitPrice: 115_00, taxBp: 1500 }], { currency: "SAR", taxInclusive: true });
+  const r = P.computeInvoice([{ qty: "1", unitPrice: 115_00, taxRate: "15" }], { currency: "SAR", taxInclusive: true });
   assert.equal(r.netTotal, 100_00); assert.equal(r.taxTotal, 15_00); assert.equal(r.total, 115_00);
 });
 
@@ -149,11 +149,19 @@ await t("invoice numbers reset each year, by local issue date", () => {
 });
 
 await t("tax policy follows the issuer's registration", () => {
-  const items = [{ qty: "1", unitPrice: 100 }, { qty: "1", unitPrice: 100, taxBp: 500 }];
-  assert.deepEqual(P.applyTaxPolicy({ taxRegistered: true, defaultTaxBp: 1700 }, items).items.map((i) => i.taxBp), [1700, 500]);
+  const settings = { taxRegistered: true, taxLabel: "GST", taxRates: [{ id: "std", label: "Standard", rate: "8.875" }] };
+  const items = [{ qty: "1", unitPrice: 100 }, { qty: "1", unitPrice: 100, taxRate: "5" }, { qty: "1", unitPrice: 100, taxRateId: "std" }];
+  const r = P.applyTaxPolicy(settings, items);
+  assert.deepEqual(r.items.map((i) => i.taxRate), ["0", "5", "8.875"]);   // a blank rate stays 0: nothing is assumed
+  assert.equal(r.taxLabel, "GST");
+  assert.equal(P.applyTaxPolicy(settings, items, { taxLabel: "TVA" }).taxLabel, "TVA");
+  assert.throws(() => P.applyTaxPolicy(settings, [{ qty: "1", unitPrice: 1, taxRateId: "nope" }]), { code: "bad_tax" });
   assert.throws(() => P.applyTaxPolicy({ taxRegistered: false }, items), { code: "tax_not_registered" });
   assert.throws(() => P.applyTaxPolicy({ taxRegistered: false }, [{ qty: "1", unitPrice: 1 }], { taxInclusive: true }), { code: "tax_not_registered" });
-  assert.deepEqual(P.applyTaxPolicy({ taxRegistered: false }, [{ qty: "1", unitPrice: 1 }]).items[0].taxBp, 0);
+  assert.equal(P.applyTaxPolicy({ taxRegistered: false }, [{ qty: "1", unitPrice: 1, taxRate: "0" }]).items[0].taxRate, "0");
+  const inv = P.computeInvoice(r.items, { currency: "USD" });
+  assert.equal(inv.taxTotal, 0 + 5 + 9);                                   // 8.875 % of 1.00 = 0.08875 -> 0.09
+  assert.deepEqual(inv.taxBreakdown.map((b) => b.taxRate), ["5", "8.875"]);
 });
 
 await t("receiving accounts are validated", () => {
@@ -173,6 +181,52 @@ await t("logo check sniffs bytes and refuses SVG", () => {
   const jpg = new Uint8Array(64); jpg.set([0xff, 0xd8, 0xff]); assert.equal(P.sniffLogo(jpg), "image/jpeg");
   assert.throws(() => P.sniffLogo(new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>')), { code: "bad_logo" });
   assert.throws(() => P.sniffLogo(new Uint8Array(600 * 1024).fill(0x89)), { code: "bad_logo" });
+});
+
+await t("any ISO currency, decimals from Intl", () => {
+  assert.equal(P.currencyExp("JPY"), 0); assert.equal(P.currencyExp("KWD"), 3); assert.equal(P.currencyExp("EUR"), 2);
+  assert.equal(P.currencyExp("BRL"), 2); assert.equal(P.currencyExp("NGN"), 2); assert.equal(P.currencyExp("INR"), 2);
+  assert.equal(P.toMinor("1500", "JPY"), 1500); assert.throws(() => P.toMinor("1.5", "JPY"), { code: "too_precise" });
+  assert.throws(() => P.currencyExp("XXQ"), { code: "bad_currency" }); assert.throws(() => P.currencyExp("usd"), { code: "bad_currency" });
+  const r = P.computeInvoice([{ qty: "3", unitPrice: 1250, taxRate: "10" }], { currency: "JPY" });
+  assert.equal(r.total, 4125);
+});
+
+await t("typed rates: any precision up to 4 decimals, 0 to 100 %", () => {
+  assert.equal(P.toRate("15"), 150000n); assert.equal(P.toRate("8.875"), 88750n); assert.equal(P.toRate("٧٫٥"), 75000n);
+  assert.equal(P.rateText(88750n), "8.875"); assert.equal(P.rateText(150000n), "15");
+  for (const bad of ["101", "-1", "abc", "1.23456", ""]) assert.throws(() => P.toRate(bad), { code: "bad_rate" });
+  const d = P.computeInvoice([{ qty: "1", unitPrice: 10000, discount: { type: "pct", rate: "12.5" } }], { currency: "EUR" });
+  assert.equal(d.subtotal, 8750);
+});
+
+await t("currency conversion is exact across decimal places", () => {
+  assert.equal(P.convert(100_00, "USD", "SAR", "3.75"), 375_00);
+  assert.equal(P.convert(100_00, "USD", "JPY", "151.237"), 15124);         // 15123.7 -> 15124
+  assert.equal(P.convert(1000, "JPY", "USD", "0.006612"), 661);            // 6.612 USD
+  assert.equal(P.convert(1_000_00, "USD", "KWD", "0.3071"), 307_100);       // 3 decimals
+  assert.equal(P.convert(5, "EUR", "EUR", "9"), 5);
+  assert.equal(P.convert(9_000_000_000_00, "USD", "SDG", "600.123456"), 540111110400000);
+  assert.throws(() => P.convert(1, "USD", "EUR", "0"), { code: "bad_fx_rate" });
+  assert.throws(() => P.convert(1, "USD", "EUR", "-1"), { code: "bad_fx_rate" });
+});
+
+await t("summary in base currency, with a per-currency view", () => {
+  const s = P.summarize([
+    { kind: "income", amount: 1000_00, currency: "USD", baseAmount: 3750_00, categoryId: "salary" },
+    { kind: "expense", amount: 500_00, currency: "SAR", baseAmount: 500_00, categoryId: "rent" },
+    { kind: "expense", amount: 20_00, currency: "EUR", baseAmount: 81_50, categoryId: "food" },
+  ]);
+  assert.equal(s.income, 3750_00); assert.equal(s.expense, 581_50);
+  assert.deepEqual(s.byCurrency.map((c) => c.currency).sort(), ["EUR", "SAR", "USD"]);
+});
+
+await t("receiving accounts carry a currency and filter per invoice", () => {
+  const usd = { id: "a", ...P.validatePayoutAccount({ type: "bank", currency: "USD", label: "US", holderName: "K", bankName: "Chase", number: "000123456789" }) };
+  const eur = { id: "b", ...P.validatePayoutAccount({ type: "bank", currency: "EUR", label: "EU", holderName: "K", bankName: "X", number: "DE89370400440532013000" }) };
+  const w = { id: "w", ...P.validatePayoutAccount({ type: "sawa_wallet" }) };
+  assert.deepEqual(P.accountsForInvoice([usd, eur, w], ["a", "b", "w"], "EUR").map((a) => a.id), ["b", "w"]);
+  assert.throws(() => P.validatePayoutAccount({ type: "bank", currency: "ZZZ", label: "x", holderName: "K", bankName: "X", number: "123456" }), { code: "bad_account" });
 });
 
 console.log(process.exitCode ? "FAILED" : `pfm-core: ${n} passed`);

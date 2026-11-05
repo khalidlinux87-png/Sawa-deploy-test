@@ -6,13 +6,13 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const L = {
   ar: { invoice: "فاتورة", no: "رقم الفاتورة", issued: "تاريخ الإصدار", due: "تاريخ الاستحقاق", from: "من", to: "إلى", taxId: "الرقم الضريبيّ",
         desc: "الوصف", qty: "الكمّيّة", price: "سعر الوحدة", disc: "الخصم", tax: "الضريبة", amount: "المبلغ قبل الضريبة",
-        subtotal: "المجموع الفرعيّ", discount: "خصم الفاتورة", taxOn: "ضريبة القيمة المضافة", total: "الإجماليّ", paid: "المدفوع", balance: "المستحقّ",
+        subtotal: "المجموع الفرعيّ", discount: "خصم الفاتورة", taxOn: "الضريبة", total: "الإجماليّ", paid: "المدفوع", balance: "المستحقّ",
         payWith: "ادفع بمحفظة سوا أو بالبطاقة", scan: "امسح الرمز أو افتح الرابط", notes: "ملاحظات",
         payTo: "طرق الدفع", holder: "اسم صاحب الحساب", acct: "رقم الحساب", branch: "الفرع", ref: "اكتب رقم الفاتورة في خانة البيان",
         status: { draft: "مسوّدة", sent: "مُرسلة", paid: "مدفوعة", overdue: "متأخّرة", cancelled: "ملغاة" } },
   en: { invoice: "Invoice", no: "Invoice no.", issued: "Issue date", due: "Due date", from: "From", to: "Bill to", taxId: "Tax ID",
         desc: "Description", qty: "Qty", price: "Unit price", disc: "Discount", tax: "Tax", amount: "Amount (excl. tax)",
-        subtotal: "Subtotal", discount: "Invoice discount", taxOn: "VAT", total: "Total", paid: "Paid", balance: "Balance due",
+        subtotal: "Subtotal", discount: "Invoice discount", taxOn: "Tax", total: "Total", paid: "Paid", balance: "Balance due",
         payWith: "Pay with Sawa Wallet or card", scan: "Scan the code or open the link", notes: "Notes",
         payTo: "Payment details", holder: "Account holder", acct: "Account no.", branch: "Branch", ref: "Use the invoice number as the payment reference",
         status: { draft: "Draft", sent: "Sent", paid: "Paid", overdue: "Overdue", cancelled: "Cancelled" } },
@@ -23,17 +23,18 @@ const L = {
  *  totals: computeInvoice() output.  qrSvg: optional inline SVG of the pay link. */
 export function renderInvoiceHtml(inv, totals, qrSvg = "") {
   const lang = inv.lang === "en" ? "en" : "ar", t = L[lang], cur = totals.currency;
-  const money = (m) => `<span class="num" dir="ltr">${esc(fmt(m, cur, lang))}</span>`;
-  const pct = (bp) => (bp / 100).toFixed(bp % 100 ? 2 : 0) + "%";
+  const money = (m) => fmt(m, cur, lang);
+  const pct = (rate) => esc(rate) + "%";                  // the rate exactly as the issuer typed it ("8.875")
+  const taxName = esc(inv.taxLabel || t.taxOn);          // the issuer's own name for the tax: "VAT", "GST", "TVA", …
   const party = (p, label) => `<div class="party"><div class="lbl">${t[label]}</div><div class="nm">${esc(p.name)}</div>
     ${p.contact ? `<div>${auto(p.contact)}</div>` : ""}${p.address ? `<div>${esc(p.address)}</div>` : ""}
     ${p.taxId ? `<div class="muted">${t.taxId}: <span class="num" dir="ltr">${esc(p.taxId)}</span></div>` : ""}</div>`;
   const rows = totals.lines.map((l) => {
     const it = inv.items[l.index];
-    return `<tr><td class="d">${esc(it.description)}</td><td class="num">${esc(fromQty(l.qtyMilli))}</td><td>${money(it.unitPrice)}</td>
-      <td>${l.lineDiscount ? money(-l.lineDiscount) : "—"}</td><td class="num">${l.taxBp ? pct(l.taxBp) : "—"}</td><td>${money(l.amount)}</td></tr>`;
+    return `<tr><td class="d">${esc(it.description)}</td><td><span class="num" dir="ltr">${esc(fromQty(l.qtyMilli))}</span></td><td>${money(it.unitPrice)}</td>
+      <td>${l.lineDiscount ? money(-l.lineDiscount) : "—"}</td><td>${l.taxRate !== "0" ? `<span class="num" dir="ltr">${pct(l.taxRate)}</span>` : "—"}</td><td>${money(l.amount)}</td></tr>`;
   }).join("");
-  const taxRows = totals.taxBreakdown.map((b) => `<tr><td>${t.taxOn} ${pct(b.taxBp)}</td><td>${money(b.tax)}</td></tr>`).join("");
+  const taxRows = totals.taxBreakdown.map((b) => `<tr><td>${taxName} <span class="num" dir="ltr">${pct(b.taxRate)}</span></td><td>${money(b.tax)}</td></tr>`).join("");
   return `<!doctype html><html lang="${lang}" dir="${lang === "ar" ? "rtl" : "ltr"}"><head><meta charset="utf-8">
 <title>${esc(t.invoice + " " + inv.number)}</title><style>
 @page{size:A4;margin:16mm 14mm}
@@ -52,6 +53,7 @@ table.sum{border-collapse:collapse;min-width:45%;margin-inline-start:auto}table.
 table.sum tr.total td{font-weight:700;font-size:12.5pt;border-top:2px solid #1a1d21}table.sum tr.due td{color:#0f766e;font-weight:700}
 .pay{display:flex;gap:10px;align-items:center;border:1px solid #cfe7e2;border-radius:8px;padding:8px}.pay svg{width:84px;height:84px}
 .notes{margin-top:16px;white-space:pre-wrap}
+.amt{white-space:nowrap}
 .brand{display:flex;gap:12px;align-items:center}.brand img{max-height:56px;max-width:140px;object-fit:contain}
 .accts{margin-top:16px;break-inside:avoid}.accts .grid{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0}.acct{flex:1 1 30%;min-width:160px;border:1px solid #e3e7ea;border-radius:8px;padding:6px 8px;font-size:9.5pt}.acct b{display:block}.small{font-size:8.5pt}
 </style></head><body>
@@ -59,7 +61,7 @@ table.sum tr.total td{font-weight:700;font-size:12.5pt;border-top:2px solid #1a1
 <div class="meta"><div><span>${t.no}</span><b class="num">${esc(inv.number)}</b></div><div><span>${t.issued}</span><span class="num" dir="ltr">${esc(inv.issueDate)}</span></div>
 <div><span>${t.due}</span><span class="num" dir="ltr">${esc(inv.dueDate)}</span></div></div></header>
 <section class="parties">${party(inv.issuer, "from")}${party(inv.client, "to")}</section>
-<table class="items"><thead><tr><th>${t.desc}</th><th>${t.qty}</th><th>${t.price}</th><th>${t.disc}</th><th>${t.tax}</th><th>${t.amount}</th></tr></thead><tbody>${rows}</tbody></table>
+<table class="items"><thead><tr><th>${t.desc}</th><th>${t.qty}</th><th>${t.price}</th><th>${t.disc}</th><th>${inv.taxLabel ? taxName : t.tax}</th><th>${t.amount}</th></tr></thead><tbody>${rows}</tbody></table>
 <div class="bottom">${inv.payUrl && payable(inv) ? `<div class="pay">${qrSvg}<div><b>${t.payWith}</b><div class="muted">${t.scan}</div><div class="num" style="font-size:8.5pt">${esc(inv.payUrl)}</div></div></div>` : "<div></div>"}
 <table class="sum"><tr><td>${t.subtotal}</td><td>${money(totals.subtotal)}</td></tr>
 ${totals.invoiceDiscount ? `<tr><td>${t.discount}</td><td>${money(-totals.invoiceDiscount)}</td></tr>` : ""}${taxRows}
@@ -81,10 +83,20 @@ function acct(a, t) {
   return `<div class="acct"><b>${esc(a.bankName || a.provider || a.label)}</b>${row(t.holder, a.holderName)}${row(t.acct, a.number, 1)}${row(t.branch, a.branch)}${row("", a.details)}</div>`;
 }
 
+// Any currency: symbol and decimals from Intl for the invoice language. Digits are always Western (latn),
+// and the amount is passed as text, so large values are not rounded through a float.
+// Returns HTML: the number is an LTR island, and the symbol stays in the page's direction, so Arabic
+// symbols with dots (ر.س. د.إ. ج.م.) read correctly and sit on the left of the number as in print.
+const fmtCache = new Map();
 function fmt(minor, cur, lang) {
-  const [w, f] = fromMinor(Math.abs(minor), cur).split(".");
-  const grouped = w.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  const sym = { SDG: lang === "ar" ? "ج.س" : "SDG" }[cur] || cur;
-  return (minor < 0 ? "−" : "") + grouped + (f ? "." + f : "") + " " + sym;
+  const k = lang + cur;
+  let f = fmtCache.get(k);
+  if (!f) { f = new Intl.NumberFormat(lang === "ar" ? "ar-u-nu-latn" : "en", { style: "currency", currency: cur, currencyDisplay: lang === "ar" ? "symbol" : "code" }); fmtCache.set(k, f); }
+  const parts = f.formatToParts(fromMinor(Math.abs(minor), cur));
+  const clean = (x) => x.replace(/[\u200e\u200f\u061c]/g, "").trim();
+  const sym = clean(parts.filter((x) => x.type === "currency").map((x) => x.value).join(""));
+  const number = clean(parts.filter((x) => x.type !== "currency" && x.type !== "literal").map((x) => x.value).join(""));
+  const n = `<span class="num" dir="ltr">${minor < 0 ? "−" : ""}${esc(number)}</span>`;
+  return lang === "ar" ? `<span class="amt">${n} ${esc(sym)}</span>` : `<span class="amt">${esc(sym)} ${n}</span>`;
 }
 const fromQty = (m) => (m % 1000 ? (m / 1000).toFixed(3).replace(/0+$/, "") : String(m / 1000));

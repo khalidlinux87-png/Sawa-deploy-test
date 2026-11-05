@@ -2,8 +2,23 @@
 // Every amount is an integer in the currency's minor unit (SDG 1.00 = 100).
 // Floats never touch money. Products of quantity and price use BigInt.
 
-export const CURRENCY_EXP = { SDG: 2, USD: 2, EUR: 2, SAR: 2, AED: 2, EGP: 2, QAR: 2, KWD: 3, BHD: 3, OMR: 3 };
-const BP = 10000n;            // basis points: 1500 = 15.00 %
+// Any ISO 4217 currency the runtime knows (about 160 in V8). The number of decimals comes from
+// Intl (CLDR), e.g. JPY 0, USD 2, KWD 3. EXP_OVERRIDE pins a currency if the product needs a
+// different number of decimals than CLDR, and must never change once money is stored in it.
+const EXP_OVERRIDE = {};
+const CUR_SET = new Set(typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("currency") : []);
+const expCache = new Map();
+export function currencyExp(cur) {
+  if (typeof cur !== "string" || !/^[A-Z]{3}$/.test(cur) || (CUR_SET.size && !CUR_SET.has(cur))) throw new PfmError("bad_currency", String(cur));
+  if (EXP_OVERRIDE[cur] != null) return EXP_OVERRIDE[cur];
+  let e = expCache.get(cur);
+  if (e == null) { e = new Intl.NumberFormat("en", { style: "currency", currency: cur }).resolvedOptions().maximumFractionDigits; expCache.set(cur, e); }
+  return e;
+}
+export const isCurrency = (c) => { try { currencyExp(c); return true; } catch { return false; } };
+
+const BP = 10000n;            // basis points (budgets and analytics): 1500 = 15.00 %
+const PPM = 1000000n;         // rates typed by users (tax, % discounts): parts per million, so "8.875" % = 88750
 const QTY_SCALE = 1000n;      // quantities carry 3 decimals: "2.5" -> 2500
 
 export class PfmError extends Error {
@@ -14,8 +29,7 @@ export class PfmError extends Error {
 
 // Parses "1,234.5" to a minor-unit integer without floats. Rejects excess precision.
 export function toMinor(input, currency) {
-  const exp = CURRENCY_EXP[currency];
-  if (exp == null) throw new PfmError("bad_currency", currency);
+  const exp = currencyExp(currency);
   const s = String(input).replace(/[,\s٬]/g, "").replace(/٫/g, ".")
     .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660));
   const m = /^(-)?(\d{1,15})(?:\.(\d+))?$/.exec(s);
@@ -27,8 +41,36 @@ export function toMinor(input, currency) {
   return m[1] ? -v : v;
 }
 
+// A percentage the user typed, as text: "15", "7.5", "8.875", "0". Up to 4 decimals, 0 to 100.
+// Returns parts per million as BigInt. No rate is ever assumed: the issuer types it.
+export function toRate(input) {
+  const m = /^(\d{1,3})(?:\.(\d{1,4}))?$/.exec(String(input ?? "").trim().replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660)).replace("\u066B", "."));
+  if (!m) throw new PfmError("bad_rate", String(input));
+  const v = BigInt(m[1]) * 10000n + BigInt((m[2] || "").padEnd(4, "0"));
+  if (v > PPM) throw new PfmError("bad_rate", String(input));
+  return v;
+}
+// Canonical text for a rate: 88750n -> "8.875"
+export const rateText = (ppm) => { const w = ppm / 10000n, f = String(ppm % 10000n).padStart(4, "0").replace(/0+$/, ""); return f ? `${w}.${f}` : String(w); };
+
+// ---------- currency conversion ----------
+
+// rate: text, how many units of `to` one unit of `from` buys ("0.2667", "3.75", "600.5").
+// Exact: BigInt throughout, rounded once, half away from zero. Handles different decimal places (USD 2 -> JPY 0 -> KWD 3).
+export function convert(minor, from, to, rate) {
+  if (from === to) return minor;
+  const m = /^(\d{1,12})(?:\.(\d{1,12}))?$/.exec(String(rate));
+  if (!m || /^0*(\.0*)?$/.test(rate)) throw new PfmError("bad_fx_rate", String(rate));
+  const scale = 10n ** BigInt((m[2] || "").length);
+  const r = BigInt(m[1] + (m[2] || ""));
+  const ef = currencyExp(from), et = currencyExp(to);
+  let numr = big(minor) * r, den = scale;
+  if (et >= ef) numr *= 10n ** BigInt(et - ef); else den *= 10n ** BigInt(ef - et);
+  return num(divRound(numr, den));
+}
+
 export function fromMinor(minor, currency) {
-  const exp = CURRENCY_EXP[currency];
+  const exp = currencyExp(currency);
   const neg = minor < 0, a = Math.abs(minor);
   const p = 10 ** exp, whole = Math.floor(a / p), frac = String(a % p).padStart(exp, "0");
   return (neg ? "-" : "") + whole + (exp ? "." + frac : "");
@@ -71,23 +113,24 @@ export function allocate(total, weights) {
 // ---------- invoice totals ----------
 
 /**
- * items: [{ description, qty: "2.5", unitPrice: minor, discount?: {type:"pct",bp}|{type:"amt",minor}, taxBp?: 1500 }]
- * opts:  { currency, invoiceDiscount?: {type,bp|minor}, taxInclusive?: false, amountPaid?: 0 }
+ * items: [{ description, qty: "2.5", unitPrice: minor, discount?: {type:"pct",rate:"10"}|{type:"amt",minor}, taxRate?: "15" }]
+ *        taxRate is whatever the issuer typed (a percentage as text). Missing = no tax on that line.
+ * opts:  { currency, invoiceDiscount?: {type,rate|minor}, taxInclusive?: false, amountPaid?: 0 }
  * Discounts apply before tax. Tax is computed per line, then summed per rate.
  */
 export function computeInvoice(items, opts) {
   const { currency, invoiceDiscount = null, taxInclusive = false, amountPaid = 0 } = opts;
-  if (CURRENCY_EXP[currency] == null) throw new PfmError("bad_currency", currency);
+  currencyExp(currency);
   if (!Array.isArray(items) || items.length === 0 || items.length > 200) throw new PfmError("bad_items");
 
   const lines = items.map((it, i) => {
     if (!Number.isSafeInteger(it.unitPrice) || it.unitPrice < 0) throw new PfmError("bad_price", "line " + (i + 1));
-    const taxBp = it.taxBp ?? 0;
-    if (!Number.isInteger(taxBp) || taxBp < 0 || taxBp > 10000) throw new PfmError("bad_tax", "line " + (i + 1));
+    let taxPpm;
+    try { taxPpm = it.taxRate == null || it.taxRate === "" ? 0n : toRate(it.taxRate); } catch { throw new PfmError("bad_tax", "line " + (i + 1)); }
     const qty = toQty(it.qty);
     const gross = divRound(big(it.unitPrice) * qty, QTY_SCALE);
     const lineDisc = discountOf(gross, it.discount);
-    return { i, qty, taxBp, gross, lineDisc };
+    return { i, qty, taxPpm, gross, lineDisc };
   });
 
   // Invoice-level discount is computed on the post-line-discount amount and spread over the lines.
@@ -103,19 +146,20 @@ export function computeInvoice(items, opts) {
     const afterDisc = l.gross - disc;
     let net, tax;
     if (taxInclusive) {                       // price already contains tax: extract it
-      net = divRound(afterDisc * BP, BP + big(l.taxBp));
+      net = divRound(afterDisc * PPM, PPM + l.taxPpm);
       tax = afterDisc - net;
     } else {
       net = afterDisc;
-      tax = divRound(net * big(l.taxBp), BP);
+      tax = divRound(net * l.taxPpm, PPM);
     }
     grossTotal += l.gross; lineDiscountTotal += l.lineDisc; netTotal += net; taxTotal += tax;
-    const r = byRate.get(l.taxBp) || { taxBp: l.taxBp, taxable: 0n, tax: 0n };
-    r.taxable += net; r.tax += tax; byRate.set(l.taxBp, r);
+    const key = String(l.taxPpm);
+    const r = byRate.get(key) || { ppm: l.taxPpm, taxable: 0n, tax: 0n };
+    r.taxable += net; r.tax += tax; byRate.set(key, r);
     // amount: what the row shows (after its own discount, before tax and the invoice-wide discount).
     // invoiceDiscountShare, net and tax: the basis that the tax is computed on.
     return { index: l.i, qtyMilli: num(l.qty), gross: num(l.gross), lineDiscount: num(l.lineDisc), amount: num(l.gross - l.lineDisc),
-      invoiceDiscountShare: num(shares[k]), net: num(net), taxBp: l.taxBp, tax: num(tax), total: num(net + tax) };
+      invoiceDiscountShare: num(shares[k]), net: num(net), taxRate: rateText(l.taxPpm), tax: num(tax), total: num(net + tax) };
   });
 
   const total = netTotal + taxTotal;
@@ -126,8 +170,8 @@ export function computeInvoice(items, opts) {
     subtotal: num(grossTotal - lineDiscountTotal),      // sum of row amounts
     invoiceDiscount: num(invDisc), netTotal: num(netTotal),
     taxTotal: num(taxTotal), total: num(total),
-    taxBreakdown: [...byRate.values()].filter((r) => r.taxBp > 0)
-      .sort((a, b) => a.taxBp - b.taxBp).map((r) => ({ taxBp: r.taxBp, taxable: num(r.taxable), tax: num(r.tax) })),
+    taxBreakdown: [...byRate.values()].filter((r) => r.ppm > 0n)
+      .sort((a, b) => (a.ppm < b.ppm ? -1 : 1)).map((r) => ({ taxRate: rateText(r.ppm), taxable: num(r.taxable), tax: num(r.tax) })),
     amountPaid: num(paid), amountDue: num(total - paid > 0n ? total - paid : 0n),
   };
 }
@@ -136,8 +180,8 @@ function discountOf(base, d) {
   if (!d) return 0n;
   let v;
   if (d.type === "pct") {
-    if (!Number.isInteger(d.bp) || d.bp < 0 || d.bp > 10000) throw new PfmError("bad_discount");
-    v = divRound(base * big(d.bp), BP);
+    let ppm; try { ppm = toRate(d.rate); } catch { throw new PfmError("bad_discount"); }
+    v = divRound(base * ppm, PPM);
   } else if (d.type === "amt") {
     if (!Number.isSafeInteger(d.minor) || d.minor < 0) throw new PfmError("bad_discount");
     v = big(d.minor);
@@ -190,14 +234,27 @@ export function localDate(tz, at = new Date()) {
 
 // ---------- tax policy ----------
 
-// An issuer who is not tax-registered cannot charge tax. The editor hides the tax fields,
-// and the server rejects tax that arrives anyway (a client bug or a crafted request).
+// Tax is never looked up by country. A tax-registered issuer types the rate (per line, or picks one of
+// their own saved rates, settings.taxRates: [{id, label, rate}]) and names the tax ("VAT", "GST", "TVA", ...).
+// An issuer who is not tax-registered cannot charge tax: the editor hides the fields, and the server
+// rejects tax that arrives anyway (a client bug or a crafted request).
 export function applyTaxPolicy(settings, items, opts = {}) {
-  if (settings.taxRegistered) {
-    return { items: items.map((it) => ({ ...it, taxBp: it.taxBp ?? settings.defaultTaxBp ?? 0 })), taxInclusive: !!opts.taxInclusive };
+  const has = (it) => (it.taxRate != null && it.taxRate !== "" && toRate(it.taxRate) > 0n) || it.taxRateId;
+  if (!settings.taxRegistered) {
+    if (items.some(has) || opts.taxInclusive) throw new PfmError("tax_not_registered");
+    return { items: items.map(({ taxRateId, ...it }) => ({ ...it, taxRate: "0" })), taxInclusive: false, taxLabel: null };
   }
-  if (items.some((it) => it.taxBp) || opts.taxInclusive) throw new PfmError("tax_not_registered");
-  return { items: items.map((it) => ({ ...it, taxBp: 0 })), taxInclusive: false };
+  const saved = new Map((settings.taxRates || []).map((r) => [r.id, r]));
+  const out = items.map(({ taxRateId, ...it }) => {
+    if (taxRateId) {
+      const r = saved.get(taxRateId);
+      if (!r) throw new PfmError("bad_tax", "unknown saved rate " + taxRateId);
+      return { ...it, taxRate: rateText(toRate(r.rate)) };
+    }
+    return { ...it, taxRate: rateText(toRate(it.taxRate ?? "0")) };   // empty = 0: nothing is assumed
+  });
+  const label = String(opts.taxLabel ?? settings.taxLabel ?? "").trim().slice(0, 24) || null;   // null: the template says "Tax"
+  return { items: out, taxInclusive: !!opts.taxInclusive, taxLabel: label };
 }
 
 // ---------- receiving accounts ----------
@@ -208,7 +265,10 @@ export const PAYOUT_TYPES = ["sawa_wallet", "bank", "mobile_money", "other"];
 export function validatePayoutAccount(a) {
   const t = (s, max) => typeof s === "string" && s.trim().length > 0 && s.length <= max;
   if (!PAYOUT_TYPES.includes(a.type)) throw new PfmError("bad_account", "type");
-  if (a.type === "sawa_wallet") return { type: a.type, label: a.label || "Sawa Wallet" };
+  // Each account receives one currency. "ANY" is for accounts that convert on arrival (e.g. some wallets).
+  const currency = a.currency ?? "ANY";
+  if (currency !== "ANY" && !isCurrency(currency)) throw new PfmError("bad_account", "currency");
+  if (a.type === "sawa_wallet") return { type: a.type, label: a.label || "Sawa Wallet", currency: "ANY" };
   if (!t(a.label, 40)) throw new PfmError("bad_account", "label");
   if (!t(a.holderName, 80)) throw new PfmError("bad_account", "holderName");
   const number = String(a.number || "").replace(/[\s-]/g, "");
@@ -220,7 +280,7 @@ export function validatePayoutAccount(a) {
     if (!t(a.provider, 40)) throw new PfmError("bad_account", "provider");
     if (!/^\+?\d{6,15}$/.test(number)) throw new PfmError("bad_account", "number");
   } else if (!t(a.details, 200)) throw new PfmError("bad_account", "details");
-  return { type: a.type, label: a.label.trim(), holderName: a.holderName.trim(), bankName: a.bankName?.trim(),
+  return { type: a.type, currency, label: a.label.trim(), holderName: a.holderName.trim(), bankName: a.bankName?.trim(),
     provider: a.provider?.trim(), number: number.toUpperCase() || undefined, branch: a.branch?.trim(), details: a.details?.trim() };
 }
 // ISO 13616 mod-97 check.
@@ -229,6 +289,10 @@ function ibanOk(iban) {
   let m = 0; for (const ch of r) m = (m * 10 + Number(ch)) % 97;
   return m === 1;
 }
+// Accounts to print on an invoice: those the issuer picked that take the invoice's currency.
+export const accountsForInvoice = (accounts, ids, currency) =>
+  ids.map((id) => accounts.find((a) => a.id === id)).filter((a) => a && !a.archived && (a.currency === "ANY" || a.currency === currency));
+
 // For lists and previews: "•••• 4321".
 export const maskNumber = (n) => (n && n.length > 4 ? "•••• " + n.slice(-4) : n || "");
 
@@ -276,18 +340,25 @@ export function budgetStatus(budget, spent, elapsed, length) {
 // ---------- ledger analytics ----------
 
 /**
- * txs: [{ kind: "income"|"expense"|"transfer", amount (always > 0), categoryId, refundOf? }]
+ * txs: [{ kind: "income"|"expense"|"transfer", amount (always > 0), currency, baseAmount?, categoryId, refundOf? }]
+ * Totals are in the user's base currency: each row's baseAmount (converted when the row was written,
+ * at the rate stored on the row). byCurrency also gives the original amounts per currency.
  * Transfers between the user's own accounts are not income or spending.
  * A refund is an "income" row with refundOf set. It reduces the original category's spending.
  */
 export function summarize(txs) {
   let income = 0, expense = 0;
-  const cats = new Map();
+  const cats = new Map(), curs = new Map();
   for (const t of txs) {
     if (t.kind === "transfer" || t.deleted) continue;
-    if (t.kind === "income" && t.refundOf) { expense -= t.amount; bump(cats, t.categoryId, "expense", -t.amount); continue; }
-    if (t.kind === "income") { income += t.amount; bump(cats, t.categoryId, "income", t.amount); }
-    else if (t.kind === "expense") { expense += t.amount; bump(cats, t.categoryId, "expense", t.amount); }
+    const v = t.baseAmount ?? t.amount;
+    if (t.currency) {
+      const k = t.kind === "income" && !t.refundOf ? "income" : "expense", sign = t.refundOf ? -1 : 1;
+      bump(curs, t.currency, k, sign * t.amount);
+    }
+    if (t.kind === "income" && t.refundOf) { expense -= v; bump(cats, t.categoryId, "expense", -v); continue; }
+    if (t.kind === "income") { income += v; bump(cats, t.categoryId, "income", v); }
+    else if (t.kind === "expense") { expense += v; bump(cats, t.categoryId, "expense", v); }
   }
   const net = income - expense;
   return {
@@ -296,6 +367,7 @@ export function summarize(txs) {
     byCategory: [...cats.entries()].map(([categoryId, v]) => ({
       categoryId, ...v, shareBp: expense > 0 && v.expense > 0 ? Number(divRound(big(v.expense) * BP, big(expense))) : 0,
     })).sort((a, b) => b.expense - a.expense || b.income - a.income),
+    byCurrency: [...curs.entries()].map(([currency, v]) => ({ currency, ...v })),
   };
 }
 function bump(m, id, k, v) { const e = m.get(id) || { income: 0, expense: 0 }; e[k] += v; m.set(id, e); }
