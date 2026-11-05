@@ -2042,12 +2042,17 @@ async function opChatSend(uid, payload, env, ctx) {
   }
   return { ts, day, id: msg.id };
 }
-async function dayMsg(token, cid, day, id) {
+// Same read as dayMsg, plus the day document's updateTime so a later write can be
+// made conditional on it (optimistic concurrency for read-check-write ops).
+async function dayMsgAt(token, cid, day, id) {
   if (!DAY_REF.test(String(day || "")) || !MSG_ID.test(String(id || ""))) throw new Error("bad message ref");
   const d = await fsGet(token, "chats/" + cid + "/days/" + day);
   const v = d && d.fields && d.fields.msgs && d.fields.msgs.mapValue.fields && d.fields.msgs.mapValue.fields[id];
   if (!v) throw new Error("message not found");
-  return fsToJs(v);
+  return { m: fsToJs(v), updateTime: (d && d.updateTime) || null };
+}
+async function dayMsg(token, cid, day, id) {
+  return (await dayMsgAt(token, cid, day, id)).m;
 }
 // v33: \u0642\u0631\u0627\u0621\u0629 \u0631\u0633\u0627\u0626\u0644 \u0628\u0639\u064a\u0646\u0647\u0627 \u0645\u0646 \u0648\u062b\u064a\u0642\u0629 \u064a\u0648\u0645 (\u0642\u0646\u0627\u0639 \u062d\u0642\u0648\u0644 \u2014 \u0644\u0627 \u062a\u064f\u0646\u0632\u064e\u0651\u0644 \u0627\u0644\u0648\u062b\u064a\u0642\u0629 \u0643\u0644\u0651\u0647\u0627)
 async function dayPeek(token, cid, day, ids) {
@@ -2542,10 +2547,10 @@ async function opGroupJoin(uid, payload, env, claims) {
 async function toolMsg(token, payload, uid, wantType) {
   const { cid, day, id } = payload || {};
   const c = await requireChatMember(token, cid, uid);
-  const m = await dayMsg(token, cid, day, id);
+  const { m, updateTime } = await dayMsgAt(token, cid, day, id);
   if (m.type !== wantType) throw new Error("wrong message type");
   if (m.del) throw new Error("message deleted");
-  return { c, m, cid, day, id };
+  return { c, m, cid, day, id, updateTime };
 }
 const setPath = (cid, day, fieldPath, value) => ({ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day,
   fields: value === undefined ? {} : nestFields(fieldPath, value) }, updateMask: { fieldPaths: [fieldPath.map(s => "`" + s + "`").join(".")] } });
@@ -2688,9 +2693,23 @@ async function opChatFund(uid, payload, env) {
   await fsCommit(token, [setPath(cid, day, ["msgs", id, "contrib", uid], { amount: prev + amount, ts: Date.now() })]);
   return { total: prev + amount };
 }
+// Claim / reassign / status / pct / note all read the task state, decide, then write.
+// Two members acting at once used to both pass the "already assigned" check and both
+// end up as owner. The write is now conditional on the day document's updateTime that
+// was read, and a lost race (FAILED_PRECONDITION) re-runs the whole read-check-write.
 async function opChatTask(uid, payload, env, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
-  const { c, m, cid, day, id } = await toolMsg(token, payload, uid, "tasks");
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await chatTaskOnce(uid, payload, env, ctx, token);
+    } catch (e) {
+      if (attempt < 4 && /FAILED_PRECONDITION/.test(String((e && e.message) || ""))) continue;
+      throw e;
+    }
+  }
+}
+async function chatTaskOnce(uid, payload, env, ctx, token) {
+  const { c, m, cid, day, id, updateTime } = await toolMsg(token, payload, uid, "tasks");
   const taskId = String(payload.taskId || "");
   // C164: \u0641\u064a \u0627\u0644\u0633\u0631\u0651\u064a\u0651\u0629 \u0644\u0627 \u064a\u0631\u0649 \u0627\u0644\u062e\u0627\u062f\u0645 \u0627\u0644\u0645\u0647\u0627\u0645\u0651 (\u062f\u0627\u062e\u0644 enc) \u2014 \u0645\u0639\u0631\u0651\u0641\u064c \u0633\u0644\u064a\u0645 \u0641\u0642\u0637\u060c \u0648\u0627\u0644\u062d\u0627\u0644\u0629 \u0648\u062d\u062f\u0647\u0627 (\u0644\u0627 \u0645\u0644\u0627\u062d\u0638\u0627\u062a \u0646\u0635\u0651\u064a\u0651\u0629 \u0638\u0627\u0647\u0631\u0629)
   let task = null;
@@ -2733,7 +2752,9 @@ async function opChatTask(uid, payload, env, ctx) {
     else if (v < 100 && next.status === "done" && payload.status === undefined) { next.status = "pending"; delete next.doneBy; delete next.doneAt; }
   }
   const m2 = Object.assign({}, m, { tstate: Object.assign({}, m.tstate, { [taskId]: next }) });
-  await fsCommit(token, [setPath(cid, day, ["msgs", id, "tstate", taskId], next)].concat(m.enc ? [] : [taskIdxWrite(c, cid, day, id, m2)]));
+  const tw = setPath(cid, day, ["msgs", id, "tstate", taskId], next);
+  if (updateTime) tw.currentDocument = { updateTime: updateTime };   // lost race ⇒ FAILED_PRECONDITION ⇒ retry above
+  await fsCommit(token, [tw].concat(m.enc ? [] : [taskIdxWrite(c, cid, day, id, m2)]));
   // \u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062a \u0628\u0639\u062f \u0627\u0644\u0631\u062f\u0651
   const job = (async () => {
     const names = chatNames(c), who = names[uid] || "\u0633\u0648\u0627", gname = fstr(c, "name") || "\u0633\u0648\u0627";
