@@ -1344,3 +1344,7 @@ Meta قيّدت حافظة الأعمال («prohibited from advertising, includ
 - `marriageRule` (نقيّة) + `marriageFacts` (من Firestore): جنسان معروفان ومختلفان · زوجٌ حاليّ واحد للمرأة · أربعٌ للرجل · لا محارم بالنسب.
 - تُطبَّق في `relation.add` و`relation.update` (سابق ⇐ قائم) ⇒ «marriage not allowed: …» (رفضٌ نهائيّ في طابور العميل). الرفع الكامل: جنسٌ واحد يُسقط، والزائد يُحفظ «سابقاً».
 - اختبار: `node marriage.test.js` ✓ 9/9.
+
+## 🖼️ v121 — صورة الحساب والمجموعة بدقّةٍ عالية (C204 في Sawa-app/BUILD.md)
+- `profile.set` و`group.update` يقبلان `photoHd` اختياريّاً (data:image/jpeg|webp، ≤ 400 ألف حرف) ⇒ `avatars/{id}_hd`. صورةٌ جديدة بلا نسخةٍ عالية أو إزالة ⇒ تُحذف القديمة. محادثة العائلة تقبل photoHd مع photo.
+- المصغّرة `avatars/{id}` كما هي (≤ 20 ألف) — القوائم لا تجلب النسخة العالية.

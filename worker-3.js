@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u06
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v120-marriage";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
+const VER = "v121-photohd";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -2424,7 +2424,7 @@ async function opGroupUpdate(uid, payload, env) {
   const c = await requireChatMember(token, cid, uid);
   // C159: \u0645\u062d\u0627\u062f\u062b\u0629 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u2014 \u0635\u0648\u0631\u062a\u0647\u0627 \u0648\u062d\u062f\u0647\u0627\u060c \u0644\u0645\u0627\u0644\u0643 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u0648\u0645\u062d\u0631\u0651\u0631\u064a\u0647\u0627 (\u0627\u0644\u0627\u0633\u0645 \u0648\u0627\u0644\u0623\u0639\u0636\u0627\u0621 \u064a\u062a\u0628\u0639\u0627\u0646 \u0627\u0644\u0639\u0627\u0626\u0644\u0629)
   if (fstr(c, "type") === "family") {
-    if (payload.photo == null || Object.keys(payload).some(k => k !== "cid" && k !== "photo")) throw new Error("family chat follows the family");
+    if (payload.photo == null || Object.keys(payload).some(k => k !== "cid" && k !== "photo" && k !== "photoHd")) throw new Error("family chat follows the family");
     const fm = await fsGet(token, "groups/" + fstr(c, "familyGroupId") + "/members/" + uid).catch(() => null);
     const fr = fstr(fm, "role");
     if (fr !== "owner" && fr !== "editor") throw new Error("only admins can do this");
@@ -2450,7 +2450,7 @@ async function opGroupUpdate(uid, payload, env) {
   }
   if (!mask.length) return { ok: true };
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields }, updateMask: { fieldPaths: mask } }].concat(gphoto === undefined ? [] :
-    [gphoto ? { update: { name: DOC_ROOT + "/avatars/" + cid, fields: { d: { stringValue: gphoto }, ts: { integerValue: String(Date.now()) } } } } : { delete: DOC_ROOT + "/avatars/" + cid }]));
+    [gphoto ? { update: { name: DOC_ROOT + "/avatars/" + cid, fields: { d: { stringValue: gphoto }, ts: { integerValue: String(Date.now()) } } } } : { delete: DOC_ROOT + "/avatars/" + cid }, photoHdWrite(cid, gphoto, payload.photoHd)]));
   if (gphoto !== undefined) await sysMsg(token, cid, uid, "photo", { on: !!gphoto });
   if (fields.name) await sysMsg(token, cid, uid, "renamed", { name: fields.name.stringValue });
   if (fields.desc) await sysMsg(token, cid, uid, "desc", {});
@@ -3943,6 +3943,16 @@ async function opFindBy(uid, payload, env, kind, claims) {
     fsGet(token, "accounts/" + uid + "/creqout/" + t.uid), fsGet(token, "accounts/" + uid + "/creq/" + t.uid)]);
   return { found: true, name: t.name, code: t.code, contact: !!contact, pending: inR ? "in" : outR ? "out" : null, uid: (contact || inR || outR) ? t.uid : undefined };
 }
+// C204 (v121): \u0646\u0633\u062e\u0629\u064c \u0639\u0627\u0644\u064a\u0629 \u0627\u0644\u062f\u0642\u0651\u0629 \u0644\u0644\u0635\u0648\u0631\u0629 (\u2264 400 \u0623\u0644\u0641 \u062d\u0631\u0641) \u0641\u064a avatars/{id}_hd \u2014 \u062a\u064f\u0642\u0631\u0623 \u0639\u0646\u062f \u0641\u062a\u062d \u0627\u0644\u0635\u0648\u0631\u0629 \u0648\u062d\u062f\u0647\u0627.
+// \u0627\u0644\u0645\u0635\u063a\u0651\u0631\u0629 avatars/{id} \u0643\u0645\u0627 \u0647\u064a (\u2264 20 \u0623\u0644\u0641) \u0644\u0644\u0642\u0648\u0627\u0626\u0645. \u0635\u0648\u0631\u0629\u064c \u062c\u062f\u064a\u062f\u0629 \u0628\u0644\u0627 \u0646\u0633\u062e\u0629\u064d \u0639\u0627\u0644\u064a\u0629 \u0623\u0648 \u0625\u0632\u0627\u0644\u0629 \u21d2 \u062a\u064f\u062d\u0630\u0641 \u0627\u0644\u0639\u0627\u0644\u064a\u0629 \u0627\u0644\u0642\u062f\u064a\u0645\u0629.
+function photoHdWrite(id, photo, photoHd) {
+  if (photo && photoHd) {
+    const hd = String(photoHd);
+    if (!/^data:image\/(jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(hd) || hd.length > 400000) throw new Error("bad photo");
+    return { update: { name: DOC_ROOT + "/avatars/" + id + "_hd", fields: { d: { stringValue: hd }, ts: { integerValue: String(Date.now()) } } } };
+  }
+  return { delete: DOC_ROOT + "/avatars/" + id + "_hd" };
+}
 async function opProfileSet(uid, payload, env, claims) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   payload = payload || {};
@@ -3976,6 +3986,7 @@ async function opProfileSet(uid, payload, env, claims) {
     if (pv0.phone === phone && pv0.phoneVerified) { delete fields.phoneVerified; const i = mask.indexOf("phoneVerified"); if (i >= 0) mask.splice(i, 1); }   // \u0627\u0644\u0631\u0642\u0645 \u0646\u0641\u0633\u0647 \u21d2 \u064a\u0628\u0642\u0649 \u0645\u0648\u062b\u064e\u0651\u0642\u0627\u064b
   }
   if (photo !== undefined) pw.push(photo ? { update: { name: DOC_ROOT + "/avatars/" + uid, fields: { d: { stringValue: photo }, ts: { integerValue: String(Date.now()) } } } } : { delete: DOC_ROOT + "/avatars/" + uid });
+  if (photo !== undefined) pw.push(photoHdWrite(uid, photo, payload.photoHd));   // C204
   await fsCommit(token, pw);
   if (name === undefined && phone === undefined) { const pv = PROFILE_CACHE.get(uid) || {}; return { profile: { name: pv.name || null, phone: pv.phone || null, phoneVerified: false, photo: !!photo }, propagated: 0 }; }
   const prev = PROFILE_CACHE.get(uid) || {};
