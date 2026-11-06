@@ -22,6 +22,18 @@ const OPS = {
   "pfm.summary": opSummary,
   "pfm.fx.last": opFxLast,
   "pfm.audit.list": opAuditList,
+  // P2
+  "pfm.tx.confirm": opTxConfirm,
+  "pfm.budget.set": opBudgetSet,
+  "pfm.budget.delete": opBudgetDelete,
+  "pfm.budget.list": opBudgetList,
+  "pfm.alerts.list": opAlertsList,
+  "pfm.alerts.read": opAlertsRead,
+  "pfm.recurring.upsert": opRecurringUpsert,
+  "pfm.recurring.pause": opRecurringPause,
+  "pfm.recurring.delete": opRecurringDelete,
+  "pfm.rule.upsert": opRuleUpsert,
+  "pfm.rule.delete": opRuleDelete,
 };
 export const PFM_OPS = Object.keys(OPS);
 
@@ -120,8 +132,15 @@ function checkTz(tz) { try { new Intl.DateTimeFormat("en", { timeZone: tz }); re
 async function opGet(x) {
   const s = await settingsOf(x, false);
   if (!s) return { settings: null };
-  const cats = [...(await categoryMap(x)).values()].map(strip).sort((a, b) => a.order - b.order);
-  return { settings: strip(s), categories: cats, today: C.localDate(s.tz), month: C.budgetMonth(C.localDate(s.tz), s.monthStartDay) };
+  const today = C.localDate(s.tz), month = C.budgetMonth(today, s.monthStartDay);
+  // Recurring entries that fell due since the last visit appear now (the cron also does this and sends a reminder).
+  await materialise(x, s, today).catch(() => null);
+  const [catMap, rules, recurring, suggested, alerts] = await Promise.all([categoryMap(x), rulesOf(x), recurringOf(x),
+    x.d.fsQuerySub(x.token, `pfm/${x.uid}`, "tx", [["status", "EQUAL", "suggested"]], 100), unreadAlerts(x, month)]);
+  const cats = [...catMap.values()].map(strip).sort((a, b) => a.order - b.order);
+  return { settings: strip(s), categories: cats, today, month,
+    rules: rules.map(strip), recurring: await Promise.all(recurring.map((r) => present(x, r))),
+    suggestedCount: suggested.map((dd) => js(x, dd)).filter((t) => !t.deleted).length, alerts };
 }
 
 async function opInit(x) {
@@ -254,11 +273,12 @@ async function buildTx(x, s, cats, input, base) {
   const sealOr = async (k, max) => (input[k] !== undefined ? await seal(x, txt(input[k], max, k)) : base?.[k] ?? null);
   return { kind, amount, currency, baseAmount, fxRate, fxSource, categoryId, date, month,
     note: await sealOr("note", 300), counterparty: await sealOr("counterparty", 80),
-    source: base?.source || "manual", status: "booked", deleted: false };
+    source: base?.source || input.source || "manual", status: input.status || base?.status || "booked", deleted: false };
 }
 
 async function opTxAdd(x) {
   const p = x.p;
+  let settingsForAlerts = null;
   if (!ID_RE.test(p.idemKey || "")) throw new C.PfmError("bad_idem_key");
   const id = "t_" + p.idemKey;            // the client's idempotency key IS the row id: a retry hits exists:false
   let out;
@@ -266,7 +286,13 @@ async function opTxAdd(x) {
     const existing = js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/tx/${id}`));
     if (existing) { out = existing; return { result: null }; }
     const s = await settingsOf(x), cats = await categoryMap(x);
-    const tx = { ...(await buildTx(x, s, cats, p, null)), rev: 1, createdAt: now(), updatedAt: now() };
+    let input = p, auto = false;
+    if (!p.categoryId && (p.counterparty || p.note)) {
+      const m = C.matchCategoryRule(await rulesOf(x), { kind: p.kind, counterparty: p.counterparty, note: p.note });
+      if (m && cats.get(m.categoryId)?.kind === p.kind) { input = { ...p, categoryId: m.categoryId }; auto = true; }
+    }
+    const tx = { ...(await buildTx(x, s, cats, input, null)), autoCategorized: auto, rev: 1, createdAt: now(), updatedAt: now() };
+    settingsForAlerts = s;
     out = { id, ...tx };
     const writes = [{ update: { name: P(x, `pfm/${x.uid}/tx/${id}`), fields: fieldsOf(x, tx) }, currentDocument: { exists: false } },
       ...rollupWrites(x, C.rollupDiff(null, tx))];
@@ -274,7 +300,8 @@ async function opTxAdd(x) {
     if (!s.hasTx) writes.push({ update: { name: P(x, `pfm/${x.uid}`), fields: fieldsOf(x, { hasTx: true }) }, updateMask: { fieldPaths: ["hasTx"] } });
     return { writes, audit: [{ action: "tx.add", ref: `tx/${id}`, after: auditView(tx) }], result: null };
   });
-  return { tx: await present(x, out) };
+  const alerts = settingsForAlerts ? await checkAlerts(x, settingsForAlerts, [out]) : [];
+  return { tx: await present(x, out), alerts };
 }
 const fxLastWrite = (x, tx, base) => ({ update: { name: P(x, `pfm/${x.uid}/fxLast/${tx.currency}_${base}`), fields: fieldsOf(x, { rate: tx.fxRate, at: now() }) } });
 // Audit keeps amounts, category, dates and the sealed text (still encrypted).
@@ -295,7 +322,7 @@ async function loadTxForEdit(x) {
 }
 
 async function opTxUpdate(x) {
-  let out;
+  let out, prevRow = null, sAlerts = null;
   await commitAudited(x, async () => {
     const old = await loadTxForEdit(x);
     const s = await settingsOf(x), cats = await categoryMap(x);
@@ -308,9 +335,11 @@ async function opTxUpdate(x) {
     const writes = [{ update: { name: P(x, `pfm/${x.uid}/tx/${old.id}`), fields: fieldsOf(x, nx) }, currentDocument: { updateTime: old._updateTime } },
       ...rollupWrites(x, C.rollupDiff(old, nx))];
     if (nx.fxSource === "manual" && nx.fxRate !== old.fxRate) writes.push(fxLastWrite(x, nx, s.baseCurrency));
+    prevRow = old; sAlerts = s;
     return { writes, audit: [{ action: "tx.update", ref: `tx/${old.id}`, before, after }], result: null };
   });
-  return { tx: await present(x, out) };
+  const alerts = sAlerts ? await checkAlerts(x, sAlerts, [prevRow, out]) : [];
+  return { tx: await present(x, out), alerts };
 }
 
 async function opTxDelete(x) {
@@ -407,10 +436,340 @@ async function opAuditList(x) {
 
 // Called by the Worker's purge job. Returns true when everything is gone (false = budget ran out; the job retries).
 export async function purgePfm(d, token, uid, spend, purgeColl) {
-  for (const c of ["tx", "categories", "months", "fxLast", "recurring", "budgets"])
+  for (const c of ["tx", "categories", "months", "fxLast", "recurring", "budgets", "alerts", "rules", "idem"])
     if (!(await purgeColl(token, `pfm/${uid}/${c}`, spend))) return false;
   if (!(await purgeColl(token, `audit/${uid}/log`, spend))) return false;
   if (!spend()) return false;
-  await d.fsCommit(token, [{ delete: d.DOC_ROOT + `/pfm/${uid}` }, { delete: d.DOC_ROOT + `/audit/${uid}` }]);
+  await d.fsCommit(token, [{ delete: d.DOC_ROOT + `/pfm/${uid}` }, { delete: d.DOC_ROOT + `/audit/${uid}` }, { delete: d.DOC_ROOT + `/pfmDue/${uid}` }]);
   return true;
+}
+
+// =====================================================================================================
+// P2: confirm suggested rows · budgets and alerts · recurring entries · categorisation rules · cron
+// =====================================================================================================
+
+async function opTxConfirm(x) {
+  let out, sA = null;
+  await commitAudited(x, async () => {
+    const old = await loadTxForEdit(x);
+    if (old.status !== "suggested") throw new C.PfmError("not_suggested");
+    const s = await settingsOf(x), cats = await categoryMap(x);
+    const input = { status: "booked" };
+    for (const k of ["amount", "fxRate", "date", "categoryId", "note"]) if (x.p[k] !== undefined) input[k] = x.p[k];
+    const nx = { ...(await buildTx(x, s, cats, input, old)), recurringId: old.recurringId, rev: old.rev + 1, createdAt: old.createdAt, updatedAt: now() };
+    out = { id: old.id, ...nx }; sA = s;
+    const writes = [{ update: { name: P(x, `pfm/${x.uid}/tx/${old.id}`), fields: fieldsOf(x, nx) }, currentDocument: { updateTime: old._updateTime } },
+      ...rollupWrites(x, C.rollupDiff(old, nx))];
+    if (!s.hasTx) writes.push({ update: { name: P(x, `pfm/${x.uid}`), fields: fieldsOf(x, { hasTx: true }) }, updateMask: { fieldPaths: ["hasTx"] } });
+    return { writes, audit: [{ action: "tx.confirm", ref: `tx/${old.id}`, after: auditView(nx) }], result: null };
+  });
+  const alerts = await checkAlerts(x, sA, [out]);
+  return { tx: await present(x, out), alerts };
+}
+
+// ---------- budgets ----------
+
+const TOTAL = "_total";
+const DEFAULT_ALERTS = [5000, 8000, 10000];
+async function opBudgetSet(x) {
+  const p = x.p;
+  let out;
+  await commitAudited(x, async () => {
+    const s = await settingsOf(x);
+    const catId = p.categoryId;
+    if (catId !== TOTAL) { const c = (await categoryMap(x)).get(catId); if (!c || c.kind !== "expense") throw new C.PfmError("bad_category"); }
+    const limit = C.toMinor(p.limit, s.baseCurrency);
+    if (limit <= 0) throw new C.PfmError("bad_amount");
+    const alertsBp = p.alertsBp == null ? DEFAULT_ALERTS : p.alertsBp;
+    if (!Array.isArray(alertsBp) || alertsBp.length > 5 || alertsBp.some((b) => !Number.isInteger(b) || b < 1000 || b > 20000)) throw new C.PfmError("bad_alerts");
+    const old = js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/budgets/${catId}`));
+    const b = { categoryId: catId, limit, currency: s.baseCurrency, alertsBp: [...new Set(alertsBp)].sort((a, c) => a - c), createdAt: old?.createdAt || now(), updatedAt: now() };
+    out = b;
+    return { writes: [{ update: { name: P(x, `pfm/${x.uid}/budgets/${catId}`), fields: fieldsOf(x, b) } }],
+      audit: [{ action: old ? "budget.update" : "budget.add", ref: `budgets/${catId}`, before: old ? { limit: old.limit } : undefined, after: { limit } }], result: null };
+  });
+  return { budget: out };
+}
+async function opBudgetDelete(x) {
+  const id = x.p.categoryId === TOTAL ? TOTAL : segId(x.p.categoryId);
+  await commitAudited(x, async () => {
+    const old = js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/budgets/${id}`));
+    if (!old) return { result: null };
+    return { writes: [{ delete: P(x, `pfm/${x.uid}/budgets/${id}`) }], audit: [{ action: "budget.delete", ref: `budgets/${id}`, before: { limit: old.limit } }], result: null };
+  });
+  return { categoryId: id, deleted: true };
+}
+
+// Status of every budget for one budget month. The current month uses today's position in the period;
+// past months count as complete, future months as not started.
+async function budgetStatuses(x, s, month) {
+  const today = C.localDate(s.tz), cur = C.budgetMonth(today, s.monthStartDay);
+  const per = C.budgetPeriod(month, s.monthStartDay);
+  const elapsed = month < cur ? per.days : month > cur ? 0 : C.periodElapsed(per, today);
+  const [bdocs, mdoc] = await Promise.all([x.d.fsList(x.token, `pfm/${x.uid}/budgets`), x.d.fsGet(x.token, `pfm/${x.uid}/months/${month}`)]);
+  const m = js(x, mdoc) || {};
+  return bdocs.map((dd) => js(x, dd)).filter((b) => b.currency === s.baseCurrency).map((b) => {
+    const spent = b.categoryId === TOTAL ? m.expense || 0 : (m.cat && m.cat[b.categoryId] && m.cat[b.categoryId].e) || 0;
+    const st = C.budgetStatus({ limit: b.limit, alertsBp: b.alertsBp, firedBp: [] }, spent, elapsed, per.days);
+    return { categoryId: b.categoryId, alertsBp: b.alertsBp, ...st, state: st.usedBp >= 10000 ? "over" : st.usedBp >= 8000 ? "warn" : "ok",
+      onPace: st.projected <= b.limit, period: per, elapsed };
+  });
+}
+async function opBudgetList(x) {
+  const s = await settingsOf(x);
+  const month = x.p.month || C.budgetMonth(C.localDate(s.tz), s.monthStartDay);
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new C.PfmError("bad_month");
+  const list = await budgetStatuses(x, s, month);
+  const order = (b) => (b.categoryId === TOTAL ? -1 : 0);
+  return { month, currency: s.baseCurrency, budgets: list.sort((a, b) => order(a) - order(b) || b.usedBp - a.usedBp) };
+}
+
+// ---------- alerts ----------
+
+// After rows change, check the budgets they touch in the CURRENT budget month only (backdated entries in old
+// months never alert). Each alert is a document whose id is month+category+threshold, created with
+// exists:false, so it fires at most once even when two writes race; only the creator sends the push.
+async function checkAlerts(x, s, rows) {
+  try {
+    const today = C.localDate(s.tz), month = C.budgetMonth(today, s.monthStartDay);
+    const touched = new Set();
+    for (const r of rows) if (r && r.kind === "expense" && r.month === month) touched.add(r.categoryId);
+    if (!touched.size) return [];
+    touched.add(TOTAL);
+    const statuses = (await budgetStatuses(x, s, month)).filter((b) => touched.has(b.categoryId));
+    const cats = await categoryMap(x);
+    const fired = [];
+    for (const b of statuses) {
+      const fresh = [];
+      for (const a of b.alerts) {
+        const key = a.kind === "pace" ? "pace" : String(a.bp);
+        const doc = { month, categoryId: b.categoryId, kind: a.kind, bp: a.bp, spent: b.spent, limit: b.limit, projected: b.projected, at: now(), read: false };
+        try {
+          await x.d.fsCommit(x.token, [{ update: { name: P(x, `pfm/${x.uid}/alerts/${month}_${b.categoryId}_${key}`), fields: fieldsOf(x, doc) }, currentDocument: { exists: false } }]);
+          fresh.push({ id: `${month}_${b.categoryId}_${key}`, ...doc });
+        } catch (e) { if (!isConflict(e)) throw e; }   // already fired this month
+      }
+      if (!fresh.length) continue;
+      fired.push(...fresh);
+      // one push per budget: the most serious new alert (over limit > heading over > highest threshold)
+      const top = fresh.sort((a, c) => sev(c) - sev(a))[0];
+      if (x.d.push) {
+        const [title, body] = alertText(s, top, cats.get(b.categoryId));
+        await x.d.push(x.token, x.uid, title, body).catch(() => 0);
+      }
+    }
+    return fired;
+  } catch (e) { return []; }   // alerts never fail the write that triggered them
+}
+const sev = (a) => (a.kind === "pace" ? 9000 : a.bp);
+function moneyText(minor, cur) {
+  const e = C.currencyExp(cur);
+  return new Intl.NumberFormat("en", { minimumFractionDigits: e, maximumFractionDigits: e }).format(minor / 10 ** e) + " " + cur;
+}
+export function alertText(s, a, cat) {
+  const ar = s.locale !== "en", cur = s.baseCurrency;
+  const name = a.categoryId === TOTAL ? (ar ? "كلّ المصروفات" : "All spending") : cat ? (ar ? cat.nameAr || cat.name : cat.name) : a.categoryId;
+  const pct = Math.round((a.spent * 100) / a.limit);
+  if (a.kind === "pace")
+    return ar ? [`${name}: الإنفاق أسرع من الميزانيّة`, `بهذه الوتيرة ستصل إلى ${moneyText(a.projected, cur)} من ${moneyText(a.limit, cur)} بنهاية الشهر`]
+      : [`${name}: spending faster than budgeted`, `At this pace you'll reach ${moneyText(a.projected, cur)} of ${moneyText(a.limit, cur)} by month end`];
+  if (a.bp >= 10000)
+    return ar ? [`تجاوزت ميزانيّة ${name}`, `أنفقت ${moneyText(a.spent, cur)} من ${moneyText(a.limit, cur)} (${pct}%)`]
+      : [`Over budget: ${name}`, `${moneyText(a.spent, cur)} spent of ${moneyText(a.limit, cur)} (${pct}%)`];
+  return ar ? [`${name}: استُهلك ${pct}% من الميزانيّة`, `بقي ${moneyText(a.limit - a.spent, cur)}`]
+    : [`${name}: ${pct}% of budget used`, `${moneyText(a.limit - a.spent, cur)} left`];
+}
+async function unreadAlerts(x, month) {
+  const docs = await x.d.fsQuerySub(x.token, `pfm/${x.uid}`, "alerts", [["month", "EQUAL", month]], 100);
+  return docs.map((dd) => strip(js(x, dd))).filter((a) => !a.read).sort((a, b) => (a.at < b.at ? 1 : -1));
+}
+async function opAlertsList(x) {
+  const s = await settingsOf(x);
+  const month = x.p.month || C.budgetMonth(C.localDate(s.tz), s.monthStartDay);
+  const docs = await x.d.fsQuerySub(x.token, `pfm/${x.uid}`, "alerts", [["month", "EQUAL", month]], 100);
+  return { month, alerts: docs.map((dd) => strip(js(x, dd))).sort((a, b) => (a.at < b.at ? 1 : -1)) };
+}
+async function opAlertsRead(x) {
+  const ids = Array.isArray(x.p.ids) ? x.p.ids.slice(0, 50).map(segId) : [];
+  if (!ids.length) return { read: 0 };
+  await x.d.fsCommit(x.token, ids.map((id) => ({ update: { name: P(x, `pfm/${x.uid}/alerts/${id}`), fields: fieldsOf(x, { read: true }) },
+    updateMask: { fieldPaths: ["read"] }, currentDocument: { exists: true } }))).catch((e) => { if (!/NOT_FOUND/.test(String(e.message))) throw e; });
+  return { read: ids.length };
+}
+
+// ---------- categorisation rules ----------
+
+async function rulesOf(x) {
+  const docs = await x.d.fsList(x.token, `pfm/${x.uid}/rules`);
+  const out = [];
+  for (const dd of docs) { const r = js(x, dd); r.contains = await C.openField(r.contains, x.uid, keys(x)).catch(() => ""); out.push(r); }
+  return out.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+}
+async function opRuleUpsert(x) {
+  const p = x.p;
+  const contains = txt(p.contains, 60, "contains");
+  if (!contains || C.normText(contains).length < 2) throw new C.PfmError("bad_contains");
+  const kind = p.kind == null ? null : p.kind;
+  if (kind !== null && kind !== "income" && kind !== "expense") throw new C.PfmError("bad_kind");
+  let out;
+  await commitAudited(x, async () => {
+    const cats = await categoryMap(x), c = cats.get(p.categoryId);
+    if (!c || (kind && c.kind !== kind)) throw new C.PfmError("bad_category");
+    const rules = await rulesOf(x);
+    // the same text again replaces the old rule instead of adding a duplicate
+    const same = rules.find((r) => (p.id ? r.id === p.id : C.normText(r.contains) === C.normText(contains) && (r.kind || null) === kind));
+    if (!same && rules.length >= 200) throw new C.PfmError("too_many_rules");
+    const id = same ? same.id : "r_" + rid(10);
+    const doc = { contains: await seal(x, contains), categoryId: p.categoryId, kind, createdAt: same?.createdAt || now(), updatedAt: now() };
+    out = { id, contains, categoryId: p.categoryId, kind };
+    return { writes: [{ update: { name: P(x, `pfm/${x.uid}/rules/${id}`), fields: fieldsOf(x, doc) } }],
+      audit: [{ action: same ? "rule.update" : "rule.add", ref: `rules/${id}`, after: { categoryId: p.categoryId, kind } }], result: null };
+  });
+  return { rule: out };
+}
+async function opRuleDelete(x) {
+  const id = segId(x.p.id);
+  await commitAudited(x, async () => {
+    if (!(await x.d.fsGet(x.token, `pfm/${x.uid}/rules/${id}`))) return { result: null };
+    return { writes: [{ delete: P(x, `pfm/${x.uid}/rules/${id}`) }], audit: [{ action: "rule.delete", ref: `rules/${id}` }], result: null };
+  });
+  return { id, deleted: true };
+}
+
+// ---------- recurring entries ----------
+
+async function recurringOf(x) {
+  return (await x.d.fsList(x.token, `pfm/${x.uid}/recurring`)).map((dd) => js(x, dd)).sort((a, b) => (a.nextDate < b.nextDate ? -1 : 1));
+}
+const addDay = (d, n = 1) => new Date(Date.parse(d + "T00:00:00Z") + n * 86400000).toISOString().slice(0, 10);
+
+async function opRecurringUpsert(x) {
+  const p = x.p;
+  let out;
+  await commitAudited(x, async () => {
+    const s = await settingsOf(x), cats = await categoryMap(x);
+    const old = p.id ? js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/recurring/${segId(p.id)}`)) : null;
+    if (p.id && !old) throw new C.PfmError("not_found", "recurring");
+    const rule = p.rule ? C.checkRule(p.rule) : old?.rule;
+    if (!rule) throw new C.PfmError("bad_rule");
+    // Validate amount, currency, rate, category and texts exactly like a ledger row.
+    const startDate = p.startDate || old?.startDate || C.localDate(s.tz);
+    const input = {};
+    for (const k of ["kind", "amount", "currency", "fxRate", "categoryId", "note", "counterparty"]) if (p[k] !== undefined) input[k] = p[k];
+    const t = await buildTx(x, s, cats, { ...input, date: startDate }, old ? { ...old, date: startDate } : null);
+    let nextDate = old?.nextDate;
+    if (!old || p.rule || p.startDate) nextDate = C.firstOccurrence(rule, p.after ? addDay(startDate) : startDate);
+    const endDate = p.endDate === undefined ? old?.endDate ?? null : p.endDate;
+    if (endDate !== null && !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) throw new C.PfmError("bad_date");
+    const mode = p.mode === "auto" ? "auto" : p.mode === "suggest" ? "suggest" : old?.mode || "suggest";
+    const id = old?.id || "rc_" + rid(10);
+    const doc = { kind: t.kind, amount: t.amount, currency: t.currency, fxRate: t.currency === s.baseCurrency ? "1" : t.fxRate, categoryId: t.categoryId,
+      note: t.note, counterparty: t.counterparty, rule, startDate, nextDate, endDate, mode, paused: old?.paused || false,
+      lastDate: old?.lastDate || null, createdAt: old?.createdAt || now(), updatedAt: now() };
+    out = { id, ...doc };
+    return { writes: [{ update: { name: P(x, `pfm/${x.uid}/recurring/${id}`), fields: fieldsOf(x, doc) }, currentDocument: old ? { updateTime: old._updateTime } : { exists: false } }],
+      audit: [{ action: old ? "recurring.update" : "recurring.add", ref: `recurring/${id}`, after: { rule, amount: doc.amount, currency: doc.currency, categoryId: doc.categoryId, nextDate, mode } }],
+      result: null };
+  });
+  const s = await settingsOf(x);
+  await materialise(x, s, C.localDate(s.tz));     // a start date in the past produces its entries now
+  await updateDue(x, s);
+  return { recurring: await present(x, out) };
+}
+async function opRecurringPause(x) {
+  const paused = x.p.paused !== false;
+  await commitAudited(x, async () => {
+    const r = js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/recurring/${segId(x.p.id)}`));
+    if (!r) throw new C.PfmError("not_found", "recurring");
+    if (r.paused === paused) return { result: null };
+    const s = await settingsOf(x);
+    // Resuming skips what was missed while paused: the next date is the first one from today.
+    const next = paused ? r.nextDate : C.firstOccurrence(r.rule, C.localDate(s.tz));
+    return { writes: [{ update: { name: P(x, `pfm/${x.uid}/recurring/${r.id}`), fields: fieldsOf(x, { paused, nextDate: next, updatedAt: now() }) },
+      updateMask: { fieldPaths: ["paused", "nextDate", "updatedAt"] }, currentDocument: { updateTime: r._updateTime } }],
+      audit: [{ action: paused ? "recurring.pause" : "recurring.resume", ref: `recurring/${r.id}` }], result: null };
+  });
+  await updateDue(x, await settingsOf(x));
+  return { id: x.p.id, paused };
+}
+async function opRecurringDelete(x) {
+  const id = segId(x.p.id);
+  await commitAudited(x, async () => {
+    if (!(await x.d.fsGet(x.token, `pfm/${x.uid}/recurring/${id}`))) return { result: null };
+    return { writes: [{ delete: P(x, `pfm/${x.uid}/recurring/${id}`) }], audit: [{ action: "recurring.delete", ref: `recurring/${id}` }], result: null };
+  });
+  await updateDue(x, await settingsOf(x));
+  return { id, deleted: true };
+}
+
+// Creates the rows of every recurring entry due by `today`: "suggested" (default, outside the totals until
+// confirmed) or "booked" (mode auto). Row ids are fixed per occurrence, so a repeat run creates nothing new.
+async function materialise(x, s, today) {
+  const list = (await recurringOf(x)).filter((r) => !r.paused && r.nextDate && r.nextDate <= today);
+  let created = 0;
+  const booked = [];
+  for (const r0 of list) {
+    await commitAudited(x, async () => {
+      const r = js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/recurring/${r0.id}`));
+      if (!r || r.paused || !r.nextDate || r.nextDate > today) return { result: null };
+      const due = C.dueOccurrences(r.rule, r.nextDate, today, r.endDate);
+      const writes = [], auto = r.mode === "auto";
+      for (const date of due.dates) {
+        const id = `r_${r.id}_${date.replace(/-/g, "")}`;
+        if (await x.d.fsGet(x.token, `pfm/${x.uid}/tx/${id}`)) continue;
+        const baseAmount = r.currency === s.baseCurrency ? r.amount : r.fxRate ? C.convert(r.amount, r.currency, s.baseCurrency, r.fxRate) : null;
+        const tx = { kind: r.kind, amount: r.amount, currency: r.currency, baseAmount, fxRate: r.currency === s.baseCurrency ? "1" : r.fxRate || null,
+          fxSource: r.currency === s.baseCurrency ? "same" : r.fxRate ? "manual" : "pending", categoryId: r.categoryId, date,
+          month: C.budgetMonth(date, s.monthStartDay), note: r.note || null, counterparty: r.counterparty || null, source: "recurring", recurringId: r.id,
+          status: auto ? "booked" : "suggested", deleted: false, autoCategorized: false, rev: 1, createdAt: now(), updatedAt: now() };
+        writes.push({ update: { name: P(x, `pfm/${x.uid}/tx/${id}`), fields: fieldsOf(x, tx) }, currentDocument: { exists: false } });
+        if (auto) { writes.push(...rollupWrites(x, C.rollupDiff(null, tx))); booked.push(tx); }
+      }
+      writes.push({ update: { name: P(x, `pfm/${x.uid}/recurring/${r.id}`), fields: fieldsOf(x, { nextDate: due.next, paused: due.ended || false, lastDate: due.dates.at(-1) || r.lastDate || null, updatedAt: now() }) },
+        updateMask: { fieldPaths: ["nextDate", "paused", "lastDate", "updatedAt"] }, currentDocument: { updateTime: r._updateTime } });
+      if (auto && booked.length && !s.hasTx) writes.push({ update: { name: P(x, `pfm/${x.uid}`), fields: fieldsOf(x, { hasTx: true }) }, updateMask: { fieldPaths: ["hasTx"] } });
+      created += writes.filter((w) => w.currentDocument && w.currentDocument.exists === false).length;
+      return { writes, audit: [{ action: "recurring.run", ref: `recurring/${r.id}`, after: { dates: due.dates, mode: r.mode } }], result: null };
+    });
+  }
+  if (list.length) await updateDue(x, s);
+  if (booked.length) await checkAlerts(x, s, booked);
+  return { created, booked: booked.length };
+}
+
+// pfmDue/{uid}.next = the earliest next date of the user's active recurring entries, so the cron can find
+// due users with one range query on a top-level collection (single-field index, no setup needed).
+async function updateDue(x, s) {
+  const next = (await recurringOf(x)).filter((r) => !r.paused && r.nextDate && (!r.endDate || r.nextDate <= r.endDate)).map((r) => r.nextDate).sort()[0];
+  await x.d.fsCommit(x.token, [next ? { update: { name: P(x, `pfmDue/${x.uid}`), fields: fieldsOf(x, { next, tz: s.tz, updatedAt: now() }) } } : { delete: P(x, `pfmDue/${x.uid}`) }]);
+}
+
+// Cron: users with something due → create the rows, then one reminder each.
+// The query bound is "today" in the zone that is furthest ahead, so every user whose local date has
+// reached their next date is included; each one is then checked against their own time zone.
+export async function pfmCron(env, d, max = 20) {
+  if (!env.PFM_KEK_v1 || !d.runQuery) return { users: 0 };
+  const token = await d.getToken(env);
+  const maxToday = C.localDate("Pacific/Kiritimati");
+  const docs = await d.runQuery(token, { from: [{ collectionId: "pfmDue" }],
+    where: { fieldFilter: { field: { fieldPath: "next" }, op: "LESS_THAN_OR_EQUAL", value: { stringValue: maxToday } } }, limit: max });
+  let users = 0, rows = 0;
+  for (const doc of docs) {
+    const uid = doc.name.split("/").pop();
+    const x = { uid, env, d, token, p: {} };
+    try {
+      const s = await settingsOf(x, false);
+      if (!s) { await d.fsCommit(token, [{ delete: doc.name }]); continue; }
+      const today = C.localDate(s.tz);
+      const r = await materialise(x, s, today);
+      const suggested = r.created - r.booked;
+      if (suggested > 0 && d.push) {
+        const ar = s.locale !== "en";
+        await d.push(token, uid, ar ? "حركات متكرّرة بانتظار التأكيد" : "Recurring entries to confirm",
+          ar ? `${suggested} ${suggested === 1 ? "حركة مستحقّة" : "حركات مستحقّة"} — افتح المحاسب الشخصيّ لتأكيدها` : `${suggested} ${suggested === 1 ? "entry is" : "entries are"} due — open the Personal accountant to confirm`).catch(() => 0);
+      }
+      users++; rows += r.created;
+    } catch (e) { /* one user's failure never stops the others */ }
+  }
+  return { users, rows };
 }

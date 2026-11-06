@@ -1,5 +1,5 @@
 import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u0648\u0633\u0637\u0627\u0621 TURN \u0628\u0637\u0644\u0628 STUN \u0639\u0628\u0631 TCP (\u0645\u0631\u0627\u0642\u0628\u0629 \u0627\u0644\u062e\u062f\u0645\u0627\u062a)
-import { handlePfmOp, purgePfm } from "./pfm/pfm-worker.mjs";   // C263: \u0627\u0644\u0645\u062d\u0627\u0633\u0628 \u0627\u0644\u0634\u062e\u0635\u064a\u0651 (pfm/DESIGN.md)
+import { handlePfmOp, purgePfm, pfmCron } from "./pfm/pfm-worker.mjs";   // C263: \u0627\u0644\u0645\u062d\u0627\u0633\u0628 \u0627\u0644\u0634\u062e\u0635\u064a\u0651 (pfm/DESIGN.md)
 /* ============================================================
    worker.js \u2014 \u0633\u0648\u0627 \u00b7 applyEdit (v2: \u0627\u0644\u062a\u062d\u0642\u0651\u0642 + \u0627\u0644\u0643\u062a\u0627\u0628\u0629 \u0625\u0644\u0649 Firestore)
    ------------------------------------------------------------
@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm } from "./pfm/pfm-worker.mjs";   // C263: \u0627\
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v122-pfm";      // C263: pfm.* (Personal Accountant P1)
+const VER = "v123-pfm2";      // C263 P1 + C264 P2 (budgets, alerts, recurring, rules)
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -6021,7 +6021,15 @@ function badIds(p) {
 }
 
 /* C263: Personal Accountant — pfm/pfm-worker.mjs gets the Worker's own Firestore helpers. */
-const PFM_DEPS = { DOC_ROOT, toFsValue, fsToJs, fsGet, fsList, fsQuerySub, fsCommit, getToken: (env) => getAccessToken(JSON.parse(env.SA_JSON)) };
+const PFM_DEPS = { DOC_ROOT, toFsValue, fsToJs, fsGet, fsList, fsQuerySub, fsCommit, getToken: (env) => getAccessToken(JSON.parse(env.SA_JSON)),
+  // C263 P2: range query for the due-recurring cron, and budget / reminder pushes (data-only, shown by sw.js / the native shells)
+  runQuery: async (token, sq) => {
+    const res = await gfetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ structuredQuery: sq }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error("firestore query: " + JSON.stringify(data));
+    return (data || []).filter(r => r.document).map(r => r.document);
+  },
+  push: (token, uid, title, body) => pushTo(token, [uid], strData({ t: "pfm", title, body: String(body || "").slice(0, 300), ts: Date.now() })) };
 
 async function handleRequest(request, env, ctx, meta) {
     PUSH_ENV = env;   // C151
@@ -6282,13 +6290,14 @@ export default {
         if (slot === 3) return job("health", () => healthRun(env));
         if (slot === 0) { await job("cleanup", () => cleanupDisappearing(env)); await job("tel gc", () => telGc(env, 100)); await job("rl gc", () => rlGc(env, 100)); }
         else if (slot === 1) { await job("calls cleanup", () => cleanupCalls(env)); await job("media gc", () => mediaGc(env, L.media)); await job("story gc", () => storyGc(env, L.story)); await job("storyq gc", () => storyqGc(env, L.q)); await job("momentq gc", () => momentqGc(env, L.q)); }
-        else await job("purge", () => purgeWork(env, L.purge));
+        else { await job("pfm", () => pfmCron(env, PFM_DEPS, 10)); await job("purge", () => purgeWork(env, L.purge)); }   // C263 P2
         return;
       }
       // C180: \u0627\u0644\u062e\u0637\u0651\u0629 \u0627\u0644\u0645\u062f\u0641\u0648\u0639\u0629 \u2014 \u0643\u0644\u0651 \u0627\u0644\u0645\u0647\u0627\u0645\u0651 \u0641\u064a \u0643\u0644\u0651 \u062a\u0634\u063a\u064a\u0644 (\u0627\u0644\u0645\u0631\u0627\u0642\u0628\u0629 \u0643\u0644\u0651 \u0665 \u062f\u0642\u0627\u0626\u0642)
       await Promise.all([job("health", () => healthRun(env)), job("cleanup", () => cleanupDisappearing(env)), job("calls cleanup", () => cleanupCalls(env)), job("quality", () => qualityWatch(env))]);   // C181: \u0645\u0644\u062e\u0651\u0635 \u0627\u0644\u062c\u0648\u062f\u0629
       await job("media gc", () => mediaGc(env, L.media)); await job("story gc", () => storyGc(env, L.story));
       await job("storyq gc", () => storyqGc(env, L.q)); await job("momentq gc", () => momentqGc(env, L.q)); await job("tel gc", () => telGc(env, 200)); await job("rl gc", () => rlGc(env, 300));
+      await job("pfm", () => pfmCron(env, PFM_DEPS, 40));   // C263 P2: recurring entries due + reminders
       await job("purge", () => purgeWork(env, L.purge));   // \u062d\u0630\u0641 \u0627\u0644\u062d\u0633\u0627\u0628\u0627\u062a: \u0645\u0627 \u062a\u0628\u0642\u0651\u0649 \u0645\u0646 \u0639\u0627\u0626\u0644\u0627\u062a\u064d \u0648\u0645\u062d\u0627\u062f\u062b\u0627\u062a
     })());
   },

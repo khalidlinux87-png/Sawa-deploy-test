@@ -214,5 +214,158 @@ await t("account deletion removes everything", async () => {
   assert.deepEqual([...fs.docs.keys()].filter((k) => k.includes("/u1")), []);
 });
 
+// ========================= P2 =========================
+import { pfmCron } from "./pfm-worker.mjs";
+const TODAY = C.localDate("Europe/Berlin"), MONTH = C.budgetMonth(TODAY), PREV = (() => { const [y, m] = MONTH.split("-").map(Number); return new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7); })();
+const addDays = (d, n) => new Date(Date.parse(d + "T00:00:00Z") + n * 86400000).toISOString().slice(0, 10);
+async function ready2(opts) {
+  const r = await ready(opts); r.pushes = []; r.d.push = async (_t, uid, title, body) => { r.pushes.push({ uid, title, body }); return 1; };
+  r.d.runQuery = r.fs.runQuery; return r;
+}
+let seq = 0; const k = () => "key-p2-" + String(++seq).padStart(5, "0");
+const spend = (call, amount, cat = "c_food", date = TODAY, extra = {}) => call("pfm.tx.add", { idemKey: k(), kind: "expense", amount, categoryId: cat, date, ...extra });
+
+await t("budgets: each threshold alerts once, one push per budget per write, old months never alert", async () => {
+  const { fs, call, pushes } = await ready2();
+  await call("pfm.budget.set", { categoryId: "c_food", limit: "100" });
+  const a = await spend(call, "85");
+  assert.deepEqual(a.alerts.filter((x) => x.kind === "threshold").map((x) => x.bp), [5000, 8000]);
+  assert.equal(pushes.length, 1); assert.match(pushes[0].title, /طعام ومشتريات/);   // one push, the most serious alert
+  const b = await spend(call, "1");
+  assert.deepEqual(b.alerts.filter((x) => x.kind === "threshold"), []); assert.equal(pushes.length, 1);
+  const c = await spend(call, "20");
+  assert.deepEqual(c.alerts.map((x) => x.bp), [10000]); assert.match(pushes[1].title, /تجاوزت/);
+  const old = await spend(call, "500", "c_food", PREV + "-15");
+  assert.deepEqual(old.alerts, []); assert.equal(pushes.length, 2);
+  const ids = [...fs.docs.keys()].filter((n) => n.includes("/alerts/")).map((n) => n.split("/").pop()).filter((n) => !n.endsWith("_pace")).sort();
+  assert.deepEqual(ids, [`${MONTH}_c_food_10000`, `${MONTH}_c_food_5000`, `${MONTH}_c_food_8000`]);
+});
+
+await t("alerts: a race between two writes still fires the 80% alert once", async () => {
+  const { fs, call, pushes } = await ready2();
+  await call("pfm.budget.set", { categoryId: "_total", limit: "100", alertsBp: [8000] });
+  // Hold the first alert write until a second request has also decided to fire the same alert, then let both go.
+  const real = fs.fsCommit.bind(fs); let waiting = null, attempts = 0, blocked = 0;
+  fs.fsCommit = async (tk, w) => {
+    const isAlert = w.length === 1 && /\/alerts\//.test(w[0].update?.name || "");
+    if (isAlert) {
+      attempts++;
+      if (!waiting) { let go; waiting = new Promise((r) => (go = r)); waiting.go = go; await waiting; }
+      else waiting.go();
+    }
+    try { return await real(tk, w); } catch (e) { if (isAlert) blocked++; throw e; }
+  };
+  const first = spend(call, "85");                                  // crosses 80 %: its alert write is held
+  while (attempts < 1) await new Promise((r) => setTimeout(r, 1));
+  await Promise.all([first, spend(call, "1")]);                     // also sees >= 80 % and tries the same alert
+  fs.fsCommit = real;
+  assert.equal(attempts >= 2, true); assert.equal(blocked >= 1, true);   // a duplicate really was attempted, and refused
+  const fired = [...fs.docs.keys()].filter((n) => n.includes(`/alerts/${MONTH}__total_8000`));
+  assert.equal(fired.length, 1);
+  assert.equal(pushes.filter((p) => /%/.test(p.title)).length, 1);
+});
+
+await t("budget.list: spent, remaining, state, pace; alerts list and read", async () => {
+  const { call } = await ready2();
+  await call("pfm.budget.set", { categoryId: "c_rent", limit: "1000" });
+  await call("pfm.budget.set", { categoryId: "_total", limit: "2000" });
+  await assert.rejects(call("pfm.budget.set", { categoryId: "c_salary", limit: "10" }), err("bad_category"));
+  await assert.rejects(call("pfm.budget.set", { categoryId: "c_rent", limit: "0" }), err("bad_amount"));
+  await spend(call, "900", "c_rent"); await spend(call, "50", "c_food");
+  const r = await call("pfm.budget.list", {});
+  assert.deepEqual(r.budgets.map((b) => b.categoryId), ["_total", "c_rent"]);
+  const rent = r.budgets[1];
+  assert.equal(rent.spent, 90000); assert.equal(rent.remaining, 10000); assert.equal(rent.state, "warn"); assert.equal(r.budgets[0].spent, 95000);
+  const al = await call("pfm.alerts.list", {});
+  assert.ok(al.alerts.length >= 2);
+  await call("pfm.alerts.read", { ids: al.alerts.map((a) => a.id) });
+  assert.equal((await call("pfm.get")).alerts.length, 0);
+  await call("pfm.budget.delete", { categoryId: "c_rent" });
+  assert.equal((await call("pfm.budget.list", {})).budgets.length, 1);
+});
+
+await t("rules: pick the category, sealed at rest, same text replaces", async () => {
+  const { fs, call } = await ready2();
+  const r = await call("pfm.rule.upsert", { contains: "Uber", categoryId: "c_transport", kind: "expense" });
+  assert.ok(![...fs.docs.values()].some((e) => JSON.stringify(e.data).includes("Uber")));   // rule text encrypted
+  const a = await call("pfm.tx.add", { idemKey: k(), kind: "expense", amount: "12", counterparty: "UBER *trip", date: TODAY });
+  assert.equal(a.tx.categoryId, "c_transport"); assert.equal(a.tx.autoCategorized, true);
+  await assert.rejects(call("pfm.tx.add", { idemKey: k(), kind: "expense", amount: "12", counterparty: "Nobody", date: TODAY }), err("bad_category"));
+  await call("pfm.rule.upsert", { contains: "uber", categoryId: "c_food", kind: "expense" });
+  const g = await call("pfm.get");
+  assert.equal(g.rules.length, 1); assert.equal(g.rules[0].categoryId, "c_food"); assert.equal(g.rules[0].contains, "uber");
+  await assert.rejects(call("pfm.rule.upsert", { contains: "x", categoryId: "c_food" }), err("bad_contains"));
+  await call("pfm.rule.delete", { id: r.rule.id });
+  assert.equal((await call("pfm.get")).rules.length, 0);
+});
+
+await t("recurring: past start catches up as suggestions, outside totals until confirmed; no duplicates", async () => {
+  const { fs, call } = await ready2();
+  const start = addDays(TODAY, -70);
+  const day = Number(start.slice(8, 10));
+  const r = await call("pfm.recurring.upsert", { kind: "expense", amount: "900", categoryId: "c_rent", counterparty: "Landlord", rule: { freq: "monthly", day }, startDate: start });
+  const rows = [...fs.docs].filter(([n]) => n.includes("/tx/r_")).map(([, e]) => e.data);
+  assert.ok(rows.length >= 2 && rows.length <= 4); assert.ok(rows.every((t) => t.status === "suggested" && t.source === "recurring"));
+  assert.equal(month(fs, "u1", C.budgetMonth(rows.at(-1).date)).expense || 0, 0);   // not in totals
+  const g = await call("pfm.get");
+  assert.equal(g.suggestedCount, rows.length); assert.equal(g.recurring[0].counterparty, "Landlord");
+  await call("pfm.get");                                                                       // repeat: nothing new
+  assert.equal([...fs.docs.keys()].filter((n) => n.includes("/tx/r_")).length, rows.length);
+  // confirm the latest (with a corrected amount), skip the rest
+  const list = (await call("pfm.tx.list", { month: C.budgetMonth(rows.at(-1).date) })).items.filter((t) => t.status === "suggested");
+  const c = await call("pfm.tx.confirm", { id: list[0].id, rev: list[0].rev, amount: "950" });
+  assert.equal(c.tx.status, "booked"); assert.equal(c.tx.amount, 95000);
+  assert.equal(month(fs, "u1", list[0].month).expense, 95000);
+  await assert.rejects(call("pfm.tx.confirm", { id: list[0].id, rev: 2 }), err("not_suggested"));
+  for (const id of [...fs.docs.keys()].filter((n) => n.includes("/tx/r_")).map((n) => n.split("/").pop()).filter((id) => id !== list[0].id)) {
+    const t0 = fs.docs.get(`${ROOT}/pfm/u1/tx/${id}`).data; await call("pfm.tx.delete", { id, rev: t0.rev });
+  }
+  assert.equal((await call("pfm.get")).suggestedCount, 0);
+  const due = fs.docs.get(`${ROOT}/pfmDue/u1`).data;
+  assert.equal(due.next, r.recurring.id && (await call("pfm.get")).recurring[0].nextDate); assert.ok(due.next > TODAY);
+});
+
+await t("recurring: auto mode books at once, 'after' skips today, pause/resume skips missed, delete clears the index", async () => {
+  const { fs, call } = await ready2();
+  const day = Number(TODAY.slice(8, 10));
+  const auto = await call("pfm.recurring.upsert", { kind: "income", amount: "5000", categoryId: "c_salary", rule: { freq: "monthly", day }, startDate: TODAY, mode: "auto" });
+  assert.equal(month(fs, "u1", MONTH).income, 500000);                    // booked, in totals
+  const sub = await call("pfm.recurring.upsert", { kind: "expense", amount: "15", categoryId: "c_telecom", rule: { freq: "monthly", day }, startDate: TODAY, after: true });
+  assert.ok(sub.recurring.nextDate > TODAY);                               // today's entry was added by hand
+  assert.equal([...fs.docs.keys()].filter((n) => n.includes(`/tx/r_${sub.recurring.id}`)).length, 0);
+  await call("pfm.recurring.pause", { id: sub.recurring.id });
+  const recDoc = fs.docs.get(`${ROOT}/pfm/u1/recurring/${sub.recurring.id}`); recDoc.data.nextDate = addDays(TODAY, -100);   // long pause
+  await call("pfm.recurring.pause", { id: sub.recurring.id, paused: false });
+  assert.ok(fs.docs.get(`${ROOT}/pfm/u1/recurring/${sub.recurring.id}`).data.nextDate >= TODAY);   // missed months skipped
+  await assert.rejects(call("pfm.recurring.upsert", { kind: "expense", amount: "1", categoryId: "c_food", rule: { freq: "daily" } }), err("bad_rule"));
+  await call("pfm.recurring.delete", { id: auto.recurring.id }); await call("pfm.recurring.delete", { id: sub.recurring.id });
+  assert.equal(fs.docs.has(`${ROOT}/pfmDue/u1`), false);
+});
+
+await t("cron: finds due users, creates suggestions, sends one reminder, is idempotent", async () => {
+  const { fs, d, env, call, pushes } = await ready2();
+  const r = await call("pfm.recurring.upsert", { kind: "expense", amount: "40", categoryId: "c_utilities", rule: { freq: "weekly", weekday: 1 }, startDate: addDays(TODAY, 1) });
+  assert.equal([...fs.docs.keys()].filter((n) => n.includes("/tx/r_")).length, 0);
+  // time passes: the next date is now in the past
+  const past = addDays(TODAY, -1);
+  fs.docs.get(`${ROOT}/pfm/u1/recurring/${r.recurring.id}`).data.nextDate = past; fs.docs.get(`${ROOT}/pfmDue/u1`).data.next = past;
+  const out = await pfmCron(env, d, 10);
+  assert.deepEqual(out, { users: 1, rows: 1 });
+  assert.equal(pushes.length, 1); assert.match(pushes[0].body, /مستحقّة/);
+  assert.equal((await pfmCron(env, d, 10)).rows, 0);                       // next date moved on: nothing due
+  assert.equal(pushes.length, 1);
+  assert.deepEqual(await pfmCron({}, d, 10), { users: 0 });                // not configured: does nothing
+});
+
+await t("purge also removes P2 data", async () => {
+  const { fs, d, call } = await ready2();
+  await call("pfm.budget.set", { categoryId: "c_food", limit: "10" }); await spend(call, "9");
+  await call("pfm.rule.upsert", { contains: "shop", categoryId: "c_food" });
+  await call("pfm.recurring.upsert", { kind: "expense", amount: "1", categoryId: "c_food", rule: { freq: "monthly", day: 1 }, startDate: addDays(TODAY, 40) });
+  const purgeColl = async (_t, rel, spendOk) => { for (const x of await fs.fsList(null, rel)) { if (!spendOk()) return false; await fs.fsCommit(null, [{ delete: x.name }]); } return true; };
+  assert.equal(await purgePfm(d, "tok", "u1", () => true, purgeColl), true);
+  assert.deepEqual([...fs.docs.keys()].filter((n) => n.includes("u1")), []);
+});
+
 assert.ok(PFM_OPS.includes("pfm.tx.add"));
 console.log(process.exitCode ? "FAILED" : `pfm-worker: ${n} passed`);

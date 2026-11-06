@@ -1,6 +1,6 @@
 # Sawa Wallet: Personal Accountant & Invoicing (PFM) design
 
-Status: rev 6 · **P1 implemented (C263)** · Date: 2026-11-06 · Code: `pfm/` (Worker ops wired into `worker-3.js`; UI in `Sawa-app/app.p9.js`)
+Status: rev 7 · **P1 (C263) and P2 (C264) implemented** · Date: 2026-11-06 · Code: `pfm/` (Worker ops wired into `worker-3.js`; UI in `Sawa-app/app.p9.js`)
 
 This design follows how Sawa is already built:
 
@@ -675,12 +675,26 @@ P1 limits, on purpose:
 - `pfm.audit.list` shows and checks the latest 20 entries; a full-chain check is `verifyChain` over `audit/{uid}/log`.
 - Kinds are `income` and `expense`. Transfers between own accounts, refunds and splits come with P2.
 
+## 7c. P2 as built (C264)
+
+| Piece | As built |
+|---|---|
+| Budgets | `pfm/{uid}/budgets/{categoryId \| _total}` `{ limit, currency (base), alertsBp }`: one budget per category, **every month** (no per-month copies). Status is computed on read from the month rollup (`pfm.budget.list`): spent, remaining, % used, linear pace, projection, state ok/warn/over |
+| Alerts | After a write that touches an expense in the **current** budget month: for each touched budget (+ `_total`) the thresholds and pace alert are created as `pfm/{uid}/alerts/{month}_{cat}_{bp\|pace}` with `exists:false`. A threshold fires **once per month**, even when two writes race (tested with a forced race). Only the creator pushes, one push per budget (the most serious). Old months never alert. `pfm.alerts.list` / `pfm.alerts.read` |
+| Recurring | `pfm/{uid}/recurring/{id}` `{ rule (monthly/weekly/yearly), nextDate, endDate, mode suggest\|auto, … }` (texts sealed). Due occurrences become `tx/r_{id}_{yyyymmdd}` (fixed ids ⇒ re-runs create nothing): `status: "suggested"` (outside rollups until `pfm.tx.confirm`; Skip = delete) or booked (`auto`). Catch-up is capped at 12; resuming a paused entry skips what was missed |
+| Due index + cron | `pfmDue/{uid}.next` = earliest active next date. The `*/5` cron (paid: 40 users/run; free plan: 10, slot 2) runs `pfmCron`: range query `next <= today in UTC+14`, then each user's own time zone; creates the rows, one push "N entries to confirm". Opening the accountant (`pfm.get`) also catches up |
+| Rules | `pfm/{uid}/rules/{id}` `{ contains (sealed), categoryId, kind }`. `pfm.tx.add` without `categoryId` uses them (`autoCategorized: true`); longest match wins; Arabic diacritics, tatweel and أ/إ/آ، ى، ة variants ignored. Same text again replaces the rule. The form picks the category live and offers “Always use … for …” |
+| UI | Overview: budget-alert card (one line per budget, dismiss = read), “N recurring entries to confirm”, top-3 budget meters · Ledger: suggested rows (dashed, Confirm / Skip), Recurring (pause/resume/delete) and Rules sheets · Budgets tab: meters, over/left, pace, add/edit/delete with 50/80/100 % toggles · Entry form: rule hint, “Always use”, Repeat (monthly on day N / weekly on weekday / yearly) + “record automatically” |
+| Tests | core 29 · worker 22 (budgets, single-fire alerts under a forced race, rules, recurring catch-up/confirm/skip/auto/pause, cron, purge) · `ui-check.mjs` P1 + P2 in Chromium |
+
+P2 limits: budgets are in the base currency only and have no rollover yet; pushes in the foreground are not shown as an in-app toast (the Overview card shows them instead).
+
 ## 8. Delivery plan
 
 | Phase | Scope | Exit check |
 |---|---|---|
 | **P1** ✅ C263 | Onboarding (base currency, time zone), categories, manual ledger in any currency with user-typed rates, rollups, Overview and Ledger tabs, audit chain | Rollup rebuild = live rollup on test accounts; a USD, a JPY and a KWD entry sum correctly in a EUR base |
-| **P2** | Budgets and alerts, recurring entries, categorisation rules | The 80 % alert fires once; a recurring entry is suggested, not booked, until confirmed |
+| **P2** ✅ C264 | Budgets and alerts, recurring entries, categorisation rules | The 80 % alert fires once; a recurring entry is suggested, not booked, until confirmed |
 | **P3** | Invoices: business settings (logo, tax toggle, receiving accounts, prefix), editor, send with yearly numbering, PDF, share, record payment (cash/transfer), overdue cron | Totals match between the editor, the PDF and the stored invoice; two sends at once get consecutive numbers; the first invoice in January is `-0001` |
 | **P4** | `/pay/{token}`: payment details, "I've paid" transfer claims and issuer confirmation, partial payments, invoice card in chat | A concurrent double tap → one payment; an underfunded wallet → clear error, nothing written; a claim changes nothing until confirmed |
 | **P5** | CSV export, receipt photos | — |

@@ -1353,3 +1353,6 @@ Meta قيّدت حافظة الأعمال («prohibited from advertising, includ
 `pfm/` holds the design (`DESIGN.md`), the logic (`pfm-core.mjs`), the `pfm.*` ops (`pfm-worker.mjs`, routed from `worker-3.js`) and tests.
 Needs the Worker secret `PFM_KEK_v1` (32 random bytes, base64). `worker-3.js` now imports `./pfm/pfm-worker.mjs`, so deploy with wrangler (GitHub), not by pasting one file.
 Tests: `node pfm/pfm-core.test.mjs` · `node pfm/pfm-worker.test.mjs` · `node pfm/ui-check.mjs ../Sawa-app <react dir> <out dir>`. Details: `Sawa-app/BUILD.md` § C263.
+
+## C264 — Personal Accountant P2 (Worker v123-pfm2)
+Budgets with single-fire alerts, recurring entries (suggested until confirmed) with a `pfm` cron job and the `pfmDue/{uid}` index, and category rules. No new secret. Details: `pfm/DESIGN.md` §7c and `Sawa-app/BUILD.md` § C264.

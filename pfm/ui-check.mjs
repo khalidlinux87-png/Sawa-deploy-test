@@ -54,6 +54,13 @@ async function session(lang, dark) {
   return { ctx, page };
 }
 const shot = (page, name) => page.screenshot({ path: `${OUT}/${name}.png` });
+const mount = (page, dark) => page.waitForFunction(() => window.SawaApp && typeof AccountantScreen === "function").then(() => page.evaluate((dark) => {
+  window.SawaSync = window.SawaSync || {};
+  window.SawaSync.call = (o, p) => window.__pfmCall(o, p).then((b) => { if (!b.ok) throw new Error(b.error); return b; });
+  const host = document.createElement("div"); host.id = "pfmhost"; host.style.cssText = "position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;background:" + (dark ? darkColors.bg : lightColors.bg);
+  document.body.appendChild(host); const st = document.createElement("style"); st.textContent = "body > *:not(#pfmhost){display:none!important}"; document.head.appendChild(st);
+  ReactDOM.createRoot(host).render(React.createElement(ThemeContext.Provider, { value: { colors: dark ? darkColors : lightColors, isDark: dark } }, React.createElement(ToastProvider, null, React.createElement(AccountantScreen, { onBack() {} }))));
+}, dark));
 
 // ── Arabic, light: onboarding → first entry by hand → seeded month → overview, ledger, foreign-currency entry ──
 {
@@ -114,6 +121,74 @@ const shot = (page, name) => page.screenshot({ path: `${OUT}/${name}.png` });
   await H.getByText(/أكتوبر/).first().waitFor();
   await ctx.close();
 }
+
+// ── P2 (Arabic): budgets, rules, repeat, suggested entries, alerts ──
+{
+  const { ctx, page: pg } = await session("ar", false); const page = pg; const H = pg.locator("#pfmhost");
+  await H.getByText("نسبة الادّخار").waitFor();
+  // a budget for food, through the Budgets tab
+  await H.getByRole("tab", { name: "الميزانيّات" }).click();
+  await H.getByRole("button", { name: "ميزانيّة أخرى" }).or(H.getByRole("button", { name: "أضف ميزانيّة" })).first().click();
+  await H.locator("select").first().selectOption("c_food");
+  await H.locator('input[inputmode="decimal"]').fill("200");
+  await H.getByRole("button", { name: "حفظ" }).click();
+  await H.getByText(/بقي/).first().waitFor();
+  await H.getByRole("tab", { name: "السجلّ" }).click();   // the add button is hidden on the Budgets tab
+  // an expense with a payee, and "always use this category"
+  await H.getByRole("button", { name: "حركة جديدة" }).click();
+  await H.locator('input[inputmode="decimal"]').first().fill("30");
+  await H.getByRole("button", { name: "مواصلات", exact: true }).click();
+  await H.locator('input[dir="auto"]').first().fill("Uber");
+  await H.getByText(/استعمل «مواصلات» دائماً/).click();
+  await H.getByRole("button", { name: "حفظ" }).click();
+  await H.getByText("حركة جديدة", { exact: true }).waitFor({ state: "detached" });
+  // the rule now picks the category; this one also repeats monthly
+  await H.getByRole("button", { name: "حركة جديدة" }).click();
+  await H.locator('input[inputmode="decimal"]').first().fill("120");
+  await H.locator('input[dir="auto"]').first().fill("UBER monthly pass");
+  await H.getByText(/اختيرت الفئة بقاعدة/).waitFor();
+  await H.locator("select").nth(1).selectOption("monthly");
+  await shot(page, "p2-1-rule-repeat-ar");
+  await H.getByRole("button", { name: "حفظ" }).click();
+  await H.getByText("حركة جديدة", { exact: true }).waitFor({ state: "detached" });
+  // a food expense that crosses the budget thresholds → alert
+  await H.getByRole("button", { name: "حركة جديدة" }).click();
+  await H.locator('input[inputmode="decimal"]').first().fill("90");
+  await H.getByRole("button", { name: "طعام ومشتريات", exact: true }).click();
+  await H.getByRole("button", { name: "حفظ" }).click();
+  await H.getByText("حركة جديدة", { exact: true }).waitFor({ state: "detached" });
+  // a recurring entry that started months ago → suggestions (same op the form uses)
+  await op("pfm.recurring.upsert", { kind: "expense", amount: "60", categoryId: "c_telecom", counterparty: "STC", rule: { freq: "monthly", day: 2 }, startDate: "2026-09-02" });
+  await page.reload();
+  await mount(page, false);
+  await H.getByText("تنبيهات الميزانيّة").waitFor();
+  if (await H.getByText(/استُهلك/).count()) errors.push("lower-threshold alert shown next to the over-budget one");
+  await H.getByText(/بانتظار التأكيد/).waitFor();
+  await shot(page, "p2-2-overview-ar");
+  await H.getByRole("tab", { name: "الميزانيّات" }).click();
+  await H.getByText(/تجاوز بـ|بقي/).first().waitFor();
+  await shot(page, "p2-3-budgets-ar");
+  await H.getByRole("tab", { name: "نظرة عامّة" }).click();
+  await H.getByRole("button", { name: "تمّ" }).click();
+  if (await H.getByText("تنبيهات الميزانيّة").count()) errors.push("alerts card still shown after dismiss");
+  await H.getByText(/بانتظار التأكيد/).click();
+  await H.getByText(/مقترحة/).first().waitFor();
+  await H.getByText(/مقترحة/).first().scrollIntoViewIfNeeded();
+  await shot(page, "p2-4-ledger-suggested-ar");
+  await H.getByRole("button", { name: "تأكيد" }).first().click();
+  await H.getByRole("button", { name: /المتكرّرة/ }).click();
+  await H.getByText("STC").first().waitFor(); await H.getByText(/UBER monthly pass/).first().waitFor();
+  await shot(page, "p2-5-recurring-ar");
+  await ctx.close();
+}
+const g2 = await op("pfm.get");
+if (g2.rules.length !== 1 || g2.rules[0].contains !== "Uber") errors.push("rule not saved: " + JSON.stringify(g2.rules));
+if (g2.recurring.length !== 2) errors.push("expected 2 recurring, got " + g2.recurring.length);
+if (g2.suggestedCount !== 2) errors.push("expected 2 suggestions left (Sep, Oct, Nov due; one confirmed), got " + g2.suggestedCount);
+const auto = (await op("pfm.tx.list", { month: "2026-11" })).items.find((t) => t.counterparty === "UBER monthly pass");
+if (!auto || auto.categoryId !== "c_transport") errors.push("rule did not pick Transport");
+const alertsFired = (await op("pfm.alerts.list", {})).alerts.map((a) => a.categoryId + ":" + (a.kind === "pace" ? "pace" : a.bp));
+if (!alertsFired.some((x) => x === "c_food:10000")) errors.push("expected the food 100% alert, got " + alertsFired.join(","));
 
 // ── English, dark: overview of the same data ──
 {

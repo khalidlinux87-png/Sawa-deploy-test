@@ -19,6 +19,13 @@ export function makeFs(toFsValue, fsToJs) {
       return [...docs].filter(([n, e]) => n.startsWith(pre) && !n.slice(pre.length).includes("/") && filters.every(([k, op, v]) => op === "EQUAL" ? e.data[k] === v : v.includes(e.data[k])))
         .slice(0, limit).map(([n, e]) => toDoc(n, e));
     },
+    // structuredQuery over a top-level collection: one fieldFilter (EQUAL / LESS_THAN_OR_EQUAL on strings) and a limit
+    async runQuery(_t, sq) {
+      const pre = ROOT + "/" + sq.from[0].collectionId + "/", f = sq.where && sq.where.fieldFilter;
+      const ok = (e) => { if (!f) return true; const v = e.data[f.field.fieldPath], w = f.value.stringValue;
+        return f.op === "EQUAL" ? v === w : f.op === "LESS_THAN_OR_EQUAL" ? v != null && v <= w : false; };
+      return [...docs].filter(([n, e]) => n.startsWith(pre) && !n.slice(pre.length).includes("/") && ok(e)).slice(0, sq.limit || 1000).map(([n, e]) => toDoc(n, e));
+    },
     async fsCommit(_t, writes) {
       // all preconditions first (atomic), then apply
       for (const w of writes) {
