@@ -397,6 +397,81 @@ export function rollupDiff(before, after) {
   return byMonth;
 }
 
+// ---------- budget periods ----------
+
+// First day, last day and length of a budget month (for monthStartDay = 25: 2026-11 runs 2026-11-25 .. 2026-12-24).
+const ymd = (d) => d.toISOString().slice(0, 10);
+const utc = (s) => { const [y, m, d] = s.split("-").map(Number); return new Date(Date.UTC(y, m - 1, d)); };
+const lastDay = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();   // m is 1-based
+export function budgetPeriod(month, startDay = 1) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month || "")) throw new PfmError("bad_month", String(month));
+  const [y, m] = month.split("-").map(Number);
+  const s = new Date(Date.UTC(y, m - 1, Math.min(startDay, lastDay(y, m))));
+  const ny = m === 12 ? y + 1 : y, nm = m === 12 ? 1 : m + 1;
+  const e = new Date(Date.UTC(ny, nm - 1, Math.min(startDay, lastDay(ny, nm))));   // exclusive
+  return { start: ymd(s), end: ymd(new Date(e - 86400000)), days: Math.round((e - s) / 86400000) };
+}
+// Days of the period that have started by `today` (today counts), clamped to 0..days.
+export function periodElapsed(period, today) {
+  const n = Math.round((utc(today) - utc(period.start)) / 86400000) + 1;
+  return Math.min(Math.max(n, 0), period.days);
+}
+
+// ---------- recurring entries ----------
+
+// rule: { freq: "monthly", day: 1..31, interval?: 1..12 } | { freq: "weekly", weekday: 0..6 (Sun..Sat), interval?: 1..4 }
+//     | { freq: "yearly", month: 1..12, day: 1..31 }.  A day past the month's end means the last day (31 -> 30 Apr, 28/29 Feb).
+export function checkRule(r) {
+  const int = (v, a, b) => Number.isInteger(v) && v >= a && v <= b;
+  if (!r || typeof r !== "object") throw new PfmError("bad_rule");
+  const interval = r.interval ?? 1;
+  if (r.freq === "monthly" && int(r.day, 1, 31) && int(interval, 1, 12)) return { freq: "monthly", day: r.day, interval };
+  if (r.freq === "weekly" && int(r.weekday, 0, 6) && int(interval, 1, 4)) return { freq: "weekly", weekday: r.weekday, interval };
+  if (r.freq === "yearly" && int(r.month, 1, 12) && int(r.day, 1, 31)) return { freq: "yearly", month: r.month, day: r.day, interval: 1 };
+  throw new PfmError("bad_rule");
+}
+const onDay = (y, m, d) => ymd(new Date(Date.UTC(y, m - 1, Math.min(d, lastDay(y, m)))));
+// The first occurrence on or after `date`.
+export function firstOccurrence(rule, date) {
+  const r = checkRule(rule), t = utc(date), y = t.getUTCFullYear(), m = t.getUTCMonth() + 1;
+  if (r.freq === "weekly") return ymd(new Date(+t + ((r.weekday - t.getUTCDay() + 7) % 7) * 86400000));
+  if (r.freq === "monthly") { const c = onDay(y, m, r.day); return c >= date ? c : onDay(m === 12 ? y + 1 : y, m === 12 ? 1 : m + 1, r.day); }
+  const c = onDay(y, r.month, r.day); return c >= date ? c : onDay(y + 1, r.month, r.day);
+}
+// The occurrence after `date`, where `date` is itself an occurrence.
+export function nextOccurrence(rule, date) {
+  const r = checkRule(rule), t = utc(date), y = t.getUTCFullYear(), m = t.getUTCMonth() + 1;
+  if (r.freq === "weekly") return ymd(new Date(+t + 7 * r.interval * 86400000));
+  if (r.freq === "monthly") { const k = m - 1 + r.interval; return onDay(y + Math.floor(k / 12), (k % 12) + 1, r.day); }
+  return onDay(y + 1, r.month, r.day);
+}
+// Occurrences due by `today`, oldest first, at most `max` (a long-paused rule catches up gradually).
+export function dueOccurrences(rule, nextDate, today, endDate = null, max = 12) {
+  const out = []; let d = nextDate;
+  while (d <= today && (!endDate || d <= endDate) && out.length < max) { out.push(d); d = nextOccurrence(rule, d); }
+  return { dates: out, next: d, ended: !!endDate && d > endDate };
+}
+
+// ---------- auto-categorisation rules ----------
+
+// Matching ignores case, Arabic diacritics and tatweel, and the usual spelling variants (أ/إ/آ → ا, ى → ي, ة → ه).
+export function normText(s) {
+  return String(s || "").toLowerCase().normalize("NFKC")
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, "").replace(/[\u0623\u0625\u0622\u0671]/g, "\u0627").replace(/\u0649/g, "\u064A").replace(/\u0629/g, "\u0647")
+    .replace(/\s+/g, " ").trim();
+}
+// rules: [{ id, contains, categoryId, kind? }] in priority order. Longest match wins, so "uber eats" beats "uber".
+export function matchCategoryRule(rules, { kind, counterparty, note }) {
+  const hay = normText((counterparty || "") + " | " + (note || ""));
+  let best = null;
+  for (const r of rules || []) {
+    const n = normText(r.contains);
+    if (!n || (r.kind && kind && r.kind !== kind) || !hay.includes(n)) continue;
+    if (!best || n.length > best.n.length) best = { n, categoryId: r.categoryId, id: r.id };
+  }
+  return best ? { categoryId: best.categoryId, ruleId: best.id } : null;
+}
+
 // Default categories. Names in Arabic and English; ids stable so rules and budgets can refer to them.
 export const DEFAULT_CATEGORIES = [
   ["c_salary", "income", "Salary", "راتب", "briefcase", "#0f766e"], ["c_freelance", "income", "Freelance", "عمل حرّ", "laptop", "#0e7490"],

@@ -283,4 +283,46 @@ await t("rollup contributions and edit diffs", () => {
   assert.equal(new Set(P.DEFAULT_CATEGORIES.map((c) => c.id)).size, P.DEFAULT_CATEGORIES.length);
 });
 
+await t("budget periods and elapsed days", () => {
+  assert.deepEqual(P.budgetPeriod("2026-11"), { start: "2026-11-01", end: "2026-11-30", days: 30 });
+  assert.deepEqual(P.budgetPeriod("2026-11", 25), { start: "2026-11-25", end: "2026-12-24", days: 30 });
+  assert.deepEqual(P.budgetPeriod("2026-01", 31), { start: "2026-01-31", end: "2026-02-27", days: 28 });
+  assert.deepEqual(P.budgetPeriod("2026-12", 25), { start: "2026-12-25", end: "2027-01-24", days: 31 });
+  const p = P.budgetPeriod("2026-11");
+  assert.equal(P.periodElapsed(p, "2026-11-06"), 6); assert.equal(P.periodElapsed(p, "2026-10-01"), 0); assert.equal(P.periodElapsed(p, "2027-01-01"), 30);
+});
+
+await t("recurring rules: first, next, catch-up, month ends", () => {
+  const rent = { freq: "monthly", day: 1 };
+  assert.equal(P.firstOccurrence(rent, "2026-11-01"), "2026-11-01");
+  assert.equal(P.firstOccurrence(rent, "2026-11-02"), "2026-12-01");
+  assert.equal(P.nextOccurrence(rent, "2026-12-01"), "2027-01-01");
+  const eom = { freq: "monthly", day: 31 };
+  assert.equal(P.nextOccurrence(eom, "2026-01-31"), "2026-02-28");
+  assert.equal(P.nextOccurrence(eom, "2026-02-28"), "2026-03-31");   // day 31 stays the rule, not 28
+  assert.equal(P.nextOccurrence({ freq: "monthly", day: 15, interval: 3 }, "2026-11-15"), "2027-02-15");
+  assert.equal(P.firstOccurrence({ freq: "weekly", weekday: 5 }, "2026-11-06"), "2026-11-06");   // 6 Nov 2026 is a Friday
+  assert.equal(P.firstOccurrence({ freq: "weekly", weekday: 0 }, "2026-11-06"), "2026-11-08");
+  assert.equal(P.nextOccurrence({ freq: "weekly", weekday: 0, interval: 2 }, "2026-11-08"), "2026-11-22");
+  assert.equal(P.nextOccurrence({ freq: "yearly", month: 2, day: 29 }, "2028-02-29"), "2029-02-28");
+  const due = P.dueOccurrences(rent, "2026-08-01", "2026-11-06");
+  assert.deepEqual(due.dates, ["2026-08-01", "2026-09-01", "2026-10-01", "2026-11-01"]); assert.equal(due.next, "2026-12-01");
+  assert.deepEqual(P.dueOccurrences(rent, "2026-08-01", "2026-11-06", "2026-09-15"), { dates: ["2026-08-01", "2026-09-01"], next: "2026-10-01", ended: true });
+  assert.equal(P.dueOccurrences(rent, "2020-01-01", "2026-11-06").dates.length, 12);
+  for (const bad of [null, { freq: "daily" }, { freq: "monthly", day: 0 }, { freq: "weekly", weekday: 7 }, { freq: "monthly", day: 1, interval: 13 }])
+    assert.throws(() => P.checkRule(bad), { code: "bad_rule" });
+});
+
+await t("rules match through Arabic spelling variants, longest wins", () => {
+  const rules = [{ id: "a", contains: "uber", categoryId: "c_transport" }, { id: "b", contains: "Uber Eats", categoryId: "c_food" },
+    { id: "c", contains: "مكتبة جرير", categoryId: "c_education", kind: "expense" }, { id: "d", contains: "راتب", categoryId: "c_salary", kind: "income" }];
+  assert.equal(P.matchCategoryRule(rules, { kind: "expense", counterparty: "UBER *TRIP" }).categoryId, "c_transport");
+  assert.equal(P.matchCategoryRule(rules, { kind: "expense", counterparty: "Uber Eats" }).categoryId, "c_food");
+  assert.equal(P.matchCategoryRule(rules, { kind: "expense", counterparty: "مَكتَبة جَرِير" }).categoryId, "c_education");   // diacritics
+  assert.equal(P.matchCategoryRule(rules, { kind: "expense", note: "راتب" }), null);                                         // kind must agree
+  assert.equal(P.matchCategoryRule(rules, { kind: "income", note: "راتب شهر نوفمبر" }).categoryId, "c_salary");
+  assert.equal(P.normText("أحمد إلى مكّة"), P.normText("احمد الي مكه"));
+  assert.equal(P.matchCategoryRule(rules, { kind: "expense", counterparty: "" }), null);
+});
+
 console.log(process.exitCode ? "FAILED" : `pfm-core: ${n} passed`);
