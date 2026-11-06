@@ -257,4 +257,30 @@ await t("rows without a rate stay out of base totals", () => {
   assert.equal(s.byCurrency.find((c) => c.currency === "USD").expense, 70_00);
 });
 
+await t("budget months honour the start day", () => {
+  assert.equal(P.budgetMonth("2026-11-05"), "2026-11");
+  assert.equal(P.budgetMonth("2026-11-24", 25), "2026-10"); assert.equal(P.budgetMonth("2026-11-25", 25), "2026-11");
+  assert.equal(P.budgetMonth("2026-01-10", 25), "2025-12");
+  assert.equal(P.budgetMonth("2026-02-28", 31), "2026-02");   // Feb has no 31st: starts on the 28th
+  assert.equal(P.budgetMonth("2026-02-27", 31), "2026-01");
+  assert.throws(() => P.budgetMonth("2026-02-30"), { code: "bad_date" });
+});
+
+await t("rollup contributions and edit diffs", () => {
+  const a = { kind: "expense", baseAmount: 500, categoryId: "c_food", month: "2026-11", date: "2026-11-05" };
+  assert.deepEqual(P.rollupDiff(null, a), { "2026-11": [["txCount", 1], ["expense", 500], ["cat.c_food.e", 500], ["cat.c_food.n", 1], ["day.d05.e", 500]] });
+  // amount change only touches the money fields
+  assert.deepEqual(P.rollupDiff(a, { ...a, baseAmount: 700 }), { "2026-11": [["expense", 200], ["cat.c_food.e", 200], ["day.d05.e", 200]] });
+  // moved to another month and category
+  const moved = P.rollupDiff(a, { ...a, categoryId: "c_rent", month: "2026-10", date: "2026-10-30" });
+  assert.deepEqual(Object.keys(moved).sort(), ["2026-10", "2026-11"]);
+  assert.ok(moved["2026-11"].some(([f, v]) => f === "expense" && v === -500));
+  // delete reverses everything; a rate-pending row only counts as pending
+  assert.deepEqual(P.rollupDiff(a, { ...a, deleted: true })["2026-11"].find(([f]) => f === "txCount"), ["txCount", -1]);
+  assert.deepEqual(P.rollupDiff(null, { ...a, baseAmount: null }), { "2026-11": [["txCount", 1], ["ratePending", 1]] });
+  assert.deepEqual(P.rollupDiff(null, { ...a, status: "suggested" }), {});
+  assert.throws(() => P.rollupContrib({ ...a, categoryId: "c.food" }), { code: "bad_category" });
+  assert.equal(new Set(P.DEFAULT_CATEGORIES.map((c) => c.id)).size, P.DEFAULT_CATEGORIES.length);
+});
+
 console.log(process.exitCode ? "FAILED" : `pfm-core: ${n} passed`);

@@ -1,6 +1,6 @@
 # Sawa Wallet: Personal Accountant & Invoicing (PFM) design
 
-Status: proposal, rev 5 (product decisions applied, §0) · Date: 2026-11-06 · Code: `pfm/` (pure logic and tests, not wired into `worker-3.js` yet)
+Status: rev 6 · **P1 implemented (C263)** · Date: 2026-11-06 · Code: `pfm/` (Worker ops wired into `worker-3.js`; UI in `Sawa-app/app.p9.js`)
 
 This design follows how Sawa is already built:
 
@@ -8,7 +8,7 @@ This design follows how Sawa is already built:
 |---|---|---|
 | Client | PWA (`Sawa-app`, React, `app.p1…p9.js`), with Android and iOS shells | An "Accountant" tab with ledger, dashboard, budgets and invoices, plus a public `/pay/{token}` page |
 | API | Cloudflare Worker `worker-3.js`: `POST /api {op, …}`, Firebase ID token, `fsCommit` | `pfm.*` and `inv.*` ops, `GET /pfm/file` (signed PDF download), and a cron step |
-| Data | Firestore (REST, service account `SA_JSON`). Client rules deny writes to server-owned data | New collections, below. The client can **read** its own data. **Every write goes through the Worker** |
+| Data | Firestore (REST, service account `SA_JSON`). Client rules deny writes to server-owned data | New collections, below. **Every read and write goes through the Worker**: notes and names are encrypted, so the client could not use them directly, and with no client rules for `pfm/` and `audit/` Firestore denies the app all direct access |
 | Files | — | R2 bucket `sawa-pfm-files` (PDFs) and Cloudflare Browser Rendering (HTML to PDF) |
 | Push | FCM / APNs (`fcmSend`) | Budget alerts, invoice paid, invoice overdue, bank-transfer claims |
 | Payments | Wallet only (client mock) | **Now:** the issuer's own bank and mobile-money accounts printed on the invoice, paid by transfer or cash and recorded in the app. **Later, designed and switched off:** wallet payment (decision 13) and card checkout (decision 10) |
@@ -261,17 +261,10 @@ Rates are **reference only**: the user can always type the rate they actually go
 `audit/{uid}` holds `{ headSeq, headHash }`. Each audit write sets `currentDocument.updateTime` on it, so two concurrent writes
 cannot fork the chain: one fails and retries. See §6.3 for anchoring.
 
-### 2.11 Security rules (added to `firestore.paste.rules`)
-```
-match /pfm/{uid}/{doc=**}      { allow read: if request.auth.uid == uid; allow write: if false; }
-match /invoices/{id}           { allow read: if request.auth.uid == resource.data.issuerUid
-                                             || request.auth.uid == resource.data.client.sawaUid; allow write: if false; }
-match /invoices/{id}/payments/{p} { allow read: if request.auth.uid == get(/databases/$(database)/documents/invoices/$(id)).data.issuerUid; allow write: if false; }
-match /payLinks/{t}            { allow read, write: if false; }   // resolved only through the Worker
-// pfm/{uid}/payoutAccounts and invoiceNumbers are covered by the pfm rule above (owner reads, nobody writes)
-match /audit/{uid}/{doc=**}    { allow read: if request.auth.uid == uid; allow write: if false; }
-match /wallets/{uid}/{doc=**}  { allow read: if request.auth.uid == uid; allow write: if false; }
-```
+### 2.11 Security rules
+**P1 (as built):** no rules are added. `firestore.paste.rules` has no match for `pfm/` or `audit/`, so every client read and write
+is denied, and the app reads through `pfm.*` ops, which decrypt the sealed fields for their owner. (The rules sketched in earlier
+revisions, owner-only reads, are not needed until a client reads Firestore directly, e.g. for live invoice status in P4.)
 
 ---
 
@@ -664,11 +657,29 @@ available on the Workers Paid plan, which the account is on (C180). If it is una
 
 ---
 
+## 7b. P1 as built (C263)
+
+| Piece | Where | Notes |
+|---|---|---|
+| Ops | `pfm/pfm-worker.mjs` ← `worker-3.js` routes `pfm.*` (one line) and passes its Firestore helpers | `pfm.get` · `pfm.init` · `pfm.settings.set` · `pfm.cat.upsert` · `pfm.cat.archive` · `pfm.tx.add` · `pfm.tx.update` · `pfm.tx.delete` · `pfm.tx.list` · `pfm.summary` · `pfm.fx.last` · `pfm.audit.list` |
+| One commit per change | row + month rollup increments + audit entry + audit head (updateTime precondition) | A lost race on the audit head re-reads and retries (up to 4 tries) |
+| Idempotency | `pfm.tx.add` needs `idemKey`; the row id is `t_{idemKey}` | A repeated request returns the first result and writes nothing |
+| Encryption | `note`, `counterparty` sealed with `PFM_KEK_v1` (AES-GCM, per-user HKDF key, uid as AAD) | Without the secret every op answers `pfm_not_configured` |
+| Account deletion | purge job `pfm_{uid}` removes `pfm/{uid}/**` and `audit/{uid}/**` | |
+| UI | `AccountantScreen` in `Sawa-app/app.p9.js`; entry card on the wallet home and first item in Wallet → Services | Onboarding, Overview (KPIs, daily cash flow, categories, 6-month net), Ledger (by day), add/edit/delete sheet, new category, typed FX rates |
+| Tests | `node pfm/pfm-core.test.mjs` (26) · `node pfm/pfm-worker.test.mjs` (14, in-memory Firestore using the Worker's own value converters) · `node pfm/ui-check.mjs <Sawa-app> <react dir> <out>` (Chromium walkthrough, Arabic + English, light + dark) | |
+
+P1 limits, on purpose:
+- `baseCurrency` and `monthStartDay` can change only before the first entry (`locked_after_first_entry`). Re-basing history (§5.8) comes later.
+- `pfm.tx.list` returns one budget month, up to 1,000 rows (`truncated: true` beyond that).
+- `pfm.audit.list` shows and checks the latest 20 entries; a full-chain check is `verifyChain` over `audit/{uid}/log`.
+- Kinds are `income` and `expense`. Transfers between own accounts, refunds and splits come with P2.
+
 ## 8. Delivery plan
 
 | Phase | Scope | Exit check |
 |---|---|---|
-| **P1** | Onboarding (base currency, time zone), categories, manual ledger in any currency with user-typed rates, rollups, Overview and Ledger tabs, audit chain | Rollup rebuild = live rollup on test accounts; a USD, a JPY and a KWD entry sum correctly in a EUR base |
+| **P1** ✅ C263 | Onboarding (base currency, time zone), categories, manual ledger in any currency with user-typed rates, rollups, Overview and Ledger tabs, audit chain | Rollup rebuild = live rollup on test accounts; a USD, a JPY and a KWD entry sum correctly in a EUR base |
 | **P2** | Budgets and alerts, recurring entries, categorisation rules | The 80 % alert fires once; a recurring entry is suggested, not booked, until confirmed |
 | **P3** | Invoices: business settings (logo, tax toggle, receiving accounts, prefix), editor, send with yearly numbering, PDF, share, record payment (cash/transfer), overdue cron | Totals match between the editor, the PDF and the stored invoice; two sends at once get consecutive numbers; the first invoice in January is `-0001` |
 | **P4** | `/pay/{token}`: payment details, "I've paid" transfer claims and issuer confirmation, partial payments, invoice card in chat | A concurrent double tap → one payment; an underfunded wallet → clear error, nothing written; a claim changes nothing until confirmed |

@@ -1348,3 +1348,8 @@ Meta قيّدت حافظة الأعمال («prohibited from advertising, includ
 ## 🖼️ v121 — صورة الحساب والمجموعة بدقّةٍ عالية (C204 في Sawa-app/BUILD.md)
 - `profile.set` و`group.update` يقبلان `photoHd` اختياريّاً (data:image/jpeg|webp، ≤ 400 ألف حرف) ⇒ `avatars/{id}_hd`. صورةٌ جديدة بلا نسخةٍ عالية أو إزالة ⇒ تُحذف القديمة. محادثة العائلة تقبل photoHd مع photo.
 - المصغّرة `avatars/{id}` كما هي (≤ 20 ألف) — القوائم لا تجلب النسخة العالية.
+
+## C263 — Personal Accountant P1 (Worker v122-pfm)
+`pfm/` holds the design (`DESIGN.md`), the logic (`pfm-core.mjs`), the `pfm.*` ops (`pfm-worker.mjs`, routed from `worker-3.js`) and tests.
+Needs the Worker secret `PFM_KEK_v1` (32 random bytes, base64). `worker-3.js` now imports `./pfm/pfm-worker.mjs`, so deploy with wrangler (GitHub), not by pasting one file.
+Tests: `node pfm/pfm-core.test.mjs` · `node pfm/pfm-worker.test.mjs` · `node pfm/ui-check.mjs ../Sawa-app <react dir> <out dir>`. Details: `Sawa-app/BUILD.md` § C263.

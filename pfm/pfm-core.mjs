@@ -358,6 +358,58 @@ export function budgetStatus(budget, spent, elapsed, length) {
   return { limit, spent, remaining: limit - spent, usedBp, expectedToDate, variance, projected, alerts };
 }
 
+// ---------- budget months and rollups ----------
+
+// The budget month a date belongs to. With monthStartDay = 25 (payday), 2026-11-24 is in "2026-10"
+// and 2026-11-25 is in "2026-11". Day 29-31 starts are clamped to the month's last day.
+export function budgetMonth(date, startDay = 1) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date || "");
+  if (!m) throw new PfmError("bad_date", String(date));
+  let y = +m[1], mo = +m[2];
+  const d = +m[3], last = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+  if (mo < 1 || mo > 12 || d < 1 || d > last) throw new PfmError("bad_date", String(date));
+  if (!Number.isInteger(startDay) || startDay < 1 || startDay > 31) throw new PfmError("bad_start_day");
+  if (d < Math.min(startDay, last)) { mo -= 1; if (mo === 0) { mo = 12; y -= 1; } }
+  return `${y}-${String(mo).padStart(2, "0")}`;
+}
+
+// What one ledger row adds to its month's rollup: a list of [month, fieldPath, delta].
+// Rows that are deleted, suggested (not yet confirmed) or transfers add nothing. A foreign-currency row
+// without a rate only counts as "ratePending". Editing a row applies rollupDiff(old, new).
+const CAT_ID = /^[A-Za-z0-9_]{1,40}$/;
+export function rollupContrib(tx) {
+  if (!tx || tx.deleted || tx.status === "suggested" || tx.kind === "transfer") return [];
+  if (!CAT_ID.test(tx.categoryId || "")) throw new PfmError("bad_category");
+  const out = [[tx.month, "txCount", 1]];
+  if (tx.baseAmount == null) { out.push([tx.month, "ratePending", 1]); return out; }
+  const k = tx.kind === "income" ? "i" : "e", v = tx.baseAmount, dd = tx.date.slice(8, 10);
+  out.push([tx.month, k === "i" ? "income" : "expense", v], [tx.month, `cat.${tx.categoryId}.${k}`, v],
+    [tx.month, `cat.${tx.categoryId}.n`, 1], [tx.month, `day.d${dd}.${k}`, v]);
+  return out;
+}
+// Net change between two versions of a row (either may be null), merged per month and field, zeros dropped.
+export function rollupDiff(before, after) {
+  const acc = new Map();
+  for (const [sign, tx] of [[-1, before], [1, after]])
+    for (const [m, f, v] of rollupContrib(tx)) { const k = m + "|" + f; acc.set(k, (acc.get(k) || 0) + sign * v); }
+  const byMonth = {};
+  for (const [k, v] of acc) { if (!v) continue; const [m, f] = k.split("|"); (byMonth[m] ||= []).push([f, v]); }
+  return byMonth;
+}
+
+// Default categories. Names in Arabic and English; ids stable so rules and budgets can refer to them.
+export const DEFAULT_CATEGORIES = [
+  ["c_salary", "income", "Salary", "راتب", "briefcase", "#0f766e"], ["c_freelance", "income", "Freelance", "عمل حرّ", "laptop", "#0e7490"],
+  ["c_invoices", "income", "Invoices", "فواتير", "receipt", "#15803d"], ["c_gifts_in", "income", "Gifts received", "هدايا مستلمة", "gift", "#65a30d"],
+  ["c_other_in", "income", "Other income", "دخل آخر", "plus", "#4d7c0f"],
+  ["c_food", "expense", "Food & groceries", "طعام ومشتريات", "cart", "#c2410c"], ["c_rent", "expense", "Rent & housing", "سكن وإيجار", "home", "#b91c1c"],
+  ["c_utilities", "expense", "Utilities", "خدمات ومرافق", "bolt", "#a16207"], ["c_transport", "expense", "Transport", "مواصلات", "car", "#7c3aed"],
+  ["c_telecom", "expense", "Phone & internet", "اتصالات وإنترنت", "phone", "#2563eb"], ["c_health", "expense", "Health", "صحّة", "heart", "#db2777"],
+  ["c_education", "expense", "Education", "تعليم", "book", "#4f46e5"], ["c_family", "expense", "Family", "عائلة", "users", "#9333ea"],
+  ["c_maintenance", "expense", "Maintenance", "صيانة", "wrench", "#57534e"], ["c_fees", "expense", "Fees", "رسوم", "percent", "#64748b"],
+  ["c_other_out", "expense", "Other expenses", "مصروفات أخرى", "dots", "#475569"],
+].map(([id, kind, name, nameAr, icon, color], order) => ({ id, kind, name, nameAr, icon, color, order, system: true, archived: false }));
+
 // ---------- ledger analytics ----------
 
 /**

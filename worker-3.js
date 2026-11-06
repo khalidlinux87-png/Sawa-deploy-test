@@ -1,4 +1,5 @@
 import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u0648\u0633\u0637\u0627\u0621 TURN \u0628\u0637\u0644\u0628 STUN \u0639\u0628\u0631 TCP (\u0645\u0631\u0627\u0642\u0628\u0629 \u0627\u0644\u062e\u062f\u0645\u0627\u062a)
+import { handlePfmOp, purgePfm } from "./pfm/pfm-worker.mjs";   // C263: \u0627\u0644\u0645\u062d\u0627\u0633\u0628 \u0627\u0644\u0634\u062e\u0635\u064a\u0651 (pfm/DESIGN.md)
 /* ============================================================
    worker.js \u2014 \u0633\u0648\u0627 \u00b7 applyEdit (v2: \u0627\u0644\u062a\u062d\u0642\u0651\u0642 + \u0627\u0644\u0643\u062a\u0627\u0628\u0629 \u0625\u0644\u0649 Firestore)
    ------------------------------------------------------------
@@ -12,7 +13,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u06
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v121-photohd";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
+const VER = "v122-pfm";      // C263: pfm.* (Personal Accountant P1)
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -5552,7 +5553,7 @@ async function opAccountDelete(uid, payload, env, claims) {
   if (eh && fstr(await fsGet(token, "emails/" + eh).catch(() => null), "uid") === uid) writes.push({ delete: P("emails/" + eh) });
   for (const k of ["mset", "quota", "turncred", "stories"]) writes.push({ delete: P(k + "/" + uid) });
   for (const q of [{ uid: uid }, { by: uid }]) for (const d of await fsQueryEq(token, "famreq", q, 100).catch(() => [])) writes.push({ delete: d.name });
-  purge.push({ id: "story_" + uid, kind: "story" }, { id: "moments_" + uid, kind: "moments" });
+  purge.push({ id: "story_" + uid, kind: "story" }, { id: "moments_" + uid, kind: "moments" }, { id: "pfm_" + uid, kind: "pfm" });   // C263: + pfm
   // \u0644\u062d\u0638\u0627\u062a\u064a \u062a\u062e\u062a\u0641\u064a \u0641\u0648\u0631\u0627\u064b (\u062c\u0645\u0647\u0648\u0631\u064c \u0641\u0627\u0631\u063a) \u062b\u0645\u0651 \u062a\u064f\u062d\u0630\u0641 \u0643\u0627\u0645\u0644\u0629\u064b \u0645\u0639 \u0648\u0633\u0627\u0626\u0637\u0647\u0627 \u0648\u062a\u0639\u0644\u064a\u0642\u0627\u062a\u0647\u0627 \u0628\u0627\u0644\u0645\u062c\u062f\u0648\u0650\u0644
   try {
     const res = await gfetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
@@ -5632,6 +5633,7 @@ async function purgeWork(env, budget) {
       else if (kind === "chat") finished = await purgeChat(token, fstr(j, "cid"), spend);
       else if (kind === "moments") finished = await purgeMoments(token, uid, spend);   // C210
       else if (kind === "story") finished = await purgeStory(token, uid, spend);
+      else if (kind === "pfm") finished = segOk(String(uid)) ? await purgePfm(PFM_DEPS, token, uid, spend, purgeColl) : true;   // C263
       else finished = true;
     } catch (e) { slog("warn", "purge", { kind, err: e && e.message }); }
     if (finished && spend()) { await fsCommit(token, [{ delete: j.name }]).catch(() => {}); done++; }
@@ -6018,6 +6020,9 @@ function badIds(p) {
   return null;
 }
 
+/* C263: Personal Accountant — pfm/pfm-worker.mjs gets the Worker's own Firestore helpers. */
+const PFM_DEPS = { DOC_ROOT, toFsValue, fsToJs, fsGet, fsList, fsQuerySub, fsCommit, getToken: (env) => getAccessToken(JSON.parse(env.SA_JSON)) };
+
 async function handleRequest(request, env, ctx, meta) {
     PUSH_ENV = env;   // C151
   notifyChat.env = env;   // v65: \u062a\u0648\u0642\u064a\u0639 \u0625\u0642\u0631\u0627\u0631 \u00ab\u0648\u0635\u0644\u062a\u00bb \u0641\u064a \u0625\u0634\u0639\u0627\u0631\u0627\u062a \u0627\u0644\u0631\u0633\u0627\u0626\u0644
@@ -6246,6 +6251,7 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "member.remove") { const r = await opMemberRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "member.transferOwner") { const r = await opMemberTransferOwner(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }   // C206
     if (op === "group.settings") { const r = await opGroupSettings(uid, body.payload, env); return json({ ok: true, ...r }); }
+    if (statOp.startsWith("pfm.")) { const r = await handlePfmOp(op, uid, body.payload, env, PFM_DEPS); return json({ ok: true, ...r }); }   // C263
     return json({ ok: false, error: "unknown op: " + op }, 400);
   } catch (e) {
     if (statOp) { stat("err:" + statOp); if (ctx && ctx.waitUntil) ctx.waitUntil(flushStats(env)); }
