@@ -76,7 +76,7 @@ const mount = (page, dark) => page.waitForFunction(() => window.SawaApp && typeo
   await H.getByRole("button", { name: "طعام ومشتريات" }).click();
   await H.locator('input[dir="auto"]').first().fill("بقالة الحيّ");
   await H.getByRole("button", { name: "حفظ" }).click();
-  await H.getByText("الدخل", { exact: true }).waitFor();
+  await H.getByRole("heading", { level: 2 }).waitFor();
   // more history, straight through the ops (same code path as the UI)
   const add = (k, kind, amount, cat, date, extra = {}) => op("pfm.tx.add", { idemKey: "seed-key-" + k, kind, amount, categoryId: cat, date, ...extra });
   await add("s1", "income", "12000", "c_salary", "2026-11-01", { counterparty: "شركة الأفق" });
@@ -98,8 +98,12 @@ const mount = (page, dark) => page.waitForFunction(() => window.SawaApp && typeo
     const host = document.createElement("div"); host.style.cssText = "position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;background:" + lightColors.bg; host.id = "pfmhost"; document.body.appendChild(host); const st = document.createElement("style"); st.textContent = "body > *:not(#pfmhost){display:none!important}"; document.head.appendChild(st);
     ReactDOM.createRoot(host).render(React.createElement(ThemeContext.Provider, { value: { colors: lightColors, isDark: false } }, React.createElement(ToastProvider, null, React.createElement(AccountantScreen, { onBack() {} }))));
   });
-  await H.getByText("نسبة الادّخار").waitFor();
-  await H.getByText("المصروف حسب الفئة").waitFor();
+  await H.getByRole("heading", { level: 2 }).waitFor();
+  await H.getByText("أين ذهب المال").waitFor();
+  await page.waitForTimeout(900);   // the day ruler fills once (≈ 0.6 s)
+  const ruler = await H.locator("[data-day]").evaluateAll((els) => els.map((e) => e.dataset.day + ":" + getComputedStyle(e).backgroundColor));
+  const filled = ruler.filter((x) => /^(done|today):rgb\(15, 118, 110\)/.test(x)).length, doneN = ruler.filter((x) => !x.startsWith("left")).length;
+  if (!doneN || filled !== doneN) errors.push(`day ruler: ${filled} of ${doneN} past days filled teal`);
   await shot(page, "2-overview-ar");
   await H.locator("div.overflow-y-auto").last().evaluate((e) => e.scrollTo(0, e.scrollHeight));
   await shot(page, "3-overview-ar-bottom");
@@ -113,8 +117,8 @@ const mount = (page, dark) => page.waitForFunction(() => window.SawaApp && typeo
   await shot(page, "5-edit-fx-ar");
   await H.getByRole("button", { name: "حفظ" }).click();
   await H.getByRole("tab", { name: "نظرة عامّة" }).click();
-  await H.getByText("نسبة الادّخار").waitFor();
-  const pending = await H.getByText(/تنتظر سعر صرف/).count();
+  await H.getByRole("heading", { level: 2 }).waitFor();
+  const pending = await H.getByText(/تحتاج سعر صرف/).count();
   if (pending) errors.push("rate-pending banner still shown after adding the rate");
   // previous month navigation
   await H.getByRole("button", { name: "الشهر السابق" }).click();
@@ -125,7 +129,7 @@ const mount = (page, dark) => page.waitForFunction(() => window.SawaApp && typeo
 // ── P2 (Arabic): budgets, rules, repeat, suggested entries, alerts ──
 {
   const { ctx, page: pg } = await session("ar", false); const page = pg; const H = pg.locator("#pfmhost");
-  await H.getByText("نسبة الادّخار").waitFor();
+  await H.getByRole("heading", { level: 2 }).waitFor();
   // a budget for food, through the Budgets tab
   await H.getByRole("tab", { name: "الميزانيّات" }).click();
   await H.getByRole("button", { name: "ميزانيّة أخرى" }).or(H.getByRole("button", { name: "أضف ميزانيّة" })).first().click();
@@ -161,17 +165,18 @@ const mount = (page, dark) => page.waitForFunction(() => window.SawaApp && typeo
   await op("pfm.recurring.upsert", { kind: "expense", amount: "60", categoryId: "c_telecom", counterparty: "STC", rule: { freq: "monthly", day: 2 }, startDate: "2026-09-02" });
   await page.reload();
   await mount(page, false);
-  await H.getByText("تنبيهات الميزانيّة").waitFor();
+  await H.getByText("يحتاجك", { exact: true }).waitFor(); await H.getByText(/تجاوزت ميزانيّة/).waitFor();
   if (await H.getByText(/استُهلك/).count()) errors.push("lower-threshold alert shown next to the over-budget one");
-  await H.getByText(/بانتظار التأكيد/).waitFor();
+  await H.getByText(/للتأكيد/).waitFor();
+  await page.waitForTimeout(900);
   await shot(page, "p2-2-overview-ar");
   await H.getByRole("tab", { name: "الميزانيّات" }).click();
   await H.getByText(/تجاوز بـ|بقي/).first().waitFor();
   await shot(page, "p2-3-budgets-ar");
   await H.getByRole("tab", { name: "نظرة عامّة" }).click();
-  await H.getByRole("button", { name: "تمّ" }).click();
-  if (await H.getByText("تنبيهات الميزانيّة").count()) errors.push("alerts card still shown after dismiss");
-  await H.getByText(/بانتظار التأكيد/).click();
+  await H.getByRole("button", { name: "إخفاء التنبيهات" }).click();
+  if (await H.getByText(/تجاوزت ميزانيّة/).count()) errors.push("alerts still shown after dismiss");
+  await H.getByText(/للتأكيد/).click();
   await H.getByText(/مقترحة/).first().waitFor();
   await H.getByText(/مقترحة/).first().scrollIntoViewIfNeeded();
   await shot(page, "p2-4-ledger-suggested-ar");
@@ -193,8 +198,9 @@ if (!alertsFired.some((x) => x === "c_food:10000")) errors.push("expected the fo
 // ── English, dark: overview of the same data ──
 {
   const { ctx, page: pg } = await session("en", true); const page = pg; const H = pg.locator("#pfmhost");
-  await H.getByText("Savings rate").waitFor();
-  await H.getByText("Spending by category").waitFor();
+  await H.getByRole("heading", { level: 2 }).waitFor();
+  await H.getByText("Where the money went").waitFor();
+  await page.waitForTimeout(900);
   await shot(page, "6-overview-en-dark");
   await H.getByRole("button", { name: "New entry" }).click();
   await H.getByRole("tab", { name: "Income" }).waitFor();
@@ -232,7 +238,7 @@ if (!alertsFired.some((x) => x === "c_food:10000")) errors.push("expected the fo
   await H.getByText("المحاسب الشخصيّ").first().waitFor({ timeout: 15000 });
   await page.screenshot({ path: `${OUT}/0-wallet-entry-ar.png` });
   await H.getByText("المحاسب الشخصيّ").first().click();
-  await H.getByText("نسبة الادّخار").waitFor({ timeout: 15000 });
+  await H.getByRole("heading", { level: 2 }).waitFor({ timeout: 15000 });
   await ctx.close();
 }
 
