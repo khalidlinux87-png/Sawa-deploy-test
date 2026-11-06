@@ -229,4 +229,27 @@ await t("receiving accounts carry a currency and filter per invoice", () => {
   assert.throws(() => P.validatePayoutAccount({ type: "bank", currency: "ZZZ", label: "x", holderName: "K", bankName: "X", number: "123456" }), { code: "bad_account" });
 });
 
+await t("pay page options follow the switches", () => {
+  const accts = [{ id: "w", type: "sawa_wallet", currency: "ANY" }, { id: "b", type: "bank", currency: "EUR" },
+                 { id: "c", type: "bank", currency: "EUR", cardPayout: { status: "active" } }];
+  const inv = { status: "sent", amountDue: 100, currency: "EUR", payoutAccountIds: ["w", "b"] };
+  const bal = { EUR: 50, USD: 900, SAR: 0 };
+  assert.deepEqual(P.payOptions(inv, accts, {}, bal), { methods: ["wallet", "transfer"], walletFrom: ["EUR"] });
+  assert.deepEqual(P.payOptions(inv, accts, { card: true, fxQuotes: true }, bal), { methods: ["wallet", "transfer", "card"], walletFrom: ["EUR", "USD"] });
+  // card switched on, but no bank account onboarded with the provider: no card button
+  assert.deepEqual(P.payOptions(inv, accts.slice(0, 2), { card: true }).methods, ["wallet", "transfer"]);
+  assert.deepEqual(P.payOptions({ ...inv, payoutAccountIds: ["w"] }, accts, {}).methods, ["wallet"]);
+  assert.deepEqual(P.payOptions({ ...inv, status: "paid" }, accts, {}).methods, []);
+});
+
+await t("rows without a rate stay out of base totals", () => {
+  const s = P.summarize([
+    { kind: "income", amount: 1000_00, currency: "EUR", categoryId: "salary" },
+    { kind: "expense", amount: 50_00, currency: "USD", categoryId: "food" },               // rate pending
+    { kind: "expense", amount: 20_00, currency: "USD", baseAmount: 18_45, categoryId: "food" },
+  ], { base: "EUR" });
+  assert.equal(s.expense, 18_45); assert.equal(s.ratePending, 1);
+  assert.equal(s.byCurrency.find((c) => c.currency === "USD").expense, 70_00);
+});
+
 console.log(process.exitCode ? "FAILED" : `pfm-core: ${n} passed`);

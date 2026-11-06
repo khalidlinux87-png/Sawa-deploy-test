@@ -293,6 +293,26 @@ function ibanOk(iban) {
 export const accountsForInvoice = (accounts, ids, currency) =>
   ids.map((id) => accounts.find((a) => a.id === id)).filter((a) => a && !a.archived && (a.currency === "ANY" || a.currency === currency));
 
+// ---------- what the pay page offers ----------
+
+// Feature switches (Worker env), both off until the product decides:
+//   card:     card checkout. Needs a provider; the money settles straight to the issuer's bank account,
+//             so it is offered only if the issuer has a bank account onboarded with that provider.
+//   fxQuotes: paying an invoice from a wallet balance in another currency. Needs an FX source and margin policy.
+export function payOptions(inv, accounts, flags = {}, payerBalances = null) {
+  const open = (inv.status === "sent" || inv.status === "overdue") && inv.amountDue > 0;
+  if (!open) return { methods: [], walletFrom: [] };
+  const shown = accountsForInvoice(accounts, inv.payoutAccountIds || [], inv.currency);
+  const methods = ["wallet"];                                     // Sawa users; guests are asked to sign in first
+  if (shown.some((a) => a.type !== "sawa_wallet")) methods.push("transfer");
+  if (flags.card && accounts.some((a) => a.type === "bank" && !a.archived && a.cardPayout?.status === "active")) methods.push("card");
+  // Which of the payer's balances can pay: the invoice currency, plus others only when quotes are on.
+  const walletFrom = payerBalances
+    ? Object.keys(payerBalances).filter((c) => payerBalances[c] > 0 && (c === inv.currency || flags.fxQuotes))
+    : [];
+  return { methods, walletFrom };
+}
+
 // For lists and previews: "•••• 4321".
 export const maskNumber = (n) => (n && n.length > 4 ? "•••• " + n.slice(-4) : n || "");
 
@@ -346,11 +366,15 @@ export function budgetStatus(budget, spent, elapsed, length) {
  * Transfers between the user's own accounts are not income or spending.
  * A refund is an "income" row with refundOf set. It reduces the original category's spending.
  */
-export function summarize(txs) {
-  let income = 0, expense = 0;
+export function summarize(txs, { base } = {}) {
+  let income = 0, expense = 0, ratePending = 0;
   const cats = new Map(), curs = new Map();
   for (const t of txs) {
     if (t.kind === "transfer" || t.deleted) continue;
+    // A foreign-currency row saved without a rate ("rate pending") has no baseAmount. It is counted in
+    // byCurrency but left out of base totals; summing it as if it were base currency would be wrong.
+    const foreign = base && t.currency && t.currency !== base;
+    if (foreign && t.baseAmount == null) { ratePending++; bump(curs, t.currency, t.kind === "income" && !t.refundOf ? "income" : "expense", (t.refundOf ? -1 : 1) * t.amount); continue; }
     const v = t.baseAmount ?? t.amount;
     if (t.currency) {
       const k = t.kind === "income" && !t.refundOf ? "income" : "expense", sign = t.refundOf ? -1 : 1;
@@ -368,6 +392,7 @@ export function summarize(txs) {
       categoryId, ...v, shareBp: expense > 0 && v.expense > 0 ? Number(divRound(big(v.expense) * BP, big(expense))) : 0,
     })).sort((a, b) => b.expense - a.expense || b.income - a.income),
     byCurrency: [...curs.entries()].map(([currency, v]) => ({ currency, ...v })),
+    ratePending,                                   // rows waiting for the user to add a rate
   };
 }
 function bump(m, id, k, v) { const e = m.get(id) || { income: 0, expense: 0 }; e[k] += v; m.set(id, e); }

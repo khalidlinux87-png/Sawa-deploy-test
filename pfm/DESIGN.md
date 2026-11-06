@@ -1,6 +1,6 @@
 # Sawa Wallet: Personal Accountant & Invoicing (PFM) design
 
-Status: proposal, rev 3 (product decisions applied, §0) · Date: 2026-11-05 · Code: `pfm/` (pure logic and tests, not wired into `worker-3.js` yet)
+Status: proposal, rev 4 (product decisions applied, §0) · Date: 2026-11-06 · Code: `pfm/` (pure logic and tests, not wired into `worker-3.js` yet)
 
 This design follows how Sawa is already built:
 
@@ -11,7 +11,7 @@ This design follows how Sawa is already built:
 | Data | Firestore (REST, service account `SA_JSON`). Client rules deny writes to server-owned data | New collections, below. The client can **read** its own data. **Every write goes through the Worker** |
 | Files | — | R2 bucket `sawa-pfm-files` (PDFs) and Cloudflare Browser Rendering (HTML to PDF) |
 | Push | FCM / APNs (`fcmSend`) | Budget alerts, invoice paid, invoice overdue, bank-transfer claims |
-| Payments | Wallet only (client mock) | Card checkout through a payment provider (guest payers too), plus the issuer's own bank and mobile-money accounts printed on the invoice |
+| Payments | Wallet only (client mock) | Wallet payment and the issuer's own bank and mobile-money accounts printed on the invoice. Card checkout is designed but **off** until a provider is chosen (decision 10) |
 
 > **Blocker, and first piece of work.** The current Sawa Wallet is **client-side state** (`app.p8.js`: `useState(45200)`).
 > Auto-sync (§5.1) and one-tap settlement (§5.2) need a **server-side wallet ledger**, so a balance changes only inside a Worker commit.
@@ -20,19 +20,22 @@ This design follows how Sawa is already built:
 
 ---
 
-## 0. Product decisions (2026-11-05)
+## 0. Product decisions (2026-11-05, updated 2026-11-06)
 
 | # | Decision | Where it lands |
 |---|---|---|
 | 1 | **Tax registration is a per-user setting** (see also decision 9). When it is off, the editor hides every tax field and the server refuses tax (`tax_not_registered`) | §2.1 `taxRegistered`, `applyTaxPolicy()`, §4.3 |
 | 2 | **Invoice numbers reset every year:** `INV-2026-0001`, `INV-2026-0002`, … then `INV-2027-0001`. The year is the issue date's year in the issuer's time zone | §2.1 `invoiceSeq`, §5.6, `invoiceNumber()` |
 | 3 | **Partial payments are allowed by default.** The issuer can turn them off per invoice (`allowPartial: false`) | §2.7, `applyPayment()` |
-| 4 | **Clients without a Sawa account can pay by card** on `/pay/{token}` as guests, with no sign-up | §5.4, `inv.checkout`, webhook |
+| 4 | **Clients without a Sawa account can pay** on `/pay/{token}` with no sign-up. **Today:** bank or mobile-money transfer, reported and confirmed (§5.5). **Later:** card, once decision 10 is reversed | §5.4, §5.5 |
 | 5 | **The issuer can add a logo**, printed on the PDF, the pay page and the invoice card in chat | §2.1 `logoKey`, §5.7, `sniffLogo()` |
 | 6 | **The issuer can save accounts for receiving money:** Sawa Wallet, bank accounts and mobile money (any provider, e.g. M-Pesa, STC Pay, Bankak). Each invoice prints the ones the issuer picks. A payer who transfers can report it, and the issuer confirms it | §2.9, §5.5, `validatePayoutAccount()` |
 | 7 | **Not tied to any country.** No defaults for currency, time zone, tax, banks or payment providers. Onboarding suggests the currency and time zone from the device, and the user confirms them | §2.1, §4.1 |
 | 8 | **Any currency, mixed freely.** Entries, invoices, budgets, wallet balances and receiving accounts each carry their own ISO 4217 currency. Reports convert to the user's chosen base currency at a rate stored on each entry | §5.8, `currencyExp()`, `convert()` |
 | 9 | **Tax is set by hand.** The issuer types the rate (e.g. `15`, `7.5`, `8.875`) and names the tax (VAT, GST, TVA, sales tax…). Sawa never looks up or assumes a rate. Frequent rates can be saved | §2.1 `taxRates`, `applyTaxPolicy()`, §4.3 |
+| 10 | **No card provider for now.** Card checkout (§5.4) stays designed but behind the `PFM_CARD` switch, off. The pay page offers Sawa Wallet and transfers only | `payOptions()`, §5.4 |
+| 11 | **FX source and margin: decided later.** Until then there is no automatic rate feed and no paying from another currency's balance (`PFM_FX_QUOTES` off). Foreign-currency entries take the rate the user types, pre-filled with their own last rate for that pair | §2.9b, §5.8 |
+| 12 | **Card money goes straight to the issuer's bank account**, when cards are switched on. Sawa never holds it: the provider settles to the issuer's bank, and the fee is recorded as an expense | §5.4 |
 
 ---
 
@@ -67,7 +70,8 @@ Decisions:
    `exists:false`, so a retry or a duplicate event cannot double-count. This matches `gfetch`, which already refuses to retry
    commits that carry preconditions or increments.
 5. **Any currency, one reporting currency.** Each user picks a `baseCurrency` at onboarding (suggested from the device locale, never
-   assumed). A transaction keeps `amount` and `currency` as they happened, plus `baseAmount` at the `fxRate` recorded **when it was written**.
+   assumed). A transaction keeps `amount` and `currency` as they happened, plus `baseAmount` at the `fxRate` recorded **when it was written**
+   (typed by the user for now; decision 11).
    Rollups and budgets use `baseAmount`, so past months never shift when rates move. Details in §5.8.
 
 ---
@@ -113,7 +117,7 @@ Deleting a category in use archives it and moves its future rules to `c_uncatego
 { kind: "income" | "expense" | "transfer",   // a transfer between the user's own accounts is neither income nor spending
   amount: 2500,                               // > 0, in minor units; the sign comes from `kind`
   currency: "USD", baseAmount: 2306, fxRate: "0.9224",   // base = EUR here; fxRate = 1 USD in EUR at write time
-  fxSource: "auto" | "manual" | "same",       // manual: the user typed the rate (e.g. the rate their bank actually gave)
+  fxSource: "manual" | "same" | "auto",       // manual: typed by the user (the only source until decision 11); auto: reference feed, later
   categoryId: "c_telecom",
   occurredAt: Timestamp, month: "2026-11",    // month: the budget month (honours monthStartDay)
   note: 🔒 string, counterparty: 🔒 string,
@@ -187,7 +191,7 @@ Any Worker op that changes a `wallets/{uid}/balances/{CUR}` document also writes
 - `invoices/{id}/payments/{payId}` ⚙
   ```ts
   { amount, currency, at,
-    method: "wallet" | "card" | "bank_transfer" | "mobile_money" | "cash" | "manual",
+    method: "wallet" | "bank_transfer" | "mobile_money" | "cash" | "manual" | "card",   // card: only once PFM_CARD is on
     state: "pending" | "succeeded" | "failed" | "claimed" | "rejected",   // only "succeeded" counts toward amountPaid
     payerUid?,                                 // missing for a guest
     guest?: { name, email?, phone? } 🔒,      // a card payer without a Sawa account
@@ -215,12 +219,18 @@ and reveals nothing by itself. Revoked on cancel and replaced on resend.
   currency: "EUR" | "ANY",                    // the currency this account receives; "ANY" = converts on arrival
   isDefault: true, archived: false, createdAt ⚙, updatedAt ⚙ }
 ```
-- `pa_wallet` (type `sawa_wallet`) always exists and cannot be deleted. It is what makes the in-app "Pay" button and card checkout work.
+- `pa_wallet` (type `sawa_wallet`) always exists and cannot be deleted. It is what makes the in-app "Pay" button work.
+- `cardPayout?` ⚙ `{ provider, connectedAccountId, status: "pending" | "active" | "rejected" }` on a **bank** account: set when the issuer
+  completes the provider's onboarding (identity and bank checks). Unused until cards are switched on (decision 12).
 - An invoice prints only the chosen accounts whose currency matches the invoice's, or `ANY` (`accountsForInvoice`). A EUR invoice never shows a USD-only account.
 - Up to 10 accounts. Changing an account never changes invoices already sent: they keep their own snapshot.
 - A full account number appears only in the issuer's own editor, the PDF and the pay page of an invoice that lists it. Lists show `numberLast4` only.
 
-### 2.9b `fx/{YYYY-MM-DD}` ⚙ — daily reference rates
+### 2.9b FX rates
+**Now (decision 11):** `pfm/{uid}/fxLast/{FROM}_{TO}` ⚙ `{ rate, at }` remembers the last rate the user typed for each pair, to pre-fill the
+next entry. Nothing else; no outside rates.
+
+**Later, once a source is chosen:** `fx/{YYYY-MM-DD}` ⚙ — daily reference rates
 `{ base: "USD", rates: { EUR: "0.9224", SAR: "3.7500", JPY: "151.237", … }, source, fetchedAt }`. The cron fetches them once a day
 from a configurable provider (`PFM_FX_URL`; the provider is a deployment choice, not a product one). Any pair is computed through USD.
 Rates are **reference only**: the user can always type the rate they actually got, and wallet conversions use a locked quote (§5.8).
@@ -269,7 +279,7 @@ mutating op accepts `idemKey` (a client UUID), which is kept in `pfm/{uid}/idem/
 | `pfm.budget.set` | `PUT /v1/pfm/budgets/{period}/{cat}` | `{period, categoryId, limit, rollover?, recurring?, alertsBp?}` |
 | `pfm.summary` | `GET /v1/pfm/summary?from=2026-06&to=2026-11` | → `{months:[{month, income, expense, net, savingsRateBp}], byCategory, budgets:[budgetStatus…]}` |
 | `pfm.export` | `GET /v1/pfm/export?from&to&format=csv` | Signed R2 link to a CSV file |
-| `pfm.fx.rate` | `GET /v1/pfm/fx?from=USD&to=EUR&date=` | → `{rate, date, source}`, the reference rate the entry form pre-fills |
+| `pfm.fx.rate` | `GET /v1/pfm/fx?from=USD&to=EUR&date=` | → `{rate, source:"last_used"|"reference", at}`. Now: the user's own last rate for the pair, or `null`. Reference rates later (decision 11) |
 | `pfm.settings.set` | `PATCH /v1/pfm/settings` | `{baseCurrency?, tz?, locale?, taxRegistered?, taxLabel?, taxRates?, defaultTaxRateId?, defaultInvoiceCurrency?, invoicePrefix?, defaultDueDays?, defaultAllowPartial?, issuerProfile?}`. Turning `taxRegistered` off does not touch invoices already sent. Changing `baseCurrency` re-bases rollups in a background job (§5.8) |
 | `pfm.logo.set` | `PUT /v1/pfm/logo` | Body: the image bytes (≤ 512 KB). The server checks the real type (PNG/JPEG/WebP, no SVG), stores it at `logos/{uid}/{sha256}`, and sets `issuerProfile.logoKey`. `pfm.logo.delete` removes it |
 | `pfm.account.upsert` | `PUT /v1/pfm/accounts/{id}` | A receiving account; checked by `validatePayoutAccount`. → the account with the number masked |
@@ -289,12 +299,13 @@ mutating op accepts `idemKey` (a client UUID), which is kept in `pfm/{uid}/idem/
 | `inv.claim.decide` | `POST /v1/invoices/{id}/payments/{payId}/decide` | Issuer confirms or rejects a transfer the payer reported: `{decision:"confirm"|"reject", amount?, note?}`. Confirming runs the normal payment commit (§5.5) |
 | `inv.pdf` | `GET /v1/invoices/{id}/pdf` | → `{url}`: a signed `/pfm/file` link valid for 15 minutes. Cached by content hash |
 | `inv.list` | `GET /v1/invoices?status=&role=issued|received` | |
-| `inv.public` | `GET /v1/pay/{token}` | **No auth.** → `{number, issuer:{name, logoUrl}, total, amountDue, currency, dueDate, status, items, allowPartial, payoutAccounts, methods:["wallet","card","transfer"]}`. Hides the issuer's contact and address; shows the tax ID only if the invoice includes tax. Rate-limited per IP |
+| `inv.public` | `GET /v1/pay/{token}` | **No auth.** → `{number, issuer:{name, logoUrl}, total, amountDue, currency, dueDate, status, items, allowPartial, payoutAccounts, methods, walletFrom}` (from `payOptions()`: today `methods` is `wallet` and/or `transfer`). Hides the issuer's contact and address; shows the tax ID only if the invoice includes tax. Rate-limited per IP |
 | `inv.pay` | `POST /v1/pay/{token}` | Auth required (Sawa user). `{token, amount?, method:"wallet", pin, idemKey}` → `{status, amountDue, receiptTxId}`. §5.2 |
-| `inv.quote` | `POST /v1/pay/{token}/quote` | Auth required. `{token, fromCurrency, amount?}` → `{quoteId, rate, debit:{currency, minor}, fee?, expiresAt}`. Single use, 60 s. Used when the payer pays from a balance in another currency (§5.8) |
-| `inv.checkout` | `POST /v1/pay/{token}/checkout` | **No auth needed** (decision 4). `{token, amount?, payer:{name, email?, phone?}, idemKey, captcha}` → `{checkoutUrl}` or `{clientSecret}` from the card provider. §5.4 |
+| `inv.quote` ⏸ | `POST /v1/pay/{token}/quote` | Auth required. `{token, fromCurrency, amount?}` → `{quoteId, rate, debit:{currency, minor}, fee?, expiresAt}`. Single use, 60 s. Used when the payer pays from a balance in another currency (§5.8). ⏸ Off until decision 11 (`PFM_FX_QUOTES`) |
+| `inv.checkout` ⏸ | `POST /v1/pay/{token}/checkout` | ⏸ Off until a card provider is chosen (`PFM_CARD`). **No auth needed**. `{token, amount?, payer:{name, email?, phone?}, idemKey, captcha}` → `{checkoutUrl}` or `{clientSecret}` from the card provider. §5.4 |
 | `inv.claim` | `POST /v1/pay/{token}/claim` | Auth optional. "I've paid by transfer": `{token, amount, payoutAccountId, reference, proof? (image), payer:{name, phone?}}` → `{payId, state:"claimed"}`. §5.5 |
-| — | `POST /pfm/webhook/{provider}` | Card provider webhook. Signature checked against `PFM_PAY_WEBHOOK_SECRET`; the payment is looked up by the provider's intent ID, never by data in the body alone |
+| `pfm.account.cardOnboard` ⏸ | `POST /v1/pfm/accounts/{id}/card-onboarding` | Starts the provider's onboarding for one bank account → `{onboardingUrl}`. Sets `cardPayout` when the provider confirms |
+| — ⏸ | `POST /pfm/webhook/{provider}` | Card provider webhook. Signature checked against `PFM_PAY_WEBHOOK_SECRET`; the payment is looked up by the provider's intent ID, never by data in the body alone |
 
 `inv.send` example response:
 ```json
@@ -303,9 +314,11 @@ mutating op accepts `idemKey` (a client UUID), which is kept in `pfm/{uid}/idem/
   "shareText": "فاتورة INV-2026-0042 من استوديو خالد بمبلغ 5,705.88 ر.س. — ادفع عبر سوا: https://www.sawaaap.com/pay/9fK2xQ…" }
 ```
 
+⏸ = designed, behind a switch that is off (decisions 10 and 11). The op answers `feature_off` until switched on.
+
 Error codes: `bad_amount`, `too_precise`, `bad_currency`, `bad_items`, `bad_transition`, `not_payable`, `overpay`,
 `insufficient_funds`, `bad_pin`, `pin_locked`, `stale` (409), `rate_limited` (429), `self_pay`,
-`partial_not_allowed`, `tax_not_registered`, `bad_rate`, `bad_fx_rate`, `quote_expired`, `bad_account`, `bad_logo`, `card_unavailable`, `claim_pending`.
+`partial_not_allowed`, `tax_not_registered`, `bad_rate`, `bad_fx_rate`, `quote_expired`, `bad_account`, `bad_logo`, `card_unavailable`, `claim_pending`, `feature_off`.
 
 ---
 
@@ -347,7 +360,7 @@ AccountantScreen
    ├─ Currencies           base currency for reports · default invoice currency (both searchable lists of all ISO currencies)
    ├─ Numbering            prefix + preview "INV-2026-0043 (resets every January)"
    └─ ReceivingAccounts    list: Sawa Wallet (fixed) · Deutsche Bank EUR •••• 3000 · Chase USD •••• 6789 · M-Pesa KES •••• 5678 · ＋ Add account
-PublicPayPage (/pay/{token})   logo + invoice → Pay with Sawa Wallet | Pay by card (no account needed) | I paid by transfer
+PublicPayPage (/pay/{token})   logo + invoice → Pay with Sawa Wallet | I paid by transfer (no account needed)   [+ Pay by card, later]
 ```
 
 ### 4.3 Invoice editor
@@ -356,7 +369,7 @@ One scrolling form with a sticky **totals bar** at the bottom: `Total 5,705.88 �
 1. **Client:** search Sawa contacts (sets `client.sawaUid`, enabling in-app delivery and one-tap pay), or enter one by hand. Recent clients come first.
 2. **Items:** rows with description, qty, unit price, then "＋ discount" and the tax chip. The chip offers the issuer's saved rates plus **"Custom…"**, a numeric field for any rate (up to 4 decimals). It starts empty (no tax) unless the issuer set a default saved rate. The tax chip and the "prices include tax" toggle **appear only when the user charges tax**. Otherwise a one-line hint links to the setting. Swipe to delete, drag to reorder. Saved items can be reused.
 3. **Terms:** issue date, due date (presets: on receipt / 7 / 14 / 30 days), invoice discount, prices include tax (registered users only), "Allow partial payments" (on by default), notes.
-4. **Get paid by:** chips for the saved receiving accounts, with the defaults pre-selected. Sawa Wallet / card is always on. "＋ Add account" opens the account form without leaving the editor.
+4. **Get paid by:** chips for the saved receiving accounts, with the defaults pre-selected. Sawa Wallet is always on. "＋ Add account" opens the account form without leaving the editor.
 5. **Actions:** `Save draft` · `Preview PDF` · **`Send`** → share sheet: WhatsApp / Telegram (text + link), Email (PDF attached), Copy link, Sawa chat (an invoice card in the conversation).
 
 The header shows the logo and the number the invoice will get (`INV-2026-0043`, final once sent).
@@ -372,11 +385,11 @@ amount with too many decimals is flagged at the field.
 5. A wallet payment in another currency is logged in its own currency, with the converted base amount beneath it in grey (`$25.00 · ≈ €23.06`).
 
 ### 4.5 Paying an invoice (payer)
-The pay page and the chat card show the issuer's logo, name, the amount due and three choices:
-- **Sawa Wallet** (signed in): **Pay 4,705.88 ر.س.** → bottom sheet with the balance in that currency. If the payer has no balance in it, the sheet
-  offers a balance they do hold, at a locked quote: "Pay from USD: $1,254.90 (1 USD = 3.7500 SAR, valid 60 s)" (§5.8) → PIN pad (the existing 6-digit wallet PIN) → receipt.
-  With too little balance it offers "Top up" or "Pay by card".
-- **Card, no account needed** (decision 4): name and email or phone for the receipt → the provider's hosted card form → back to
+The pay page and the chat card show the issuer's logo, name, the amount due and the choices `payOptions()` returns. Today that is the first and third below:
+- **Sawa Wallet** (signed in): **Pay 4,705.88 ر.س.** → bottom sheet with the balance in that currency → PIN pad (the existing 6-digit wallet PIN) → receipt.
+  With too little balance in the invoice currency it offers "Top up" or "Pay by transfer". *Later (decision 11):* paying from a balance in another
+  currency at a locked quote, e.g. "Pay from USD: $1,254.90 (1 USD = 3.7500 SAR, valid 60 s)".
+- ⏸ **Card, no account needed** (later, decisions 10 and 12): name and email or phone for the receipt → the provider's hosted card form → back to
   `/pay/{token}?done=1`, which waits for the webhook result (polling `inv.public` every 2 s, up to 60 s) → receipt by email or SMS.
   Afterwards a "Create a Sawa account to keep your receipts" offer (optional).
 - **Bank or mobile money:** the issuer's chosen accounts, each with a copy button for the number, plus the invoice number to use as
@@ -425,8 +438,9 @@ async function opInvoicePay(uid, p, env) {
       `invoices/${link.invoiceId}`, `wallets/${uid}`, `wallets/${link.issuerUid}`, `audit/${uid}`, `audit/${link.issuerUid}`]);
     const amount = p.amount ?? (inv.totals.total - inv.totals.amountPaid);
     const next = applyPayment({ status: inv.status, total: inv.totals.total, amountPaid: inv.totals.amountPaid, allowPartial: inv.allowPartial }, amount);
-    // Paying from a balance in another currency needs a locked quote (§5.8). amount is in the invoice currency;
-    // debit is what leaves the payer's balance.
+    // Today the payer pays from their balance in the invoice currency. A quoteId (paying from another currency)
+    // is refused with feature_off until PFM_FX_QUOTES is on (decision 11).
+    if (p.quoteId && env.PFM_FX_QUOTES !== "1") throw new PfmError("feature_off");
     const debit = p.quoteId ? await useQuote(p.quoteId, uid, inv.currency, amount) : { currency: inv.currency, minor: amount };
     if (payer.balance < debit.minor) throw new PfmError("insufficient_funds");   // payer = wallets/{uid}/balances/{debit.currency}
 
@@ -462,7 +476,9 @@ After the commit: push to the issuer ("INV-2026-0042 paid: 4,705.88 ر.س."), an
 the payment record, the invoice totals and status, the issuer's ledger income row (`i_{invoiceId}_{payId}`, category `c_invoices`) and the audit entries.
 Only the wallet path also moves wallet balances. One code path keeps the four methods consistent.
 
-### 5.4 Card payment by a guest (decision 4)
+### 5.4 ⏸ Card payment by a guest (off: decisions 10 and 12)
+Kept so the invoice and payment model already fits cards. Nothing below is built until a provider is chosen.
+
 ```
 Payer (no account)        Worker                                   Card provider            Firestore
  │ POST /pay/{t}/checkout  │                                          │                        │
@@ -481,11 +497,18 @@ Payer (no account)        Worker                                   Card provider
 - Webhooks are idempotent: a second `succeeded` finds `state != pending` and stops.
 - Pending payments older than 24 hours are marked `failed` by the cron. If two payers pay in full at once, the second succeeds at the
   provider but fails `applyPayment` (overpay). It is then refunded automatically through the provider, and both parties are told.
-- Payout to the issuer: the card money is credited to the issuer's **Sawa Wallet** (minus the provider fee, shown as a separate
-  `fee` ledger row), so it then follows the wallet's normal withdrawal rules.
+- **Payout straight to the issuer's bank (decision 12).** The charge is made on the issuer's own connected account at the provider
+  (the "connected account" or "split settlement" model that marketplace providers offer). The provider settles to the issuer's verified bank
+  account on its normal schedule. **Sawa never holds the money**, so it needs no money-transmitter licence for card flows and the wallet balance is untouched.
+  - Before card is offered on an invoice, the issuer onboards one of their bank accounts with the provider (`pfm.account.cardOnboard`:
+    identity and bank checks happen on the provider's pages). Until `cardPayout.status = "active"`, `payOptions()` shows no card button.
+  - The issuer's ledger records the **gross** amount as income (`c_invoices`) and the provider fee as an expense (`c_fees`), both in the invoice currency.
+    The provider's payout report reconciles them later (`payments/{id}.provider.payoutId`).
+  - Refunds and chargebacks are taken from the issuer's provider balance, not from Sawa. A chargeback reopens the invoice (`paid` → `overdue`)
+    with an audit entry, and both parties are told.
 - **Provider:** not chosen yet (§8). The code goes behind a small interface, `createIntent / verifyWebhook / refund`, so the
   provider can change without touching invoice logic. Which card currencies and issuer countries are accepted depends on the provider and on local
-  regulation. The checkout charges in the invoice currency where the provider supports it, and otherwise shows the converted amount before payment. Until a provider is live, `methods` simply omits `card` and the page shows wallet and transfer options only (`card_unavailable`).
+  regulation. The checkout charges in the invoice currency where the provider supports it, and otherwise shows the converted amount before payment. Until a provider is live, `PFM_CARD` is off, `methods` omits `card`, and the page shows wallet and transfer options only.
 
 ### 5.5 Bank and mobile-money transfers (decision 6)
 Money sent straight to the issuer's bank or mobile-money account never passes through Sawa, so Sawa cannot see it arrive. The flow is therefore
@@ -523,11 +546,11 @@ writes.push(
 ### 5.8 Multiple currencies (decision 8)
 | Where | Rule |
 |---|---|
-| **Entering a transaction** | The user picks any currency. The form pre-fills the day's reference rate to the base currency (`pfm.fx.rate`), and the user may overwrite it with the rate they actually got (`fxSource: "manual"`). `baseAmount = convert(amount, currency, base, fxRate)` is fixed at write time |
-| **Wallet transactions** | A wallet conversion has its own exact rate (the quote), and that rate is stored on the ledger row. No reference rate is used |
-| **Dashboards and budgets** | Everything in base currency from `baseAmount`. A "By currency" toggle shows the original amounts per currency (`summarize().byCurrency`) |
+| **Entering a transaction** | The user picks any currency. For a currency other than the base, the user types the rate (pre-filled with their own last rate for that pair, `fxLast`). If they don't know it, they can save the entry as "rate pending": it shows in the ledger, is left out of base-currency totals, and is flagged until a rate is added. *Later:* a daily reference rate pre-fills the field (decision 11). `baseAmount = convert(amount, currency, base, fxRate)` is fixed at write time |
+| **Wallet transactions** | A wallet payment in the base currency needs no rate. One in another currency asks for a rate the same way as a manual entry. Wallet-to-wallet conversion is off until decision 11; when it arrives, the quote's exact rate is stored on the row |
+| **Dashboards and budgets** | Everything in base currency from `baseAmount`. Rows still waiting for a rate are left out and counted (`ratePending`), with a banner: "2 entries need an exchange rate". A "By currency" toggle shows the original amounts per currency (`summarize().byCurrency`) |
 | **Invoices** | Any currency. Totals, rounding and decimal places follow that currency. The issuer's ledger records income in the invoice currency, with `baseAmount` at the rate on the **payment** date, as accountants do |
-| **Paying across currencies** | `inv.quote {token, fromCurrency}` → `{quoteId, rate, debit, expiresAt}` (60 s, stored at `quotes/{id}`, single use). `inv.pay {…, quoteId}` debits the payer's other balance and credits the issuer in the invoice currency. Exactly one conversion, at the shown rate. The FX margin, if any, is shown in the quote, never hidden in the rate |
+| **Paying across currencies** ⏸ | Off until decision 11. Today the payer pays from a balance in the invoice currency, or by transfer. Later: `inv.quote {token, fromCurrency}` → `{quoteId, rate, debit, expiresAt}` (60 s, stored at `quotes/{id}`, single use). `inv.pay {…, quoteId}` debits the payer's other balance and credits the issuer in the invoice currency. Exactly one conversion, at the shown rate. The FX margin, if any, is shown in the quote, never hidden in the rate |
 | **Receiving accounts** | Each has a currency; an invoice prints only matching ones (§2.9) |
 | **Changing base currency** | Allowed at any time. A background job recomputes `baseAmount` for every row at each row's own date rate (or keeps manual rates where the row's currency equals the new base) and rebuilds the rollups. The UI shows "Converting history…" until it finishes |
 | **Display** | Symbol, placement and decimals come from `Intl.NumberFormat` for the user's language; digits are always Western. The PDF uses the invoice's language |
@@ -538,8 +561,8 @@ Exact conversion: `convert(minor, from, to, rate)` multiplies with BigInt, adjus
 - **Overdue sweep** (hourly slot): query `invoices where status == "sent" and dueDate < today(issuer tz)` → `overdue` + audit + push. Reminders are sent 3 days before and on the due date (opt-in).
 - **Recurring budgets** (on the 1st, per user time zone): copy `recurring: true` budgets into the new period, adding `carriedIn` for rollover.
 - **Audit anchor** (daily): see §6.3.
-- **FX reference rates** (daily): fetch into `fx/{date}` (§2.9b). If the fetch fails, the form shows the last date and asks the user to confirm or type a rate.
-- **Stale card payments** (hourly): `pending` payments older than 24 h → `failed` (after checking the provider's status).
+- ⏸ **FX reference rates** (daily, later): fetch into `fx/{date}` (§2.9b). If the fetch fails, the form shows the last date and asks the user to confirm or type a rate.
+- ⏸ **Stale card payments** (hourly, later): `pending` payments older than 24 h → `failed` (after checking the provider's status).
 
 ---
 
@@ -585,7 +608,7 @@ reached only through HMAC-signed links that expire in 15 minutes. The R2 bucket 
 
 | File | What it is | Status |
 |---|---|---|
-| `pfm-core.mjs` | Any ISO currency (`currencyExp`, decimals from Intl), exact `convert` between currencies, typed rates (`toRate` / `rateText`), money parsing (including Arabic-Indic digits), `computeInvoice` (line and invoice discounts, exclusive or inclusive tax, tax per rate), `allocate`, status machine, `applyPayment` (with `allowPartial`), `invoiceNumber` / `localDate` (yearly numbering), `applyTaxPolicy`, `validatePayoutAccount` (with IBAN check) / `maskNumber`, `sniffLogo`, `budgetStatus` (thresholds, variance, pace), `summarize`, `walletEventToTx`, audit hash chain, field encryption | Tested: `node pfm/pfm-core.test.mjs` (22 tests) |
+| `pfm-core.mjs` | Any ISO currency (`currencyExp`, decimals from Intl), exact `convert` between currencies, typed rates (`toRate` / `rateText`), `payOptions` (what the pay page offers, with the card and FX switches), money parsing (including Arabic-Indic digits), `computeInvoice` (line and invoice discounts, exclusive or inclusive tax, tax per rate), `allocate`, status machine, `applyPayment` (with `allowPartial`), `invoiceNumber` / `localDate` (yearly numbering), `applyTaxPolicy`, `validatePayoutAccount` (with IBAN check) / `maskNumber`, `sniffLogo`, `budgetStatus` (thresholds, variance, pace), `summarize`, `walletEventToTx`, audit hash chain, field encryption | Tested: `node pfm/pfm-core.test.mjs` (24 tests) |
 | `invoice-html.mjs` | Self-contained invoice template, Arabic RTL and English, any currency (Intl formatting), issuer's own tax name: logo, pay QR block, receiving accounts | Rendered to PDF with Chromium: Arabic in SAR with 15 % VAT, English in USD with 8.875 % sales tax (`samples/`) |
 | `invoice-pdf.mjs` | Worker pipeline: recompute totals → HTML → hash → R2 cache → Browser Rendering → signed link, and `serveSignedFile` | Not deployed: needs the bindings below |
 
@@ -605,7 +628,8 @@ browser = { binding = "BROWSER" }
 binding = "PFM_FILES"
 bucket_name = "sawa-pfm-files"
 ```
-Secrets: `PFM_KEK_v1` (32 random bytes, base64), `PFM_LINK_KEY`, `PFM_FX_URL` (+ key, if the FX provider needs one), and later the card provider's API key and `PFM_PAY_WEBHOOK_SECRET`. Dependency: `@cloudflare/puppeteer`. Browser Rendering is
+Secrets: `PFM_KEK_v1` (32 random bytes, base64) and `PFM_LINK_KEY`. Switches (plain vars): `PFM_CARD=0`, `PFM_FX_QUOTES=0`.
+Later: the card provider's API key and `PFM_PAY_WEBHOOK_SECRET` (decision 10), and `PFM_FX_URL` (decision 11). Dependency: `@cloudflare/puppeteer`. Browser Rendering is
 available on the Workers Paid plan, which the account is on (C180). If it is unavailable, there is a fallback: the PWA opens the same HTML
 (`inv.html` op) and calls `window.print()`. On Android and iOS the native share sheet then offers "Save as PDF".
 
@@ -616,16 +640,16 @@ available on the Workers Paid plan, which the account is on (C180). If it is una
 | Phase | Scope | Exit check |
 |---|---|---|
 | **P0** | Server-side wallet ledger (§2.6) with one balance per currency, behind a flag. The PWA reads its balances from `wallets/{uid}/balances` | Balance is equal on 2 devices; replaying the same request does not double-charge |
-| **P1** | Onboarding (base currency, time zone), categories, manual ledger in any currency with FX reference rates, rollups, Overview and Ledger tabs, audit chain | Rollup rebuild = live rollup on test accounts; a USD, a JPY and a KWD entry sum correctly in a EUR base |
+| **P1** | Onboarding (base currency, time zone), categories, manual ledger in any currency with user-typed rates, rollups, Overview and Ledger tabs, audit chain | Rollup rebuild = live rollup on test accounts; a USD, a JPY and a KWD entry sum correctly in a EUR base |
 | **P2** | Budgets and alerts, auto-sync from wallet, rules | A wallet purchase appears in the Ledger within one commit; the 80 % alert fires once |
 | **P3** | Invoices: business settings (logo, tax toggle, receiving accounts, prefix), editor, send with yearly numbering, PDF, share, record payment (cash/transfer), overdue cron | Totals match between the editor, the PDF and the stored invoice; two sends at once get consecutive numbers; the first invoice in January is `-0001` |
-| **P4** | `/pay/{token}`: wallet payment (`inv.pay`) including cross-currency quotes, partial payments, "I've paid" transfer claims and issuer confirmation, invoice card in chat | A concurrent double tap → one payment; an underfunded wallet → clear error, nothing written; a claim changes nothing until confirmed |
-| **P5** | Guest card checkout through the chosen provider, webhook, auto-refund on overpayment | A duplicate webhook → one payment; two full card payments at once → one paid, one refunded |
-| **P6** | CSV export, receipt photos | — |
+| **P4** | `/pay/{token}`: wallet payment (`inv.pay`) in the invoice currency, partial payments, "I've paid" transfer claims and issuer confirmation, invoice card in chat | A concurrent double tap → one payment; an underfunded wallet → clear error, nothing written; a claim changes nothing until confirmed |
+| **P5** | CSV export, receipt photos | — |
+| *Later* | **Cards** (decision 10): provider, bank-account onboarding, checkout, webhook, payout to the issuer's bank, auto-refund on overpayment. **FX** (decision 11): reference-rate feed, wallet conversion with quotes and the chosen margin | Cards: a duplicate webhook → one payment; two full payments at once → one paid, one refunded. FX: a quote can be used once, and an expired one is refused |
 
 Answered 2026-11-05: see §0.
 
-Still open:
-1. **Card provider:** which provider (or providers, by region) should Sawa use? The answer fixes the supported issuer countries, card currencies and fee model.
-2. **Payout of card money:** is crediting the issuer's Sawa Wallet (§5.4) acceptable, or must it go straight to their bank account?
-3. **FX reference-rate provider and margin:** which rate source should the daily job use, and does Sawa add a margin on wallet conversions (shown in the quote)?
+Answered 2026-11-06: card provider not for now (decision 10), FX source and margin later (decision 11), card money straight to the
+issuer's bank (decision 12).
+
+Nothing is open for phases P0–P5. Switching on the *Later* row needs two answers: which card provider, and which FX source with what margin.
