@@ -234,11 +234,16 @@ await t("pay page options follow the switches", () => {
                  { id: "c", type: "bank", currency: "EUR", cardPayout: { status: "active" } }];
   const inv = { status: "sent", amountDue: 100, currency: "EUR", payoutAccountIds: ["w", "b"] };
   const bal = { EUR: 50, USD: 900, SAR: 0 };
-  assert.deepEqual(P.payOptions(inv, accts, {}, bal), { methods: ["wallet", "transfer"], walletFrom: ["EUR"] });
-  assert.deepEqual(P.payOptions(inv, accts, { card: true, fxQuotes: true }, bal), { methods: ["wallet", "transfer", "card"], walletFrom: ["EUR", "USD"] });
+  // Today: every switch off, so transfer is the only way to pay
+  assert.deepEqual(P.payOptions(inv, accts, {}, bal), { methods: ["transfer"], walletFrom: [] });
+  assert.deepEqual(P.payOptions(inv, accts, { wallet: true }, bal), { methods: ["wallet", "transfer"], walletFrom: ["EUR"] });
+  assert.deepEqual(P.payOptions(inv, accts, { wallet: true, card: true, fxQuotes: true }, bal), { methods: ["wallet", "transfer", "card"], walletFrom: ["EUR", "USD"] });
+  // fxQuotes without the wallet does nothing
+  assert.deepEqual(P.payOptions(inv, accts, { fxQuotes: true }, bal).walletFrom, []);
   // card switched on, but no bank account onboarded with the provider: no card button
-  assert.deepEqual(P.payOptions(inv, accts.slice(0, 2), { card: true }).methods, ["wallet", "transfer"]);
-  assert.deepEqual(P.payOptions({ ...inv, payoutAccountIds: ["w"] }, accts, {}).methods, ["wallet"]);
+  assert.deepEqual(P.payOptions(inv, accts.slice(0, 2), { wallet: true, card: true }).methods, ["wallet", "transfer"]);
+  // only the wallet account chosen, and the wallet is off: nothing to pay with, so the issuer is warned at send time
+  assert.deepEqual(P.payOptions({ ...inv, payoutAccountIds: ["w"] }, accts, {}).methods, []);
   assert.deepEqual(P.payOptions({ ...inv, status: "paid" }, accts, {}).methods, []);
 });
 

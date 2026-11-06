@@ -295,7 +295,8 @@ export const accountsForInvoice = (accounts, ids, currency) =>
 
 // ---------- what the pay page offers ----------
 
-// Feature switches (Worker env), both off until the product decides:
+// Feature switches (Worker env), all off until the product decides:
+//   wallet:   paying from a Sawa Wallet balance. Needs the server-side wallet ledger (deferred).
 //   card:     card checkout. Needs a provider; the money settles straight to the issuer's bank account,
 //             so it is offered only if the issuer has a bank account onboarded with that provider.
 //   fxQuotes: paying an invoice from a wallet balance in another currency. Needs an FX source and margin policy.
@@ -303,11 +304,11 @@ export function payOptions(inv, accounts, flags = {}, payerBalances = null) {
   const open = (inv.status === "sent" || inv.status === "overdue") && inv.amountDue > 0;
   if (!open) return { methods: [], walletFrom: [] };
   const shown = accountsForInvoice(accounts, inv.payoutAccountIds || [], inv.currency);
-  const methods = ["wallet"];                                     // Sawa users; guests are asked to sign in first
+  const methods = flags.wallet ? ["wallet"] : [];                // Sawa users; guests are asked to sign in first
   if (shown.some((a) => a.type !== "sawa_wallet")) methods.push("transfer");
   if (flags.card && accounts.some((a) => a.type === "bank" && !a.archived && a.cardPayout?.status === "active")) methods.push("card");
   // Which of the payer's balances can pay: the invoice currency, plus others only when quotes are on.
-  const walletFrom = payerBalances
+  const walletFrom = flags.wallet && payerBalances
     ? Object.keys(payerBalances).filter((c) => payerBalances[c] > 0 && (c === inv.currency || flags.fxQuotes))
     : [];
   return { methods, walletFrom };

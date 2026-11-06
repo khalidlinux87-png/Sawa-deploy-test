@@ -7,13 +7,13 @@ const L = {
   ar: { invoice: "فاتورة", no: "رقم الفاتورة", issued: "تاريخ الإصدار", due: "تاريخ الاستحقاق", from: "من", to: "إلى", taxId: "الرقم الضريبيّ",
         desc: "الوصف", qty: "الكمّيّة", price: "سعر الوحدة", disc: "الخصم", tax: "الضريبة", amount: "المبلغ قبل الضريبة",
         subtotal: "المجموع الفرعيّ", discount: "خصم الفاتورة", taxOn: "الضريبة", total: "الإجماليّ", paid: "المدفوع", balance: "المستحقّ",
-        payWith: "ادفع بمحفظة سوا", payWithCard: "ادفع بمحفظة سوا أو بالبطاقة", scan: "امسح الرمز أو افتح الرابط", notes: "ملاحظات",
+        payWith: "ادفع بمحفظة سوا", payWithCard: "ادفع بمحفظة سوا أو بالبطاقة", viewOnline: "اعرض الفاتورة وأبلغ عن دفعك", scan: "امسح الرمز أو افتح الرابط", notes: "ملاحظات",
         payTo: "طرق الدفع", holder: "اسم صاحب الحساب", acct: "رقم الحساب", branch: "الفرع", ref: "اكتب رقم الفاتورة في خانة البيان",
         status: { draft: "مسوّدة", sent: "مُرسلة", paid: "مدفوعة", overdue: "متأخّرة", cancelled: "ملغاة" } },
   en: { invoice: "Invoice", no: "Invoice no.", issued: "Issue date", due: "Due date", from: "From", to: "Bill to", taxId: "Tax ID",
         desc: "Description", qty: "Qty", price: "Unit price", disc: "Discount", tax: "Tax", amount: "Amount (excl. tax)",
         subtotal: "Subtotal", discount: "Invoice discount", taxOn: "Tax", total: "Total", paid: "Paid", balance: "Balance due",
-        payWith: "Pay with Sawa Wallet", payWithCard: "Pay with Sawa Wallet or card", scan: "Scan the code or open the link", notes: "Notes",
+        payWith: "Pay with Sawa Wallet", payWithCard: "Pay with Sawa Wallet or card", viewOnline: "View the invoice and report your payment", scan: "Scan the code or open the link", notes: "Notes",
         payTo: "Payment details", holder: "Account holder", acct: "Account no.", branch: "Branch", ref: "Use the invoice number as the payment reference",
         status: { draft: "Draft", sent: "Sent", paid: "Paid", overdue: "Overdue", cancelled: "Cancelled" } },
 };
@@ -62,7 +62,7 @@ table.sum tr.total td{font-weight:700;font-size:12.5pt;border-top:2px solid #1a1
 <div><span>${t.due}</span><span class="num" dir="ltr">${esc(inv.dueDate)}</span></div></div></header>
 <section class="parties">${party(inv.issuer, "from")}${party(inv.client, "to")}</section>
 <table class="items"><thead><tr><th>${t.desc}</th><th>${t.qty}</th><th>${t.price}</th><th>${t.disc}</th><th>${inv.taxLabel ? taxName : t.tax}</th><th>${t.amount}</th></tr></thead><tbody>${rows}</tbody></table>
-<div class="bottom">${inv.payUrl && payable(inv) ? `<div class="pay">${qrSvg}<div><b>${(inv.methods || []).includes("card") ? t.payWithCard : t.payWith}</b><div class="muted">${t.scan}</div><div class="num" style="font-size:8.5pt">${esc(inv.payUrl)}</div></div></div>` : "<div></div>"}
+<div class="bottom">${inv.payUrl && payable(inv) ? `<div class="pay">${qrSvg}<div><b>${payLabel(inv.methods || [], t)}</b><div class="muted">${t.scan}</div><div class="num" style="font-size:8.5pt">${esc(inv.payUrl)}</div></div></div>` : "<div></div>"}
 <table class="sum"><tr><td>${t.subtotal}</td><td>${money(totals.subtotal)}</td></tr>
 ${totals.invoiceDiscount ? `<tr><td>${t.discount}</td><td>${money(-totals.invoiceDiscount)}</td></tr>` : ""}${taxRows}
 <tr class="total"><td>${t.total}</td><td>${money(totals.total)}</td></tr>
@@ -74,6 +74,9 @@ ${inv.notes ? `<div class="notes"><div class="lbl">${t.notes}</div>${esc(inv.not
 
 // Phone numbers and emails have no letters that set a direction, so in Arabic a leading "+" would drift to the end.
 const auto = (v) => (/[\u0600-\u06FF]/.test(v) ? esc(v) : `<span class="num" dir="ltr">${esc(v)}</span>`);
+// The pay-link block names only the ways to pay that are switched on. With wallet and card off,
+// the link still lets the client view the invoice and report a transfer.
+const payLabel = (m, t) => (m.includes("wallet") ? (m.includes("card") ? t.payWithCard : t.payWith) : t.viewOnline);
 const payable = (inv) => inv.status === "sent" || inv.status === "overdue" || inv.status === "draft";
 // Only data: URIs pass, and only raster types (see sniffLogo). The renderer also blocks all network requests.
 const logo = (u) => (/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(u || "") ? `<img src="${u}" alt="">` : "");
