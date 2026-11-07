@@ -367,5 +367,172 @@ await t("purge also removes P2 data", async () => {
   assert.deepEqual([...fs.docs.keys()].filter((n) => n.includes("u1")), []);
 });
 
+// ========================= P3: invoices =========================
+const PNG = "data:image/png;base64," + Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(56, 1)]).toString("base64");
+async function shop(opts = {}) {
+  const r = await ready2(opts);
+  await r.call("pfm.biz.set", { name: "Khalid Design", contact: "+966 51 234 5678", address: "Riyadh, King Fahd Rd", taxId: "300123456700003", invoicePrefix: "INV" });
+  const acct = await r.call("pfm.account.upsert", { type: "bank", currency: "EUR", label: "Main", holderName: "Khalid", bankName: "Deutsche Bank", number: "DE89 3704 0044 0532 0130 00" });
+  r.acct = acct.account;
+  return r;
+}
+const draft = (call, extra = {}) => call("inv.create", { client: { name: "Nile Trading", contact: "billing@nile.example" }, currency: "EUR",
+  items: [{ description: "Design work", qty: "2", unitPrice: "450.00" }, { description: "Hosting", qty: "1", unitPrice: "30" }], issueDate: TODAY, ...extra });
+
+await t("business settings: sealed at rest, tax rates and prefix validated, next number preview", async () => {
+  const { fs, call } = await shop();
+  const b = await call("pfm.biz.get");
+  assert.equal(b.biz.address, "Riyadh, King Fahd Rd"); assert.equal(b.biz.taxRegistered, false);
+  assert.equal(b.nextNumber, `INV-${TODAY.slice(0, 4)}-0001`);
+  assert.ok(!JSON.stringify(fs.docs.get(`${ROOT}/pfm/u1`).data).includes("King Fahd"));
+  await assert.rejects(call("pfm.biz.set", { invoicePrefix: "inv/2" }), err("bad_prefix"));
+  await assert.rejects(call("pfm.biz.set", { taxRates: [{ label: "VAT", rate: "120" }] }), err("bad_rate"));
+  const r = await call("pfm.biz.set", { taxRegistered: true, taxLabel: "VAT", taxRates: [{ id: "std", label: "Standard", rate: "19" }], defaultTaxRateId: "std" });
+  assert.equal(r.biz.taxRates[0].rate, "19"); assert.equal(r.biz.defaultTaxRateId, "std");
+});
+
+await t("receiving accounts: masked, sealed, number change pushes a warning, wallet type refused", async () => {
+  const { fs, call, pushes, acct } = await shop();
+  assert.equal(acct.number, "•••• 3000");
+  assert.ok(![...fs.docs.values()].some((e) => JSON.stringify(e.data).includes("370400440532013000")));
+  await assert.rejects(call("pfm.account.upsert", { type: "bank", label: "X", holderName: "K", bankName: "B", number: "DE00370400440532013000" }), err("bad_account"));
+  await assert.rejects(call("pfm.account.upsert", { type: "sawa_wallet" }), err("bad_account"));
+  const before = pushes.length;
+  await call("pfm.account.upsert", { id: acct.id, type: "bank", currency: "EUR", label: "Main", holderName: "Khalid", bankName: "Deutsche Bank", number: "GB82WEST12345698765432" });
+  assert.equal(pushes.length, before + 1); assert.match(pushes.at(-1).body, /5432/);
+  await call("pfm.account.archive", { id: acct.id });
+  assert.equal((await call("pfm.biz.get")).accounts[0].archived, true);
+});
+
+await t("logo: real bytes only, size capped", async () => {
+  const { call } = await shop();
+  assert.equal((await call("pfm.logo.set", { data: PNG })).size, 64);
+  assert.equal((await call("pfm.biz.get")).logo, PNG);
+  await assert.rejects(call("pfm.logo.set", { data: "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=" }), err("bad_logo"));
+  await assert.rejects(call("pfm.logo.set", { data: "data:image/jpeg;base64," + PNG.split(",")[1] }), err("bad_logo"));   // says JPEG, is PNG
+  await assert.rejects(call("pfm.logo.set", { data: "data:image/png;base64," + Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(200 * 1024)]).toString("base64") }), err("bad_logo"));
+});
+
+await t("drafts: totals on the server, tax only when registered, client sealed, edit with rev, delete", async () => {
+  const { fs, call } = await shop();
+  await assert.rejects(draft(call, { items: [{ description: "X", qty: "1", unitPrice: "10", taxRate: "19" }] }), err("tax_not_registered"));
+  const d1 = await draft(call);
+  assert.equal(d1.invoice.status, "draft"); assert.equal(d1.invoice.number, null); assert.equal(d1.invoice.totals.total, 93000);
+  assert.equal(d1.invoice.client.name, "Nile Trading");
+  assert.ok(!JSON.stringify(fs.docs.get(`${ROOT}/invoices/${d1.invoice.id}`).data).includes("Nile Trading"));
+  assert.equal((await call("inv.preview", { currency: "EUR", items: [{ description: "a", qty: "3", unitPrice: "1.10" }] })).totals.total, 330);
+  await call("pfm.biz.set", { taxRegistered: true, taxLabel: "VAT", taxRates: [{ id: "std", label: "Standard", rate: "19" }] });
+  const u = await call("inv.update", { id: d1.invoice.id, rev: 1, items: [{ description: "Design work", qty: "2", unitPrice: "450", taxRateId: "std", discount: { type: "amt", amount: "50" } }],
+    invoiceDiscount: { type: "pct", rate: "10" } });
+  // 900 − 50 = 850; −10 % = 765; VAT 19 % = 145.35; total 910.35
+  assert.equal(u.invoice.totals.total, 91035); assert.equal(u.invoice.totals.taxBreakdown[0].taxRate, "19"); assert.equal(u.invoice.taxLabel, "VAT");
+  const u2 = await call("inv.update", { id: d1.invoice.id, rev: 2, notes: "Thanks" });      // items untouched: stored discounts survive
+  assert.equal(u2.invoice.totals.total, 91035); assert.equal(u2.invoice.notes, "Thanks");
+  await assert.rejects(call("inv.update", { id: d1.invoice.id, rev: 1, notes: "x" }), err("stale"));
+  await call("inv.delete", { id: d1.invoice.id });
+  assert.equal(fs.docs.has(`${ROOT}/invoices/${d1.invoice.id}`), false);
+  await assert.rejects(call("inv.get", { id: d1.invoice.id }), err("not_found"));
+});
+
+await t("send: yearly numbers, unique even when sent together, snapshot, frozen afterwards", async () => {
+  const { fs, call, acct } = await shop();
+  const [a, b, c] = await Promise.all([draft(call, { payoutAccountIds: [acct.id] }), draft(call), draft(call)]);
+  const sent = await Promise.all([a, b, c].map((d0) => call("inv.send", { id: d0.invoice.id })));
+  const nums = sent.map((r) => r.invoice.number).sort();
+  const Y = TODAY.slice(0, 4);
+  assert.deepEqual(nums, [`INV-${Y}-0001`, `INV-${Y}-0002`, `INV-${Y}-0003`]);
+  const ra = sent.find((r) => r.invoice.id === a.invoice.id).invoice;
+  assert.equal(ra.issuer.taxId, "300123456700003"); assert.equal(ra.payoutAccounts[0].number, "DE89370400440532013000");
+  assert.equal(fs.docs.get(`${ROOT}/payLinks/${ra.payLinkToken}`).data.invoiceId, a.invoice.id);
+  await assert.rejects(call("inv.update", { id: a.invoice.id, rev: ra.rev, notes: "x" }), err("not_draft"));
+  await assert.rejects(call("inv.send", { id: a.invoice.id }), err("not_draft"));
+  // a new year starts again at 0001
+  const next = await draft(call, { issueDate: `${Number(Y) + 1}-01-02`, dueDate: `${Number(Y) + 1}-01-20` });
+  assert.equal((await call("inv.send", { id: next.invoice.id })).invoice.number, `INV-${Number(Y) + 1}-0001`);
+  // and the business name is required before sending
+  const r2 = await ready2(); const d2 = await draft(r2.call);
+  await assert.rejects(r2.call("inv.send", { id: d2.invoice.id }), err("business_name_missing"));
+});
+
+await t("payments: partial then full, booked as income, idempotent, overpay refused, cancel rules", async () => {
+  const { fs, call } = await shop();
+  const d0 = await draft(call);
+  await assert.rejects(call("inv.markPaid", { id: d0.invoice.id, amount: "1", method: "cash", idemKey: k() }), err("not_payable"));
+  const inv = (await call("inv.send", { id: d0.invoice.id })).invoice;
+  const key = k();
+  const p1 = await call("inv.markPaid", { id: inv.id, amount: "300", method: "bank_transfer", reference: "TRX-77", idemKey: key, paidAt: TODAY });
+  assert.equal(p1.invoice.status, "sent"); assert.equal(p1.invoice.amountPaid, 30000); assert.equal(p1.invoice.payments.length, 1);
+  await call("inv.markPaid", { id: inv.id, amount: "300", method: "bank_transfer", idemKey: key });            // double tap
+  assert.equal((await call("inv.get", { id: inv.id })).invoice.amountPaid, 30000);
+  await assert.rejects(call("inv.markPaid", { id: inv.id, amount: "700", method: "cash", idemKey: k() }), err("overpay"));
+  await assert.rejects(call("inv.cancel", { id: inv.id }), err("has_payments"));
+  const p2 = await call("inv.markPaid", { id: inv.id, amount: "630", method: "cash", idemKey: k() });
+  assert.equal(p2.invoice.status, "paid"); assert.equal(p2.invoice.totals.amountDue, 0);
+  assert.equal(month(fs, "u1", MONTH).income, 93000); assert.equal(month(fs, "u1", MONTH).cat.c_invoices.i, 93000);
+  const rows = (await call("pfm.tx.list", { month: MONTH })).items.filter((t) => t.invoiceId === inv.id);
+  assert.equal(rows.length, 2); assert.equal(rows[0].counterparty, "Nile Trading"); assert.equal(rows[0].note, inv.number);
+  // a sent invoice without payments can be cancelled; its pay link is revoked
+  const d3 = await draft(call); const s3 = (await call("inv.send", { id: d3.invoice.id })).invoice;
+  assert.equal((await call("inv.cancel", { id: s3.id, reason: "duplicate" })).invoice.status, "cancelled");
+  assert.equal(fs.docs.get(`${ROOT}/payLinks/${s3.payLinkToken}`).data.revoked, true);
+  await assert.rejects(call("inv.markPaid", { id: s3.id, amount: "1", method: "cash", idemKey: k() }), err("not_payable"));
+});
+
+await t("foreign-currency invoice: payment booked with the typed rate, or waiting for one", async () => {
+  const { fs, call } = await shop();
+  const inv = (await call("inv.send", { id: (await draft(call, { currency: "USD" })).invoice.id })).invoice;
+  await call("inv.markPaid", { id: inv.id, amount: "100", method: "cash", idemKey: k(), fxRate: "0.92" });
+  await call("inv.markPaid", { id: inv.id, amount: "100", method: "cash", idemKey: k() });
+  const m = month(fs, "u1", MONTH);
+  assert.equal(m.income, 9200); assert.equal(m.ratePending, 1);
+});
+
+await t("printable page: number, logo, accounts, escaped client text; list and outstanding", async () => {
+  const { call, acct } = await shop();
+  await call("pfm.logo.set", { data: PNG });
+  const inv = (await call("inv.send", { id: (await draft(call, { client: { name: "<b>Nile</b> & Co" }, payoutAccountIds: [acct.id] })).invoice.id })).invoice;
+  const h = await call("inv.html", { id: inv.id, lang: "en" });
+  assert.match(h.html, new RegExp(inv.number)); assert.ok(h.html.includes(PNG)); assert.ok(h.html.includes("DE89370400440532013000"));
+  assert.ok(h.html.includes("&lt;b&gt;Nile&lt;/b&gt; &amp; Co") && !h.html.includes("<b>Nile"));
+  const dft = await draft(call);
+  assert.match((await call("inv.html", { id: dft.invoice.id, lang: "ar" })).html, /مسوّدة/);
+  const l = await call("inv.list", {});
+  assert.equal(l.items.length, 2); assert.deepEqual(l.outstanding, [{ currency: "EUR", amount: 93000 }]);
+  assert.equal((await call("inv.list", { status: "draft" })).items.length, 1);
+  assert.equal(l.items.find((i) => i.id === inv.id).clientName, "<b>Nile</b> & Co");
+});
+
+await t("invoices are private to their issuer", async () => {
+  const { call } = await shop();
+  const d0 = await draft(call);
+  await call("pfm.init", { baseCurrency: "EUR", tz: "Europe/Berlin" }, "u2");
+  await assert.rejects(call("inv.get", { id: d0.invoice.id }, "u2"), err("not_found"));
+  await assert.rejects(call("inv.send", { id: d0.invoice.id }, "u2"), err("not_found"));
+  assert.equal((await call("inv.list", {}, "u2")).items.length, 0);
+});
+
+await t("overdue: the cron flips sent invoices past due once and tells the issuer", async () => {
+  const { fs, d, env, call, pushes } = await shop();
+  const inv = (await call("inv.send", { id: (await draft(call)).invoice.id })).invoice;
+  const notYet = await pfmCron(env, d, 10);
+  assert.equal(notYet.overdue, undefined);
+  fs.docs.get(`${ROOT}/invoices/${inv.id}`).data.dueDate = addDays(TODAY, -1);
+  const before = pushes.length;
+  assert.equal((await pfmCron(env, d, 10)).overdue, 1);
+  assert.equal((await call("inv.get", { id: inv.id })).invoice.status, "overdue");
+  assert.equal(pushes.length, before + 1); assert.match(pushes.at(-1).title, new RegExp(inv.number));
+  assert.equal((await pfmCron(env, d, 10)).overdue, undefined);
+  assert.equal((await call("inv.markPaid", { id: inv.id, amount: "930", method: "cash", idemKey: k() })).invoice.status, "paid");   // overdue can still be paid
+});
+
+await t("account deletion removes invoices, payments and pay links", async () => {
+  const { fs, d, call } = await shop();
+  const inv = (await call("inv.send", { id: (await draft(call)).invoice.id })).invoice;
+  await call("inv.markPaid", { id: inv.id, amount: "10", method: "cash", idemKey: k() });
+  const purgeColl = async (_t, rel, ok) => { for (const x of await fs.fsList(null, rel)) { if (!ok()) return false; await fs.fsCommit(null, [{ delete: x.name }]); } return true; };
+  assert.equal(await purgePfm(d, "tok", "u1", () => true, purgeColl), true);
+  assert.deepEqual([...fs.docs.keys()].filter((n) => n.includes("u1") || n.includes("/invoices/") || n.includes("/payLinks/")), []);
+});
+
 assert.ok(PFM_OPS.includes("pfm.tx.add"));
 console.log(process.exitCode ? "FAILED" : `pfm-worker: ${n} passed`);

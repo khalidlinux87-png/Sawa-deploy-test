@@ -1,6 +1,6 @@
 # Sawa Wallet: Personal Accountant & Invoicing (PFM) design
 
-Status: rev 7 · **P1 (C263) and P2 (C264) implemented** · Date: 2026-11-06 · Code: `pfm/` (Worker ops wired into `worker-3.js`; UI in `Sawa-app/app.p9.js`)
+Status: rev 8 · **P1 (C263), P2 (C264) and P3 (C266) implemented** · Date: 2026-11-06 · Code: `pfm/` (Worker ops wired into `worker-3.js`; UI in `Sawa-app/app.p9.js`)
 
 This design follows how Sawa is already built:
 
@@ -689,13 +689,30 @@ P1 limits, on purpose:
 
 P2 limits: budgets are in the base currency only and have no rollover yet; pushes in the foreground are not shown as an in-app toast (the Overview card shows them instead).
 
+## 7d. P3 as built (C266)
+
+| Piece | As built |
+|---|---|
+| Business details | `pfm/{uid}.biz` `{ name, contact, address 🔒, taxId 🔒, taxRegistered, taxLabel, taxRates[{id,label,rate}], defaultTaxRateId, invoicePrefix, defaultDueDays, defaultAllowPartial, defaultInvoiceCurrency, defaultPayoutAccountIds, lang }` · `pfm.biz.get/set`. `nextNumber` previews the coming number |
+| Logo | **Changed from §5.7:** no R2 yet, so the logo is a ≤ 150 KB `data:` URI in `pfm/{uid}/files/logo` (as `photo.set` does for photos). The phone shrinks it to ≤ 512 px WebP; the server checks the bytes (`sniffLogo`) and that the declared type matches. Moving it to R2 later only changes `pfm.logo.set` and `inv.html` |
+| Receiving accounts | `pfm/{uid}/payoutAccounts/{id}` (number 🔒, `numberLast4`), bank / mobile money / other; IBANs mod-97 checked; masked in lists; a changed number is audited and pushed to the owner; `sawa_wallet` refused until the wallet exists |
+| Invoices | Top-level `invoices/{iv_…}` (client name/contact/tax ID 🔒, notes 🔒). Drafts: `inv.create/update` (rev), `inv.preview` (server totals while typing), `inv.delete`. `inv.send`: yearly number in one commit (`invoiceSeq.{year}` with updateTime precondition + `invoiceNumbers/{number}` exists:false — three simultaneous sends were tested to give 0001/0002/0003), issuer and accounts snapshot, `payLinks/{token}` for P4. `inv.cancel` (not after payments; revokes the link). `inv.list` (outstanding per currency, overdue count). `inv.get` |
+| Payments | `inv.markPaid` (cash / bank transfer / mobile money / other; idempotency key = payment id; the issuer may record part of the amount whatever `allowPartial` says, since that setting governs payers). Same commit: payment doc, invoice totals/status, ledger income row `tx/i_…` in `c_invoices` (typed rate for a foreign currency, else waiting for one), rollups |
+| PDF | **Changed from §5 / §7:** `inv.html` returns the rendered page; the app prints it through a hidden frame and the phone offers "Save as PDF". `invoice-pdf.mjs` (Browser Rendering → R2 → signed link) stays ready for when the bucket and binding exist |
+| Share | The app shares (or copies) a text with number, amount due, due date, the chosen accounts and the reference line. The pay link joins this text in P4 |
+| Overdue | `pfmCron` → `overdueSweep`: `status == "sent"` and due date before the issuer's local today → `overdue` (audited as `system:cron`) + one push. Overdue invoices can still be paid |
+| UI | Invoices tab: "Clients owe you …" sentence, status filters, list · editor (client, currency, items with per-line tax menu only when tax-registered, whole-invoice discount, issue/due with presets, accounts, "pay in parts", notes, language, live server totals, save draft / send) · detail (status, amount left, items, payments, record payment, print/PDF, share, edit/send/delete draft, cancel) · business details (logo, identity, tax with self-typed rates, prefix with next-number preview, defaults, receiving accounts) |
+| Tests | worker 33 (business, accounts, logo, drafts and tax policy, numbering incl. a forced 3-way race and the new-year reset, payments → ledger, cancel rules, foreign currency, printable page escaping, privacy between users, overdue cron, purge) · `ui-check.mjs` P1–P3 in Chromium, including the printed page |
+
+P3 limits: no line-level discount in the editor (the server supports it); no refunds; the share text has no pay link until P4.
+
 ## 8. Delivery plan
 
 | Phase | Scope | Exit check |
 |---|---|---|
 | **P1** ✅ C263 | Onboarding (base currency, time zone), categories, manual ledger in any currency with user-typed rates, rollups, Overview and Ledger tabs, audit chain | Rollup rebuild = live rollup on test accounts; a USD, a JPY and a KWD entry sum correctly in a EUR base |
 | **P2** ✅ C264 | Budgets and alerts, recurring entries, categorisation rules | The 80 % alert fires once; a recurring entry is suggested, not booked, until confirmed |
-| **P3** | Invoices: business settings (logo, tax toggle, receiving accounts, prefix), editor, send with yearly numbering, PDF, share, record payment (cash/transfer), overdue cron | Totals match between the editor, the PDF and the stored invoice; two sends at once get consecutive numbers; the first invoice in January is `-0001` |
+| **P3** ✅ C266 | Invoices: business settings (logo, tax toggle, receiving accounts, prefix), editor, send with yearly numbering, PDF, share, record payment (cash/transfer), overdue cron | Totals match between the editor, the PDF and the stored invoice; two sends at once get consecutive numbers; the first invoice in January is `-0001` |
 | **P4** | `/pay/{token}`: payment details, "I've paid" transfer claims and issuer confirmation, partial payments, invoice card in chat | A concurrent double tap → one payment; an underfunded wallet → clear error, nothing written; a claim changes nothing until confirmed |
 | **P5** | CSV export, receipt photos | — |
 | *Later* | **Wallet** (decision 13): server-side wallet ledger with one balance per currency (§2.6), auto-sync (§5.1), wallet payment (§5.2). **Cards** (decision 10): provider, bank-account onboarding, checkout, webhook, payout to the issuer's bank, auto-refund on overpayment. **FX** (decision 11): reference-rate feed, wallet conversion with quotes and the chosen margin | Cards: a duplicate webhook → one payment; two full payments at once → one paid, one refunded. FX: a quote can be used once, and an expired one is refused |

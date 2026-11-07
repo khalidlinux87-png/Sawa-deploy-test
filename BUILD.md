@@ -1356,3 +1356,6 @@ Tests: `node pfm/pfm-core.test.mjs` · `node pfm/pfm-worker.test.mjs` · `node p
 
 ## C264 — Personal Accountant P2 (Worker v123-pfm2)
 Budgets with single-fire alerts, recurring entries (suggested until confirmed) with a `pfm` cron job and the `pfmDue/{uid}` index, and category rules. No new secret. Details: `pfm/DESIGN.md` §7c and `Sawa-app/BUILD.md` § C264.
+
+## C266 — Personal Accountant P3: invoices (Worker v124-pfm3)
+Business details, logo (Firestore data URI for now), receiving accounts, drafts, yearly numbering, send/cancel, payments booked to the ledger, printable page (`inv.html`), overdue cron. `pfm/invoice-html.mjs` is now imported by the Worker. Details: `pfm/DESIGN.md` §7d, `Sawa-app/BUILD.md` § C266.

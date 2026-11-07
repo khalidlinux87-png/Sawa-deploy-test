@@ -15,7 +15,7 @@ const src = readFileSync(new URL("../worker-3.js", import.meta.url), "utf8");
 const grab = (name) => { const a = src.indexOf("function " + name + "("); let i = src.indexOf("{", a), depth = 0; for (; i < src.length; i++) { if (src[i] === "{") depth++; else if (src[i] === "}" && --depth === 0) break; } return src.slice(a, i + 1); };
 const { toFsValue, fsToJs } = new Function(grab("toFsValue") + grab("fsToJs") + "; return { toFsValue, fsToJs };")();
 const fs = makeFs(toFsValue, fsToJs);
-const d = { DOC_ROOT: ROOT, toFsValue, fsToJs, getToken: async () => "t", fsGet: fs.fsGet, fsList: fs.fsList, fsQuerySub: fs.fsQuerySub, fsCommit: (...a) => fs.fsCommit(...a) };
+const d = { DOC_ROOT: ROOT, toFsValue, fsToJs, getToken: async () => "t", fsGet: fs.fsGet, fsList: fs.fsList, fsQuerySub: fs.fsQuerySub, runQuery: fs.runQuery, fsCommit: (...a) => fs.fsCommit(...a) };
 const env = { PFM_KEK_v1: Buffer.from(new Uint8Array(32).fill(3)).toString("base64") };
 const op = (o, p) => handlePfmOp(o, "u1", p, env, d);
 
@@ -194,6 +194,77 @@ const auto = (await op("pfm.tx.list", { month: "2026-11" })).items.find((t) => t
 if (!auto || auto.categoryId !== "c_transport") errors.push("rule did not pick Transport");
 const alertsFired = (await op("pfm.alerts.list", {})).alerts.map((a) => a.categoryId + ":" + (a.kind === "pace" ? "pace" : a.bp));
 if (!alertsFired.some((x) => x === "c_food:10000")) errors.push("expected the food 100% alert, got " + alertsFired.join(","));
+
+// ── P3 (Arabic): business details, logo, tax, account, invoice → send → payment → print ──
+{
+  const { ctx, page: pg } = await session("ar", false); const page = pg; const H = pg.locator("#pfmhost");
+  page.on("dialog", (dl) => dl.accept());
+  // a logo file, made here
+  const lp = await ctx.newPage(); await lp.setContent('<div style="width:240px;height:80px;background:#0f766e;color:#fff;font:bold 34px sans-serif;display:flex;align-items:center;justify-content:center;border-radius:12px">KDS</div>');
+  await lp.locator("div").screenshot({ path: `${OUT}/logo.png`, omitBackground: true }); await lp.close();
+  await H.getByRole("heading", { level: 2 }).waitFor();
+  await H.getByRole("tab", { name: "الفواتير" }).click();
+  await H.getByText("لا مبالغ مستحقّة لك الآن").waitFor();
+  await H.getByRole("button", { name: "بيانات النشاط" }).first().click();
+  await H.getByText("اسم النشاط").waitFor();
+  await H.locator('input[type="file"]').setInputFiles(`${OUT}/logo.png`);
+  await H.getByRole("img", { name: "الشعار الحاليّ" }).waitFor();
+  await H.getByLabel("اسم النشاط").fill("استوديو خالد للتصميم");
+  await H.getByLabel("هاتف أو بريد").fill("+966 51 234 5678");
+  await H.getByText("أفرض ضريبة على فواتيري").click();
+  await H.getByLabel("رقمي الضريبيّ").fill("300123456700003");
+  await H.getByLabel("اسم الضريبة كما يظهر على الفاتورة").fill("ضريبة القيمة المضافة");
+  await H.getByRole("button", { name: "＋ نسبة" }).click();
+  await H.getByLabel("اسم النسبة").fill("أساسيّة"); await H.getByLabel("النسبة", { exact: true }).fill("15");
+  await H.getByRole("radio", { name: "افتراضيّة" }).check();
+  await H.getByRole("button", { name: "حفظ بيانات النشاط" }).click();
+  await H.getByText("لا مبالغ مستحقّة لك الآن").waitFor();
+  // receiving account
+  await H.getByRole("button", { name: "بيانات النشاط" }).first().click();
+  await H.getByRole("button", { name: /＋ حساب/ }).click();
+  await H.getByLabel("اسم البنك").fill("مصرف الراجحي");
+  await H.getByLabel("رقم الحساب أو الآيبان").fill("SA03 8000 0000 6080 1016 7519");
+  await H.getByRole("button", { name: "إضافة الحساب" }).click();
+  await H.getByText("•••• 7519").waitFor();
+  await shot(page, "p3-1-business-ar");
+  await H.getByRole("button", { name: "حفظ بيانات النشاط" }).click();
+  // a new invoice
+  await H.getByRole("button", { name: /فاتورة جديدة/ }).click();
+  await H.getByPlaceholder("الاسم", { exact: true }).fill("شركة النيل للتجارة");
+  await H.getByLabel("الوصف").first().fill("تصميم هويّة بصريّة");
+  await H.getByLabel("سعر الوحدة").first().fill("4500");
+  await H.getByRole("button", { name: "＋ بند آخر" }).click();
+  await H.getByLabel("الوصف").nth(1).fill("استضافة شهريّة"); await H.getByLabel("الكمّيّة").nth(1).fill("3"); await H.getByLabel("سعر الوحدة").nth(1).fill("250");
+  if ((await H.getByRole("button", { name: /مصرف الراجحي/ }).getAttribute("aria-pressed")) !== "true") errors.push("the saved account is not pre-selected on a new invoice");
+  await H.getByText("الإجماليّ", { exact: true }).waitFor();
+  await shot(page, "p3-2-editor-ar");
+  const taxSel = await H.locator("select").evaluateAll((els) => els.filter((e) => e.options.length < 10).map((e) => e.selectedOptions[0] && e.selectedOptions[0].text));
+  if (!taxSel.length || !taxSel.every((x) => /15%/.test(x))) errors.push("tax menus don't show the default 15% rate: " + JSON.stringify(taxSel));
+  const total = await H.getByText("الإجماليّ", { exact: true }).locator("xpath=..").innerText();
+  if (!/6,037\.50/.test(total)) errors.push("editor total (4500 + 750 + 15% VAT = 6,037.50) shows: " + total);
+  await H.getByRole("button", { name: "إرسال", exact: true }).click();
+  await H.getByText(/INV-\d{4}-0001/).first().waitFor();
+  // a partial payment
+  await H.getByRole("button", { name: "تسجيل دفعة" }).click();
+  await H.getByLabel(/المبلغ المستلم/).fill("2000");
+  await H.getByRole("button", { name: "سجّل الدفعة" }).click();
+  await H.getByText(/متبقٍّ من/).waitFor();
+  await shot(page, "p3-3-detail-ar");
+  // print: the server renders the page into a hidden frame
+  await H.getByRole("button", { name: "طباعة أو PDF" }).click();
+  await page.waitForFunction(() => [...document.querySelectorAll("iframe")].some((f) => /INV-\d{4}-0001/.test(f.srcdoc || "")));
+  const printed = await page.evaluate(() => [...document.querySelectorAll("iframe")].map((f) => f.srcdoc).find((x) => /INV-/.test(x)));
+  const pp = await ctx.newPage(); await pp.setViewportSize({ width: 794, height: 1100 }); await pp.setContent(printed);
+  await pp.screenshot({ path: `${OUT}/p3-4-printed-ar.png`, fullPage: true }); await pp.pdf({ path: `${OUT}/p3-invoice-ar.pdf`, format: "A4", printBackground: true }); await pp.close();
+  if (!/data:image\/(webp|png)/.test(printed)) errors.push("printed invoice has no logo");
+  if (!printed.includes("SA0380000000608010167519")) errors.push("printed invoice has no account number");
+  await H.getByRole("button", { name: "إغلاق" }).click();
+  await H.getByText(/عند عملائك/).waitFor();
+  await shot(page, "p3-5-invoices-ar");
+  await ctx.close();
+}
+const invs = await op("inv.list", {});
+if (invs.items.length !== 1 || invs.items[0].status !== "sent" || invs.items[0].amountDue !== 403750) errors.push("invoice state: " + JSON.stringify(invs.items));
 
 // ── English, dark: overview of the same data ──
 {

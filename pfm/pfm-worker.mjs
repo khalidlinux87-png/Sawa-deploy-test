@@ -6,6 +6,7 @@
 // The audit head carries an updateTime precondition, so two concurrent writes cannot fork the hash chain;
 // the loser re-reads and retries.
 import * as C from "./pfm-core.mjs";
+import { renderInvoiceHtml } from "./invoice-html.mjs";
 
 const MAX_TRIES = 4;
 const ID_RE = /^[A-Za-z0-9_-]{8,40}$/;
@@ -34,6 +35,23 @@ const OPS = {
   "pfm.recurring.delete": opRecurringDelete,
   "pfm.rule.upsert": opRuleUpsert,
   "pfm.rule.delete": opRuleDelete,
+  // P3: invoices
+  "pfm.biz.get": opBizGet,
+  "pfm.biz.set": opBizSet,
+  "pfm.logo.set": opLogoSet,
+  "pfm.logo.delete": opLogoDelete,
+  "pfm.account.upsert": opAccountUpsert,
+  "pfm.account.archive": opAccountArchive,
+  "inv.preview": opInvPreview,
+  "inv.create": opInvSave,
+  "inv.update": opInvSave,
+  "inv.delete": opInvDelete,
+  "inv.get": opInvGet,
+  "inv.list": opInvList,
+  "inv.send": opInvSend,
+  "inv.cancel": opInvCancel,
+  "inv.markPaid": opInvMarkPaid,
+  "inv.html": opInvHtml,
 };
 export const PFM_OPS = Object.keys(OPS);
 
@@ -436,9 +454,24 @@ async function opAuditList(x) {
 
 // Called by the Worker's purge job. Returns true when everything is gone (false = budget ran out; the job retries).
 export async function purgePfm(d, token, uid, spend, purgeColl) {
-  for (const c of ["tx", "categories", "months", "fxLast", "recurring", "budgets", "alerts", "rules", "idem"])
+  for (const c of ["tx", "categories", "months", "fxLast", "recurring", "budgets", "alerts", "rules", "idem", "payoutAccounts", "files", "invoiceNumbers"])
     if (!(await purgeColl(token, `pfm/${uid}/${c}`, spend))) return false;
   if (!(await purgeColl(token, `audit/${uid}/log`, spend))) return false;
+  // the user's own invoices (issued). Paid invoices are financial records of the client too, but they live
+  // under the issuer here, so they go with the issuer's account (the client keeps their own ledger row).
+  if (d.runQuery) {
+    for (;;) {
+      if (!spend()) return false;
+      const inv = await d.runQuery(token, { from: [{ collectionId: "invoices" }], where: { fieldFilter: { field: { fieldPath: "issuerUid" }, op: "EQUAL", value: { stringValue: uid } } }, limit: 50 });
+      if (!inv.length) break;
+      for (const doc of inv) {
+        const rel = doc.name.slice(d.DOC_ROOT.length + 1);
+        if (!(await purgeColl(token, rel + "/payments", spend))) return false;
+        const tok = doc.fields && doc.fields.payLinkToken && doc.fields.payLinkToken.stringValue;
+        await d.fsCommit(token, [{ delete: doc.name }, ...(tok ? [{ delete: d.DOC_ROOT + "/payLinks/" + tok }] : [])]);
+      }
+    }
+  }
   if (!spend()) return false;
   await d.fsCommit(token, [{ delete: d.DOC_ROOT + `/pfm/${uid}` }, { delete: d.DOC_ROOT + `/audit/${uid}` }, { delete: d.DOC_ROOT + `/pfmDue/${uid}` }]);
   return true;
@@ -771,5 +804,376 @@ export async function pfmCron(env, d, max = 20) {
       users++; rows += r.created;
     } catch (e) { /* one user's failure never stops the others */ }
   }
-  return { users, rows };
+  const overdue = await overdueSweep(env, d, token, max).catch(() => 0);
+  return { users, rows, ...(overdue ? { overdue } : {}) };
+}
+
+// =====================================================================================================
+// P3: business settings · logo · receiving accounts · invoices (draft → sent → paid/overdue/cancelled)
+// =====================================================================================================
+
+const BIZ_SEALED = ["address", "taxId"];
+async function bizOf(x, s) {
+  const b = { name: "", contact: "", address: "", taxId: "", taxRegistered: false, taxLabel: "", taxRates: [], defaultTaxRateId: null,
+    invoicePrefix: "INV", defaultDueDays: 14, defaultAllowPartial: true, defaultInvoiceCurrency: s.baseCurrency, defaultPayoutAccountIds: [], lang: s.locale || "ar", ...(s.biz || {}) };
+  for (const k of BIZ_SEALED) b[k] = b[k] ? await C.openField(b[k], x.uid, keys(x)).catch(() => "") : "";
+  return b;
+}
+async function opBizGet(x) {
+  const s = await settingsOf(x);
+  const [biz, accounts, logo] = await Promise.all([bizOf(x, s), accountsOf(x, true), x.d.fsGet(x.token, `pfm/${x.uid}/files/logo`)]);
+  return { biz, accounts, logo: logo ? js(x, logo).data : null, nextNumber: nextNumberPreview(s, biz) };
+}
+function nextNumberPreview(s, biz) {
+  const today = C.localDate(s.tz), y = today.slice(0, 4);
+  return C.invoiceNumber(biz.invoicePrefix || "INV", today, ((s.invoiceSeq || {})[y] || 0) + 1).number;
+}
+async function opBizSet(x) {
+  const p = x.p;
+  await commitAudited(x, async () => {
+    const s = await settingsOf(x);
+    const cur = s.biz || {};
+    const next = { ...cur };
+    const str = (k, max) => { if (p[k] !== undefined) next[k] = txt(p[k], max, k) || ""; };
+    str("name", 80); str("contact", 120); str("taxLabel", 24);
+    for (const k of BIZ_SEALED) if (p[k] !== undefined) { const v = txt(p[k], k === "address" ? 200 : 40, k); next[k] = v ? await seal(x, v) : ""; }
+    if (p.taxRegistered !== undefined) next.taxRegistered = !!p.taxRegistered;
+    if (p.taxRates !== undefined) {
+      if (!Array.isArray(p.taxRates) || p.taxRates.length > 10) throw new C.PfmError("bad_tax");
+      next.taxRates = p.taxRates.map((r) => ({ id: /^[a-z0-9_]{1,20}$/.test(r.id || "") ? r.id : "t" + rid(6), label: txt(r.label, 24, "label") || "", rate: C.rateText(C.toRate(r.rate)) }));
+    }
+    if (p.defaultTaxRateId !== undefined) next.defaultTaxRateId = p.defaultTaxRateId && (next.taxRates || []).some((r) => r.id === p.defaultTaxRateId) ? p.defaultTaxRateId : null;
+    if (p.invoicePrefix !== undefined) { C.invoiceNumber(p.invoicePrefix, "2000-01-01", 1); next.invoicePrefix = p.invoicePrefix; }
+    if (p.defaultDueDays !== undefined) { if (!Number.isInteger(p.defaultDueDays) || p.defaultDueDays < 0 || p.defaultDueDays > 365) throw new C.PfmError("bad_due_days"); next.defaultDueDays = p.defaultDueDays; }
+    if (p.defaultAllowPartial !== undefined) next.defaultAllowPartial = !!p.defaultAllowPartial;
+    if (p.defaultInvoiceCurrency !== undefined) { C.currencyExp(p.defaultInvoiceCurrency); next.defaultInvoiceCurrency = p.defaultInvoiceCurrency; }
+    if (p.defaultPayoutAccountIds !== undefined) next.defaultPayoutAccountIds = (Array.isArray(p.defaultPayoutAccountIds) ? p.defaultPayoutAccountIds : []).slice(0, 10).map(segId);
+    if (p.lang !== undefined) next.lang = p.lang === "en" ? "en" : "ar";
+    return { writes: [{ update: { name: P(x, `pfm/${x.uid}`), fields: fieldsOf(x, { biz: next, updatedAt: now() }) }, updateMask: { fieldPaths: ["biz", "updatedAt"] }, currentDocument: { updateTime: s._updateTime } }],
+      audit: [{ action: "biz.update", ref: `pfm/${x.uid}`, after: { fields: Object.keys(p).sort() } }], result: null };
+  });
+  return opBizGet(x);
+}
+
+// Logo: a data: URI the phone already shrank (≤ 512 px WebP/PNG/JPEG). The bytes are checked, not the name; SVG is refused.
+async function opLogoSet(x) {
+  const m = /^data:(image\/(png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String(x.p.data || ""));
+  if (!m) throw new C.PfmError("bad_logo", "type");
+  const bytes = Uint8Array.from(atob(m[3]), (c) => c.charCodeAt(0));
+  if (bytes.length > 150 * 1024) throw new C.PfmError("bad_logo", "too_big");
+  const type = C.sniffLogo(bytes);
+  if (type !== m[1]) throw new C.PfmError("bad_logo", "type");
+  const sha = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
+  await commitAudited(x, async () => {
+    await settingsOf(x);
+    return { writes: [{ update: { name: P(x, `pfm/${x.uid}/files/logo`), fields: fieldsOf(x, { data: `data:${type};base64,${m[3]}`, type, sha, size: bytes.length, updatedAt: now() }) } }],
+      audit: [{ action: "logo.set", ref: "files/logo", after: { sha, size: bytes.length } }], result: null };
+  });
+  return { sha, size: bytes.length };
+}
+async function opLogoDelete(x) {
+  await commitAudited(x, async () => ({ writes: [{ delete: P(x, `pfm/${x.uid}/files/logo`) }], audit: [{ action: "logo.delete", ref: "files/logo" }], result: null }));
+  return { deleted: true };
+}
+
+// ---------- receiving accounts ----------
+
+async function accountsOf(x, masked) {
+  const out = [];
+  for (const dd of await x.d.fsList(x.token, `pfm/${x.uid}/payoutAccounts`)) {
+    const a = strip(js(x, dd));
+    const n = a.number ? await C.openField(a.number, x.uid, keys(x)).catch(() => "") : "";
+    out.push({ ...a, number: masked ? C.maskNumber(n) : n });
+  }
+  return out.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+}
+async function opAccountUpsert(x) {
+  const p = x.p;
+  const v = C.validatePayoutAccount(p);
+  let numberChanged = false;
+  if (v.type === "sawa_wallet") throw new C.PfmError("bad_account", "type");   // the wallet account comes with the wallet ledger (deferred)
+  let out;
+  await commitAudited(x, async () => {
+    const old = p.id ? js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/payoutAccounts/${segId(p.id)}`)) : null;
+    if (p.id && !old) throw new C.PfmError("not_found", "account");
+    if (!old && (await x.d.fsList(x.token, `pfm/${x.uid}/payoutAccounts`)).length >= 10) throw new C.PfmError("too_many_accounts");
+    const id = old?.id || "pa_" + rid(10);
+    const doc = { ...v, number: v.number ? await seal(x, v.number) : null, numberLast4: v.number ? v.number.slice(-4) : null, archived: false, createdAt: old?.createdAt || now(), updatedAt: now() };
+    for (const k of Object.keys(doc)) if (doc[k] === undefined) delete doc[k];
+    out = { id, ...doc, number: C.maskNumber(v.number) };
+    // A changed number is a classic way to redirect payments: it is audited and pushed to the owner.
+    numberChanged = !!old && old.numberLast4 !== doc.numberLast4;
+    return { writes: [{ update: { name: P(x, `pfm/${x.uid}/payoutAccounts/${id}`), fields: fieldsOf(x, doc) }, currentDocument: old ? { updateTime: old._updateTime } : { exists: false } }],
+      audit: [{ action: old ? "account.update" : "account.add", ref: `payoutAccounts/${id}`, after: { type: v.type, currency: v.currency, last4: doc.numberLast4, label: v.label } }], result: null };
+  });
+  if (numberChanged && x.d.push) {
+    const s = await settingsOf(x), ar = s.locale !== "en";
+    await x.d.push(x.token, x.uid, ar ? "تغيّرت بيانات حساب استلام" : "Receiving account changed",
+      ar ? `«${out.label}» صار ينتهي بـ ${out.numberLast4}. إن لم تكن أنت، غيّره فوراً.` : `“${out.label}” now ends in ${out.numberLast4}. If this wasn't you, change it now.`).catch(() => 0);
+  }
+  return { account: out };
+}
+async function opAccountArchive(x) {
+  const archived = x.p.archived !== false;
+  await commitAudited(x, async () => {
+    const a = js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/payoutAccounts/${segId(x.p.id)}`));
+    if (!a) throw new C.PfmError("not_found", "account");
+    return { writes: [{ update: { name: P(x, `pfm/${x.uid}/payoutAccounts/${a.id}`), fields: fieldsOf(x, { archived, updatedAt: now() }) }, updateMask: { fieldPaths: ["archived", "updatedAt"] }, currentDocument: { updateTime: a._updateTime } }],
+      audit: [{ action: archived ? "account.archive" : "account.restore", ref: `payoutAccounts/${a.id}` }], result: null };
+  });
+  return { id: x.p.id, archived };
+}
+
+// ---------- invoices ----------
+
+const INV_ID = /^iv_[a-z0-9]{12}$/;
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
+const addDaysTo = (d, n) => new Date(Date.parse(d + "T00:00:00Z") + n * 86400000).toISOString().slice(0, 10);
+
+// Normalises the editor's input into stored items + options, applying the issuer's tax setting.
+function invoiceInputs(biz, p, currency) {
+  if (!Array.isArray(p.items) || !p.items.length || p.items.length > 200) throw new C.PfmError("bad_items");
+  const items = p.items.map((it, i) => {
+    const description = txt(it.description, 200, "description");
+    if (!description) throw new C.PfmError("bad_items", "line " + (i + 1) + ": description");
+    const unitPrice = typeof it.unitPrice === "number" ? it.unitPrice : C.toMinor(it.unitPrice ?? "", currency);
+    const out = { description, qty: String(it.qty ?? "1"), unitPrice };
+    if (it.discount && it.discount.type === "pct" && it.discount.rate) out.discount = { type: "pct", rate: C.rateText(C.toRate(it.discount.rate)) };
+    if (it.discount && it.discount.type === "amt" && (it.discount.amount || it.discount.minor))   // editor sends text, a stored draft has minor units
+      out.discount = { type: "amt", minor: Number.isSafeInteger(it.discount.minor) ? it.discount.minor : C.toMinor(it.discount.amount, currency) };
+    if (it.taxRate != null && it.taxRate !== "") out.taxRate = String(it.taxRate);
+    if (it.taxRateId) out.taxRateId = it.taxRateId;
+    return out;
+  });
+  const pol = C.applyTaxPolicy({ taxRegistered: biz.taxRegistered, taxRates: biz.taxRates, taxLabel: biz.taxLabel }, items, { taxInclusive: !!p.taxInclusive, taxLabel: p.taxLabel });
+  let invoiceDiscount = null;
+  if (p.invoiceDiscount && p.invoiceDiscount.type === "pct" && p.invoiceDiscount.rate) invoiceDiscount = { type: "pct", rate: C.rateText(C.toRate(p.invoiceDiscount.rate)) };
+  if (p.invoiceDiscount && p.invoiceDiscount.type === "amt" && (p.invoiceDiscount.amount || p.invoiceDiscount.minor))
+    invoiceDiscount = { type: "amt", minor: Number.isSafeInteger(p.invoiceDiscount.minor) ? p.invoiceDiscount.minor : C.toMinor(p.invoiceDiscount.amount, currency) };
+  return { items: pol.items, taxInclusive: pol.taxInclusive, taxLabel: pol.taxLabel, invoiceDiscount };
+}
+const totalsOf = (inv) => C.computeInvoice(inv.items, { currency: inv.currency, invoiceDiscount: inv.invoiceDiscount, taxInclusive: inv.taxInclusive, amountPaid: inv.amountPaid || 0 });
+
+async function opInvPreview(x) {
+  const s = await settingsOf(x), biz = await bizOf(x, s);
+  const currency = x.p.currency || biz.defaultInvoiceCurrency;
+  C.currencyExp(currency);
+  const v = invoiceInputs(biz, x.p, currency);
+  return { totals: C.computeInvoice(v.items, { currency, invoiceDiscount: v.invoiceDiscount, taxInclusive: v.taxInclusive }), taxLabel: v.taxLabel };
+}
+
+async function loadInvoice(x, id, { draftOnly } = {}) {
+  if (!INV_ID.test(id || "")) throw new C.PfmError("bad_id");
+  const inv = js(x, await x.d.fsGet(x.token, `invoices/${id}`));
+  if (!inv || inv.issuerUid !== x.uid) throw new C.PfmError("not_found", "invoice");   // another user's invoice looks like none
+  if (draftOnly && inv.status !== "draft") throw new C.PfmError("not_draft", "a sent invoice can't be edited; cancel it and issue a new one");
+  return inv;
+}
+
+// create (no id) or update a draft
+async function opInvSave(x) {
+  const p = x.p;
+  let out;
+  await commitAudited(x, async () => {
+    const s = await settingsOf(x), biz = await bizOf(x, s);
+    const old = p.id ? await loadInvoice(x, p.id, { draftOnly: true }) : null;
+    if (old && p.rev !== old.rev) throw new C.PfmError("stale", "reload and try again");
+    const currency = p.currency || old?.currency || biz.defaultInvoiceCurrency;
+    C.currencyExp(currency);
+    const v = invoiceInputs(biz, p.items ? p : { ...old, ...p, items: old.items }, currency);
+    const today = C.localDate(s.tz);
+    const issueDate = p.issueDate || old?.issueDate || today;
+    const dueDate = p.dueDate || old?.dueDate || addDaysTo(issueDate, biz.defaultDueDays);
+    if (!DATE.test(issueDate) || !DATE.test(dueDate) || dueDate < issueDate) throw new C.PfmError("bad_date");
+    const c = p.client || {};
+    const cname = txt(c.name ?? (old ? null : ""), 120, "client");
+    if (!old && !cname) throw new C.PfmError("bad_client", "client name");
+    const accounts = await accountsOf(x, true);
+    const ids = (p.payoutAccountIds ?? old?.payoutAccountIds ?? biz.defaultPayoutAccountIds ?? []).filter((id) => accounts.some((a) => a.id === id && !a.archived));
+    const totals = C.computeInvoice(v.items, { currency, invoiceDiscount: v.invoiceDiscount, taxInclusive: v.taxInclusive });
+    const id = old?.id || "iv_" + rid(12);
+    const doc = { issuerUid: x.uid, status: "draft", number: null, lang: p.lang || old?.lang || biz.lang, currency, issueDate, dueDate,
+      client: { name: cname != null ? await seal(x, cname) : old.client.name, contact: c.contact !== undefined ? await seal(x, txt(c.contact, 120, "contact") || "") : old?.client?.contact || "",
+        taxId: c.taxId !== undefined ? await seal(x, txt(c.taxId, 40, "taxId") || "") : old?.client?.taxId || "" },
+      items: v.items, invoiceDiscount: v.invoiceDiscount, taxInclusive: v.taxInclusive, taxLabel: v.taxLabel,
+      allowPartial: p.allowPartial ?? old?.allowPartial ?? biz.defaultAllowPartial, payoutAccountIds: ids,
+      notes: p.notes !== undefined ? await seal(x, txt(p.notes, 1000, "notes") || "") : old?.notes || "",
+      totals: { ...totals, lines: undefined }, amountPaid: 0, rev: (old?.rev || 0) + 1, createdAt: old?.createdAt || now(), updatedAt: now() };
+    delete doc.totals.lines;
+    out = { id, ...doc };
+    return { writes: [{ update: { name: P(x, `invoices/${id}`), fields: fieldsOf(x, doc) }, currentDocument: old ? { updateTime: old._updateTime } : { exists: false } }],
+      audit: [{ action: old ? "invoice.update" : "invoice.create", ref: `invoices/${id}`, after: { total: totals.total, currency, items: v.items.length } }], result: null };
+  });
+  return { invoice: await presentInvoice(x, out) };
+}
+
+async function opInvDelete(x) {
+  await commitAudited(x, async () => {
+    const inv = await loadInvoice(x, x.p.id, { draftOnly: true });
+    return { writes: [{ delete: P(x, `invoices/${inv.id}`) }], audit: [{ action: "invoice.delete", ref: `invoices/${inv.id}` }], result: null };
+  });
+  return { id: x.p.id, deleted: true };
+}
+
+async function presentInvoice(x, inv, withPayments) {
+  const o = strip(inv);
+  const open = (v) => (v ? C.openField(v, x.uid, keys(x)).catch(() => "") : "");
+  o.client = { name: await open(inv.client?.name), contact: await open(inv.client?.contact), taxId: await open(inv.client?.taxId) };
+  o.notes = await open(inv.notes);
+  if (o.issuer) o.issuer = { ...o.issuer, address: await open(o.issuer.address), taxId: await open(o.issuer.taxId) };
+  if (Array.isArray(o.payoutAccounts)) o.payoutAccounts = await Promise.all(o.payoutAccounts.map(async (a) => ({ ...a, number: await open(a.number) })));
+  o.totals = totalsOf(inv);
+  if (withPayments) o.payments = (await x.d.fsList(x.token, `invoices/${inv.id}/payments`)).map((dd) => strip(js(x, dd))).sort((a, b) => (a.at < b.at ? -1 : 1));
+  return o;
+}
+async function opInvGet(x) {
+  return { invoice: await presentInvoice(x, await loadInvoice(x, x.p.id), true) };
+}
+async function opInvList(x) {
+  const docs = await x.d.runQuery(x.token, { from: [{ collectionId: "invoices" }],
+    where: { fieldFilter: { field: { fieldPath: "issuerUid" }, op: "EQUAL", value: { stringValue: x.uid } } }, limit: 500 });
+  let list = docs.map((dd) => js(x, dd));
+  if (x.p.status) list = list.filter((i) => i.status === x.p.status);
+  list.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+  const items = await Promise.all(list.map(async (i) => ({ id: i.id, status: i.status, number: i.number, currency: i.currency, issueDate: i.issueDate, dueDate: i.dueDate,
+    clientName: i.client?.name ? await C.openField(i.client.name, x.uid, keys(x)).catch(() => "") : "", total: i.totals.total, amountPaid: i.amountPaid || 0,
+    amountDue: i.totals.total - (i.amountPaid || 0), updatedAt: i.updatedAt })));
+  const sum = (st) => items.filter((i) => st.includes(i.status));
+  return { items, outstanding: byCurrency(sum(["sent", "overdue"]), "amountDue"), overdue: sum(["overdue"]).length };
+}
+function byCurrency(list, field) { const m = {}; for (const i of list) m[i.currency] = (m[i.currency] || 0) + i[field]; return Object.entries(m).map(([currency, amount]) => ({ currency, amount })); }
+
+// draft → sent: number (yearly sequence), snapshots, pay-link token. One commit.
+async function opInvSend(x) {
+  let out;
+  await commitAudited(x, async () => {
+    const inv = await loadInvoice(x, x.p.id, { draftOnly: true });
+    C.assertTransition(inv.status, "sent");
+    const s = await settingsOf(x), biz = await bizOf(x, s);
+    if (!biz.name) throw new C.PfmError("business_name_missing");
+    const issueDate = inv.issueDate, year = issueDate.slice(0, 4);
+    const seq = ((s.invoiceSeq || {})[year] || 0) + 1;
+    const { number } = C.invoiceNumber(biz.invoicePrefix || "INV", issueDate, seq);
+    const accounts = await accountsOf(x, false);
+    const chosen = C.accountsForInvoice(accounts, inv.payoutAccountIds || [], inv.currency);
+    const token = rid(22);
+    const sentAt = now();
+    const issuer = { name: biz.name, contact: biz.contact, address: biz.address ? await seal(x, biz.address) : "", taxId: biz.taxId ? await seal(x, biz.taxId) : "" };
+    const payoutAccounts = await Promise.all(chosen.map(async (a) => ({ id: a.id, type: a.type, currency: a.currency, label: a.label, holderName: a.holderName || null,
+      bankName: a.bankName || null, provider: a.provider || null, branch: a.branch || null, details: a.details || null, number: a.number ? await seal(x, a.number) : null })));
+    const patch = { status: "sent", number, issuer, payoutAccounts, payLinkToken: token, sentAt, rev: inv.rev + 1, updatedAt: sentAt };
+    out = { ...inv, ...patch };
+    return {
+      writes: [
+        { update: { name: P(x, `pfm/${x.uid}`), fields: fieldsOf(x, { invoiceSeq: { ...(s.invoiceSeq || {}), [year]: seq } }) }, updateMask: { fieldPaths: ["invoiceSeq"] }, currentDocument: { updateTime: s._updateTime } },
+        { update: { name: P(x, `pfm/${x.uid}/invoiceNumbers/${number}`), fields: fieldsOf(x, { invoiceId: inv.id, at: sentAt }) }, currentDocument: { exists: false } },
+        { update: { name: P(x, `invoices/${inv.id}`), fields: fieldsOf(x, patch) }, updateMask: { fieldPaths: Object.keys(patch) }, currentDocument: { updateTime: inv._updateTime } },
+        { update: { name: P(x, `payLinks/${token}`), fields: fieldsOf(x, { invoiceId: inv.id, issuerUid: x.uid, createdAt: sentAt, revoked: false }) }, currentDocument: { exists: false } },
+      ],
+      audit: [{ action: "invoice.status", ref: `invoices/${inv.id}`, before: { status: "draft" }, after: { status: "sent", number } }], result: null };
+  });
+  return { invoice: await presentInvoice(x, out, true) };
+}
+
+async function opInvCancel(x) {
+  let out;
+  await commitAudited(x, async () => {
+    const inv = await loadInvoice(x, x.p.id);
+    C.assertTransition(inv.status, "cancelled");
+    if ((inv.amountPaid || 0) > 0) throw new C.PfmError("has_payments", "record a refund instead");
+    const reason = txt(x.p.reason, 200, "reason") || "";
+    const patch = { status: "cancelled", cancelledAt: now(), cancelReason: reason ? await seal(x, reason) : "", rev: inv.rev + 1, updatedAt: now() };
+    out = { ...inv, ...patch };
+    const writes = [{ update: { name: P(x, `invoices/${inv.id}`), fields: fieldsOf(x, patch) }, updateMask: { fieldPaths: Object.keys(patch) }, currentDocument: { updateTime: inv._updateTime } }];
+    if (inv.payLinkToken) writes.push({ update: { name: P(x, `payLinks/${inv.payLinkToken}`), fields: fieldsOf(x, { revoked: true }) }, updateMask: { fieldPaths: ["revoked"] } });
+    return { writes, audit: [{ action: "invoice.status", ref: `invoices/${inv.id}`, before: { status: inv.status }, after: { status: "cancelled" } }], result: null };
+  });
+  return { invoice: await presentInvoice(x, out, true) };
+}
+
+// The issuer records money received outside Sawa (cash, bank, mobile money). The payment document id is the
+// client's idempotency key, so a double tap records one payment. The same commit books the income in the ledger.
+const PAY_METHODS = ["cash", "bank_transfer", "mobile_money", "other"];
+async function opInvMarkPaid(x) {
+  const p = x.p;
+  if (!ID_RE.test(p.idemKey || "")) throw new C.PfmError("bad_idem_key");
+  if (!PAY_METHODS.includes(p.method)) throw new C.PfmError("bad_method");
+  let out;
+  await commitAudited(x, async () => {
+    const inv = await loadInvoice(x, p.id);
+    const payId = "p_" + p.idemKey;
+    if (await x.d.fsGet(x.token, `invoices/${inv.id}/payments/${payId}`)) { out = inv; return { result: null }; }
+    const s = await settingsOf(x), cats = await categoryMap(x);
+    const amount = C.toMinor(p.amount, inv.currency);
+    // The issuer may always record part of the money; allowPartial governs what a payer can choose.
+    const next = C.applyPayment({ status: inv.status, total: inv.totals.total, amountPaid: inv.amountPaid || 0, allowPartial: true }, amount);
+    const paidAt = p.paidAt || C.localDate(s.tz);
+    if (!DATE.test(paidAt)) throw new C.PfmError("bad_date");
+    const reference = txt(p.reference, 80, "reference") || "";
+    const pay = { amount, currency: inv.currency, method: p.method, state: "succeeded", at: paidAt, reference: reference ? await seal(x, reference) : "",
+      payoutAccountId: p.payoutAccountId || null, recordedAt: now() };
+    const tx = await buildTx(x, s, cats, { kind: "income", amount: C.fromMinor(amount, inv.currency), currency: inv.currency, fxRate: p.fxRate, categoryId: "c_invoices",
+      date: paidAt, counterparty: inv.client?.name ? await C.openField(inv.client.name, x.uid, keys(x)).catch(() => null) : null, note: inv.number || null, source: "invoice" }, null);
+    const txRow = { ...tx, invoiceId: inv.id, autoCategorized: false, rev: 1, createdAt: now(), updatedAt: now() };
+    const patch = { amountPaid: next.amountPaid, status: next.status, rev: inv.rev + 1, updatedAt: now(), ...(next.status === "paid" ? { paidAt } : {}) };
+    out = { ...inv, ...patch };
+    const writes = [
+      { update: { name: P(x, `invoices/${inv.id}/payments/${payId}`), fields: fieldsOf(x, pay) }, currentDocument: { exists: false } },
+      { update: { name: P(x, `invoices/${inv.id}`), fields: fieldsOf(x, patch) }, updateMask: { fieldPaths: Object.keys(patch) }, currentDocument: { updateTime: inv._updateTime } },
+      { update: { name: P(x, `pfm/${x.uid}/tx/i_${inv.id.slice(3)}_${payId}`), fields: fieldsOf(x, txRow) }, currentDocument: { exists: false } },
+      ...rollupWrites(x, C.rollupDiff(null, txRow)),
+    ];
+    if (!s.hasTx) writes.push({ update: { name: P(x, `pfm/${x.uid}`), fields: fieldsOf(x, { hasTx: true }) }, updateMask: { fieldPaths: ["hasTx"] } });
+    return { writes, audit: [{ action: "invoice.payment", ref: `invoices/${inv.id}`, after: { amount, method: p.method, status: next.status } }], result: null };
+  });
+  return { invoice: await presentInvoice(x, out, true) };
+}
+
+// Printable page (issuer only). The phone prints it to PDF; the Browser Rendering pipeline (invoice-pdf.mjs)
+// can take over once its R2 bucket and binding exist.
+async function opInvHtml(x) {
+  const inv = await presentInvoice(x, await loadInvoice(x, x.p.id));
+  const s = await settingsOf(x), biz = await bizOf(x, s);
+  const logo = js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/files/logo`));
+  const issuer = inv.status === "draft" ? { name: biz.name, contact: biz.contact, address: biz.address, taxId: biz.taxId } : inv.issuer;
+  let accounts = inv.payoutAccounts;
+  if (inv.status === "draft") accounts = C.accountsForInvoice(await accountsOf(x, false), inv.payoutAccountIds || [], inv.currency);
+  const lang = x.p.lang === "en" || x.p.lang === "ar" ? x.p.lang : inv.lang;
+  const html = renderInvoiceHtml({ ...inv, lang, number: inv.number || (lang === "ar" ? "مسوّدة" : "Draft"), issuer: { ...issuer, logoDataUri: logo ? logo.data : null },
+    client: inv.client, payoutAccounts: accounts, methods: [], payUrl: null }, inv.totals);
+  return { html, number: inv.number, status: inv.status };
+}
+
+// Cron: sent invoices past their due date (in the issuer's time zone) become overdue; the issuer is told once.
+async function overdueSweep(env, d, token, max) {
+  const docs = await d.runQuery(token, { from: [{ collectionId: "invoices" }],
+    where: { fieldFilter: { field: { fieldPath: "status" }, op: "EQUAL", value: { stringValue: "sent" } } }, limit: Math.max(max * 5, 50) });
+  const zones = new Map(); let n = 0;
+  for (const doc of docs) {
+    const inv0 = { ...Object.fromEntries(Object.entries(doc.fields || {}).map(([k, v]) => [k, d.fsToJs(v)])) };
+    const uid = inv0.issuerUid;
+    const x = { uid, env, d, token, p: {} };
+    try {
+      if (!zones.has(uid)) zones.set(uid, await settingsOf(x, false));
+      const s = zones.get(uid); if (!s) continue;
+      if (!C.isOverdue(inv0, C.localDate(s.tz))) continue;
+      let flipped = false;
+      await commitAudited(x, async () => {
+        const inv = js(x, await d.fsGet(token, `invoices/${doc.name.split("/").pop()}`));
+        if (!inv || inv.status !== "sent") return { result: null };
+        flipped = true;
+        return { writes: [{ update: { name: P(x, `invoices/${inv.id}`), fields: fieldsOf(x, { status: "overdue", overdueAt: now(), updatedAt: now() }) }, updateMask: { fieldPaths: ["status", "overdueAt", "updatedAt"] }, currentDocument: { updateTime: inv._updateTime } }],
+          audit: [{ action: "invoice.status", ref: `invoices/${inv.id}`, before: { status: "sent" }, after: { status: "overdue" }, actor: "system:cron" }], result: null };
+      });
+      if (flipped) {
+        n++;
+        if (d.push) {
+          const ar = s.locale !== "en";
+          await d.push(token, uid, ar ? `الفاتورة ${inv0.number} متأخّرة` : `Invoice ${inv0.number} is overdue`,
+            ar ? `كان استحقاقها ${inv0.dueDate}. سجّل الدفعة إن وصلتك، أو ذكّر العميل.` : `It was due on ${inv0.dueDate}. Record the payment if it arrived, or remind the client.`).catch(() => 0);
+        }
+      }
+    } catch (e) { /* next invoice */ }
+  }
+  return n;
 }
