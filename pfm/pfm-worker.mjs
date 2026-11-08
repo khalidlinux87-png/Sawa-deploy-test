@@ -56,6 +56,11 @@ const OPS = {
   "inv.claim.decide": opClaimDecide,
   "inv.claim.proof": opClaimProof,
   "inv.link": opInvLink,
+  // P5
+  "pfm.tx.receipt.set": opReceiptSet,
+  "pfm.tx.receipt.get": opReceiptGet,
+  "pfm.tx.receipt.delete": opReceiptDelete,
+  "pfm.export": opExport,
 };
 export const PFM_OPS = Object.keys(OPS);
 
@@ -295,7 +300,7 @@ async function buildTx(x, s, cats, input, base) {
   const sealOr = async (k, max) => (input[k] !== undefined ? await seal(x, txt(input[k], max, k)) : base?.[k] ?? null);
   return { kind, amount, currency, baseAmount, fxRate, fxSource, categoryId, date, month,
     note: await sealOr("note", 300), counterparty: await sealOr("counterparty", 80),
-    source: base?.source || input.source || "manual", status: input.status || base?.status || "booked", deleted: false };
+    source: base?.source || input.source || "manual", status: input.status || base?.status || "booked", deleted: false, hasReceipt: !!base?.hasReceipt };
 }
 
 async function opTxAdd(x) {
@@ -367,10 +372,11 @@ async function opTxUpdate(x) {
 async function opTxDelete(x) {
   await commitAudited(x, async () => {
     const old = await loadTxForEdit(x);
-    const nx = { ...strip(old), deleted: true, rev: old.rev + 1, updatedAt: now() }; delete nx.id;
+    const nx = { ...strip(old), deleted: true, hasReceipt: false, rev: old.rev + 1, updatedAt: now() }; delete nx.id;
     return {
       writes: [{ update: { name: P(x, `pfm/${x.uid}/tx/${old.id}`), fields: fieldsOf(x, nx) }, currentDocument: { updateTime: old._updateTime } },
-        ...rollupWrites(x, C.rollupDiff(old, nx))],
+        ...rollupWrites(x, C.rollupDiff(old, nx)),
+        ...(old.hasReceipt ? [{ delete: P(x, `pfm/${x.uid}/files/r_${old.id}`) }] : [])],
       audit: [{ action: "tx.delete", ref: `tx/${old.id}`, before: auditView(old) }],
       result: null,
     };
@@ -1364,4 +1370,104 @@ async function claimsOf(x) {
   if (!x.d.runQuery) return 0;
   const docs = await x.d.runQuery(x.token, { from: [{ collectionId: "invoices" }], where: { fieldFilter: { field: { fieldPath: "issuerUid" }, op: "EQUAL", value: { stringValue: x.uid } } }, limit: 500 }).catch(() => []);
   return docs.reduce((a, dd) => a + (Number(dd.fields && dd.fields.openClaims && dd.fields.openClaims.integerValue) || 0), 0);
+}
+
+// =====================================================================================================
+// P5: receipt photos on ledger entries · CSV export
+// =====================================================================================================
+
+// A data: URI image, judged by its bytes. Shared by receipts; the size is checked before decoding.
+export function checkImageData(data, code, max) {
+  const m = /^data:(image\/(png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String(data || ""));
+  if (!m) throw new C.PfmError(code, "type");
+  if (m[3].length > Math.ceil(max / 3) * 4 + 4) throw new C.PfmError(code, "too_big");
+  const bytes = Uint8Array.from(atob(m[3]), (c) => c.charCodeAt(0));
+  if (bytes.length > max) throw new C.PfmError(code, "too_big");
+  let type; try { type = C.sniffLogo(bytes); } catch { throw new C.PfmError(code, "type"); }
+  if (type !== m[1]) throw new C.PfmError(code, "type");
+  return { type, b64: m[3], bytes };
+}
+
+// One photo per entry at pfm/{uid}/files/r_{txId}, sealed like notes (a receipt can show card digits or an
+// address). ≤ 400 KB: the phone shrinks it to ≤ 1280 px JPEG first. The row only carries hasReceipt.
+export const RECEIPT_MAX = 400 * 1024;
+const receiptPath = (x, id) => `pfm/${x.uid}/files/r_${id}`;
+async function loadLiveTx(x) {
+  const id = segId(x.p.id);
+  const tx = js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/tx/${id}`));
+  if (!tx || tx.deleted) throw new C.PfmError("not_found", "transaction");
+  return tx;
+}
+async function opReceiptSet(x) {
+  const img = checkImageData(x.p.data, "bad_receipt", RECEIPT_MAX);
+  const sha = [...new Uint8Array(await crypto.subtle.digest("SHA-256", img.bytes))].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
+  const sealed = await seal(x, `data:${img.type};base64,${img.b64}`);
+  await commitAudited(x, async () => {
+    const tx = await loadLiveTx(x);
+    return { writes: [
+        { update: { name: P(x, receiptPath(x, tx.id)), fields: fieldsOf(x, { data: sealed, type: img.type, sha, size: img.bytes.length, txId: tx.id, updatedAt: now() }) } },
+        { update: { name: P(x, `pfm/${x.uid}/tx/${tx.id}`), fields: fieldsOf(x, { hasReceipt: true }) }, updateMask: { fieldPaths: ["hasReceipt"] }, currentDocument: { updateTime: tx._updateTime } }],
+      audit: [{ action: "tx.receipt.set", ref: `tx/${tx.id}`, after: { sha, size: img.bytes.length } }], result: null };
+  });
+  return { id: x.p.id, hasReceipt: true, sha, size: img.bytes.length };
+}
+async function opReceiptGet(x) {
+  const id = segId(x.p.id);
+  const f = js(x, await x.d.fsGet(x.token, receiptPath(x, id)));
+  if (!f) return { id, data: null };
+  return { id, data: await C.openField(f.data, x.uid, keys(x)), type: f.type, size: f.size };
+}
+async function opReceiptDelete(x) {
+  await commitAudited(x, async () => {
+    const tx = await loadLiveTx(x);
+    if (!tx.hasReceipt) return { result: null };
+    return { writes: [
+        { delete: P(x, receiptPath(x, tx.id)) },
+        { update: { name: P(x, `pfm/${x.uid}/tx/${tx.id}`), fields: fieldsOf(x, { hasReceipt: false }) }, updateMask: { fieldPaths: ["hasReceipt"] }, currentDocument: { updateTime: tx._updateTime } }],
+      audit: [{ action: "tx.receipt.delete", ref: `tx/${tx.id}` }], result: null };
+  });
+  return { id: x.p.id, hasReceipt: false };
+}
+
+// CSV of booked entries for budget months from..to (≤ 24). Returned in the response; the app saves it as a
+// file (no R2 yet, as with the logo). UTF-8 with a BOM so spreadsheet apps read Arabic correctly. Suggested rows
+// (not confirmed) and deleted rows are left out. Text cells that a spreadsheet would run as a formula get a
+// leading apostrophe.
+export const EXPORT_CAP = 5000;
+export function csvCell(v, text) {
+  let s = v == null ? "" : String(v);
+  if (text && /^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",\r\n]/.test(s) || /^\s|\s$/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+async function opExport(x) {
+  const s = await settingsOf(x);
+  const cur = C.budgetMonth(C.localDate(s.tz), s.monthStartDay);
+  const to = x.p.to || cur, from = x.p.from || to;
+  const months = monthRange(from, to);
+  const ar = (x.p.lang || (s.locale === "en" ? "en" : "ar")) !== "en";
+  const cats = await categoryMap(x);
+  let rows = [], truncated = false;
+  for (const m of months) {
+    const docs = await x.d.fsQuerySub(x.token, `pfm/${x.uid}`, "tx", [["month", "EQUAL", m]], LIST_CAP);
+    if (docs.length >= LIST_CAP) truncated = true;
+    for (const dd of docs) { const t = js(x, dd); if (!t.deleted && t.status === "booked") rows.push(t); }
+    if (rows.length > EXPORT_CAP) { truncated = true; break; }
+  }
+  rows.sort((a, b) => (a.date === b.date ? (a.createdAt < b.createdAt ? -1 : 1) : a.date < b.date ? -1 : 1));
+  if (rows.length > EXPORT_CAP) rows = rows.slice(0, EXPORT_CAP);
+  const base = s.baseCurrency;
+  const head = ar
+    ? ["التاريخ", "النوع", "الفئة", "المبلغ", "العملة", "المبلغ بـ" + base, "سعر الصرف", "الطرف", "ملاحظة", "إيصال"]
+    : ["Date", "Type", "Category", "Amount", "Currency", "Amount in " + base, "Exchange rate", "Paid to / from", "Note", "Receipt"];
+  const lines = [head.map((h) => csvCell(h, true)).join(",")];
+  for (const r of rows) {
+    const t = await present(x, r), c = cats.get(t.categoryId);
+    const cat = c ? (ar ? c.nameAr || c.name : c.name) : "";
+    const type = t.kind === "income" ? (ar ? "دخل" : "Income") : (ar ? "مصروف" : "Expense");
+    lines.push([csvCell(t.date), csvCell(type, true), csvCell(cat, true), csvCell(C.fromMinor(t.amount, t.currency)), csvCell(t.currency),
+      csvCell(t.baseAmount == null ? "" : C.fromMinor(t.baseAmount, base)), csvCell(t.baseAmount == null ? "" : t.fxRate),
+      csvCell(t.counterparty, true), csvCell(t.note, true), csvCell(t.hasReceipt ? (ar ? "نعم" : "yes") : "")].join(","));
+  }
+  return { filename: `sawa-accountant-${months[0]}_${months[months.length - 1]}.csv`, csv: "﻿" + lines.join("\r\n") + "\r\n",
+    rows: rows.length, truncated, from: months[0], to: months[months.length - 1] };
 }

@@ -1362,3 +1362,9 @@ Business details, logo (Firestore data URI for now), receiving accounts, drafts,
 
 ## C267 — Personal Accountant P4: public pay page (Worker v125-pfm4)
 `POST /pfm/pay` (no auth) with `pay.view` / `pay.claim`; issuer ops `inv.claim.decide`, `inv.claim.proof`, `inv.link`. The page is `Sawa-app/pay.html`. Details: `pfm/DESIGN.md` §7e, `Sawa-app/BUILD.md` § C267.
+
+## C268 — accepted currencies
+`pfm-core.mjs` `ALLOWED_CURRENCIES`; anything else answers `bad_currency`. Details: `pfm/DESIGN.md` decision 8.
+
+## C269 — Personal Accountant P5: receipt photos and CSV export; KWD and JPY
+`pfm.tx.receipt.set/get/delete` (sealed photo per entry in `pfm/{uid}/files/r_{txId}`), `pfm.export` (CSV in the response). Currencies now twelve (KWD, JPY added). Fix: `sealField` base64 no longer overflows on large input. No new secret, no Firestore rules. Tests: core 29 · worker 42 · ui-check P1–P5. Details: `pfm/DESIGN.md` §7f, `Sawa-app/BUILD.md` § C269.

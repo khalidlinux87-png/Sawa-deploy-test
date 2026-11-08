@@ -3,10 +3,11 @@
 // Floats never touch money. Products of quantity and price use BigInt.
 
 // The currencies Sawa accepts: Sudanese pound, US dollar, Chinese yuan, Qatari riyal, Saudi riyal,
-// UAE dirham, pound sterling, Canadian dollar, Omani riyal, Egyptian pound. Nothing else is accepted.
-// The number of decimals comes from Intl (CLDR), e.g. USD 2, OMR 3. EXP_OVERRIDE pins a currency if
-// the product needs a different number of decimals than CLDR, and must never change once money is stored in it.
-export const ALLOWED_CURRENCIES = Object.freeze(["SDG", "USD", "CNY", "QAR", "SAR", "AED", "GBP", "CAD", "OMR", "EGP"]);
+// UAE dirham, pound sterling, Canadian dollar, Omani riyal, Egyptian pound, Kuwaiti dinar, Japanese yen.
+// Nothing else is accepted. The number of decimals comes from Intl (CLDR): JPY 0, OMR and KWD 3, the rest 2.
+// EXP_OVERRIDE pins a currency if the product needs a different number of decimals than CLDR, and must never
+// change once money is stored in it. Adding a currency here also needs it in the app's list (app.p9.js CURS).
+export const ALLOWED_CURRENCIES = Object.freeze(["SDG", "USD", "CNY", "QAR", "SAR", "AED", "GBP", "CAD", "OMR", "EGP", "KWD", "JPY"]);
 const EXP_OVERRIDE = {};
 const CUR_SET = new Set(ALLOWED_CURRENCIES);
 const expCache = new Map();
@@ -596,7 +597,8 @@ export async function verifyChain(entries) {
 // Each user's key comes from a master secret (Worker secret PFM_KEK_v{n}) by HKDF over the uid.
 // Ciphertext format: "v1:<keyVersion>:<b64 iv>:<b64 ct>". The uid is bound in as AAD,
 // so a ciphertext copied into another user's document fails to decrypt.
-const b64 = (u8) => btoa(String.fromCharCode(...u8));
+// In chunks: spreading a large array into fromCharCode overflows the call stack (a 400 KB receipt photo did).
+const b64 = (u8) => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
 const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 async function userKey(masterB64, uid) {
   const ikm = await crypto.subtle.importKey("raw", unb64(masterB64), "HKDF", false, ["deriveKey"]);

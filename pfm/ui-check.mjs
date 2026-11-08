@@ -86,7 +86,7 @@ const mount = (page, dark) => page.waitForFunction(() => window.SawaApp && typeo
   await add("s4", "expense", "180", "c_telecom", "2026-11-04", { counterparty: "STC" });
   await add("s5", "income", "1500", "c_freelance", "2026-11-05", { note: "تصميم شعار" });
   await add("s6", "expense", "60", "c_transport", "2026-11-05", { currency: "USD", fxRate: "3.75", counterparty: "Uber" });
-  await add("s7", "expense", "25", "c_food", "2026-11-06", { currency: "EUR" });
+  await add("s7", "expense", "25", "c_food", "2026-11-06", { currency: "GBP" });
   for (const [m, inc, exp] of [["2026-06", "11000", "9800"], ["2026-07", "11000", "12500"], ["2026-08", "12000", "8000"], ["2026-09", "12000", "9100"], ["2026-10", "13500", "9900"]]) {
     await add("h-in-" + m, "income", inc, "c_salary", m + "-01"); await add("h-out-" + m, "expense", exp, "c_rent", m + "-02");
   }
@@ -111,7 +111,7 @@ const mount = (page, dark) => page.waitForFunction(() => window.SawaApp && typeo
   await H.getByRole("tab", { name: "السجلّ" }).click();
   await H.getByText("بقالة الحيّ").waitFor();
   await shot(page, "4-ledger-ar");
-  // edit the EUR entry that is waiting for a rate
+  // edit the GBP entry that is waiting for a rate
   await H.getByRole("button", { name: /بانتظار السعر/ }).click();
   await H.getByText(/سعر الصرف/).waitFor();
   await H.locator('input[inputmode="decimal"]').nth(1).fill("4.10");
@@ -353,6 +353,57 @@ if (invs.items.length !== 1 || invs.items[0].status !== "sent" || invs.items[0].
   const msg = await H.getByRole("alert").innerText();
   if (!/decimal places/.test(msg)) errors.push("expected decimal-places error, got: " + msg);
   await shot(page, "7-error-en-dark");
+  await ctx.close();
+}
+
+// ── P5 (Arabic): a receipt photo on an entry, then a CSV export ──
+{
+  const { ctx, page: pg } = await session("ar", false); const page = pg; const H = pg.locator("#pfmhost");
+  await H.getByRole("heading", { level: 2 }).waitFor();
+  await H.getByRole("tab", { name: "السجلّ" }).click();
+  await H.getByText("بقالة الحيّ").click();
+  await H.getByText("صورة الإيصال (اختياريّ)").waitFor();
+  // a 1600×1200 PNG with transparency: the app must turn it into a ≤ 1280 px JPEG on white, ≤ 400 KB
+  const png = await page.evaluate(() => { const c = document.createElement("canvas"); c.width = 1600; c.height = 1200; const g = c.getContext("2d");
+    for (let i = 0; i < 600; i++) { g.fillStyle = `hsla(${(i * 7) % 360},70%,50%,.6)`; g.fillRect((i * 37) % 1600, (i * 53) % 1200, 140, 90); } return c.toDataURL("image/png"); });
+  await H.locator('input[type="file"]').setInputFiles({ name: "receipt.png", mimeType: "image/png", buffer: Buffer.from(png.split(",")[1], "base64") });
+  await H.getByRole("button", { name: "عرض الإيصال الجديد" }).waitFor();
+  await shot(page, "p5-1-receipt-picked-ar");
+  await H.getByRole("button", { name: "حفظ" }).click();
+  await H.getByRole("tab", { name: "السجلّ" }).waitFor();
+  await page.waitForTimeout(500);
+  const row = [...fs.docs].find(([n, e]) => n.includes("/pfm/u1/tx/") && e.data.hasReceipt);
+  if (!row) errors.push("P5: no entry carries hasReceipt after saving with a photo");
+  else {
+    const got = await op("pfm.tx.receipt.get", { id: row[0].split("/").pop() });
+    const bytes = got.data ? Buffer.from(got.data.split(",")[1], "base64").length : 0;
+    if (!/^data:image\/jpeg;base64,/.test(got.data || "") || bytes > 400 * 1024) errors.push(`P5: stored receipt is not a JPEG ≤ 400 KB (${(got.data || "").slice(0, 30)}, ${bytes} bytes)`);
+    const dim = await page.evaluate((src) => new Promise((r) => { const i = document.createElement("img"); i.onload = () => r([i.naturalWidth, i.naturalHeight]); i.src = src; }), got.data);
+    if (Math.max(...dim) > 1280) errors.push("P5: receipt not shrunk: " + dim.join("×"));
+  }
+  // the row shows the clip; reopening the entry shows the photo
+  await H.getByText("بقالة الحيّ").waitFor();
+  await shot(page, "p5-2-ledger-ar");
+  await H.getByText("بقالة الحيّ").click();
+  await H.getByRole("button", { name: /عرض الإيصال/ }).scrollIntoViewIfNeeded();
+  await shot(page, "p5-3a-receipt-field-ar");
+  await H.getByRole("button", { name: /عرض الإيصال/ }).click();
+  await H.getByRole("dialog", { name: "الإيصال" }).locator("img").waitFor();
+  await shot(page, "p5-3-receipt-view-ar");
+  await H.getByRole("dialog", { name: "الإيصال" }).click();
+  await H.getByRole("button", { name: "إغلاق" }).first().click().catch(() => page.keyboard.press("Escape"));
+  // export: last 3 months, saved as a file
+  await H.getByRole("button", { name: /تصدير/ }).click();
+  await H.getByText("تصدير السجلّ").waitFor();
+  await H.getByRole("button", { name: "آخر 3 أشهر" }).click();
+  const [dl] = await Promise.all([page.waitForEvent("download"), H.getByRole("button", { name: "تنزيل CSV" }).click()]);
+  const csv = readFileSync(await dl.path(), "utf8");
+  if (!/^sawa-accountant-\d{4}-\d{2}_\d{4}-\d{2}\.csv$/.test(dl.suggestedFilename())) errors.push("P5: export file name " + dl.suggestedFilename());
+  if (!csv.startsWith("﻿التاريخ,النوع,الفئة,المبلغ,العملة,المبلغ بـSAR,")) errors.push("P5: CSV header " + JSON.stringify(csv.slice(0, 80)));
+  if (!csv.split("\r\n").some((l) => l.includes("بقالة الحيّ") && l.endsWith(",نعم"))) errors.push("P5: the entry with a receipt is missing from the CSV");
+  if (!csv.includes(",102.50,4.10,")) errors.push("P5: the GBP entry's SAR amount and rate are missing from the CSV");
+  await H.getByText(/صُدِّرت \d+ حركة/).waitFor();
+  await shot(page, "p5-4-export-ar");
   await ctx.close();
 }
 
