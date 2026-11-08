@@ -9,7 +9,7 @@ await t("toMinor parses without floats", () => {
   assert.equal(P.toMinor("1,234.5", "SDG"), 123450);
   assert.equal(P.toMinor("0.1", "USD") + P.toMinor("0.2", "USD"), 30);
   assert.equal(P.toMinor("١٢٣٫٤٥", "SDG"), 12345);       // Arabic-Indic digits and decimal mark
-  assert.equal(P.toMinor("1.234", "KWD"), 1234);
+  assert.equal(P.toMinor("1.234", "OMR"), 1234);
   assert.throws(() => P.toMinor("1.005", "USD"), { code: "too_precise" });
   assert.throws(() => P.toMinor("abc", "USD"), { code: "bad_amount" });
   assert.equal(P.fromMinor(-12345, "SDG"), "-123.45");
@@ -183,12 +183,13 @@ await t("logo check sniffs bytes and refuses SVG", () => {
   assert.throws(() => P.sniffLogo(new Uint8Array(600 * 1024).fill(0x89)), { code: "bad_logo" });
 });
 
-await t("any ISO currency, decimals from Intl", () => {
-  assert.equal(P.currencyExp("JPY"), 0); assert.equal(P.currencyExp("KWD"), 3); assert.equal(P.currencyExp("EUR"), 2);
-  assert.equal(P.currencyExp("BRL"), 2); assert.equal(P.currencyExp("NGN"), 2); assert.equal(P.currencyExp("INR"), 2);
-  assert.equal(P.toMinor("1500", "JPY"), 1500); assert.throws(() => P.toMinor("1.5", "JPY"), { code: "too_precise" });
-  assert.throws(() => P.currencyExp("XXQ"), { code: "bad_currency" }); assert.throws(() => P.currencyExp("usd"), { code: "bad_currency" });
-  const r = P.computeInvoice([{ qty: "3", unitPrice: 1250, taxRate: "10" }], { currency: "JPY" });
+await t("allowed currencies only, decimals from Intl", () => {
+  assert.deepEqual([...P.ALLOWED_CURRENCIES].sort(), ["AED", "CAD", "CNY", "EGP", "GBP", "OMR", "QAR", "SAR", "SDG", "USD"]);
+  assert.equal(P.currencyExp("USD"), 2); assert.equal(P.currencyExp("OMR"), 3); assert.equal(P.currencyExp("SDG"), 2);
+  assert.equal(P.currencyExp("CNY"), 2); assert.equal(P.currencyExp("EGP"), 2); assert.equal(P.currencyExp("CAD"), 2);
+  assert.equal(P.toMinor("15.00", "CNY"), 1500); assert.throws(() => P.toMinor("1.555", "CNY"), { code: "too_precise" });
+  for (const c of ["JPY", "EUR", "KWD", "INR", "XXQ", "usd", "XXX"]) assert.throws(() => P.currencyExp(c), { code: "bad_currency" }, c);
+  const r = P.computeInvoice([{ qty: "3", unitPrice: 1250, taxRate: "10" }], { currency: "CNY" });
   assert.equal(r.total, 4125);
 });
 
@@ -196,48 +197,48 @@ await t("typed rates: any precision up to 4 decimals, 0 to 100 %", () => {
   assert.equal(P.toRate("15"), 150000n); assert.equal(P.toRate("8.875"), 88750n); assert.equal(P.toRate("٧٫٥"), 75000n);
   assert.equal(P.rateText(88750n), "8.875"); assert.equal(P.rateText(150000n), "15");
   for (const bad of ["101", "-1", "abc", "1.23456", ""]) assert.throws(() => P.toRate(bad), { code: "bad_rate" });
-  const d = P.computeInvoice([{ qty: "1", unitPrice: 10000, discount: { type: "pct", rate: "12.5" } }], { currency: "EUR" });
+  const d = P.computeInvoice([{ qty: "1", unitPrice: 10000, discount: { type: "pct", rate: "12.5" } }], { currency: "GBP" });
   assert.equal(d.subtotal, 8750);
 });
 
 await t("currency conversion is exact across decimal places", () => {
   assert.equal(P.convert(100_00, "USD", "SAR", "3.75"), 375_00);
-  assert.equal(P.convert(100_00, "USD", "JPY", "151.237"), 15124);         // 15123.7 -> 15124
-  assert.equal(P.convert(1000, "JPY", "USD", "0.006612"), 661);            // 6.612 USD
-  assert.equal(P.convert(1_000_00, "USD", "KWD", "0.3071"), 307_100);       // 3 decimals
-  assert.equal(P.convert(5, "EUR", "EUR", "9"), 5);
+  assert.equal(P.convert(100_00, "USD", "CNY", "7.123"), 71230);           // 712.30 CNY
+  assert.equal(P.convert(1_000_00, "CNY", "USD", "0.1384"), 13840);        // 1000.00 CNY = 138.40 USD
+  assert.equal(P.convert(1_000_00, "USD", "OMR", "0.3071"), 307_100);       // 3 decimals
+  assert.equal(P.convert(5, "GBP", "GBP", "9"), 5);
   assert.equal(P.convert(9_000_000_000_00, "USD", "SDG", "600.123456"), 540111110400000);
-  assert.throws(() => P.convert(1, "USD", "EUR", "0"), { code: "bad_fx_rate" });
-  assert.throws(() => P.convert(1, "USD", "EUR", "-1"), { code: "bad_fx_rate" });
+  assert.throws(() => P.convert(1, "USD", "GBP", "0"), { code: "bad_fx_rate" });
+  assert.throws(() => P.convert(1, "USD", "GBP", "-1"), { code: "bad_fx_rate" });
 });
 
 await t("summary in base currency, with a per-currency view", () => {
   const s = P.summarize([
     { kind: "income", amount: 1000_00, currency: "USD", baseAmount: 3750_00, categoryId: "salary" },
     { kind: "expense", amount: 500_00, currency: "SAR", baseAmount: 500_00, categoryId: "rent" },
-    { kind: "expense", amount: 20_00, currency: "EUR", baseAmount: 81_50, categoryId: "food" },
+    { kind: "expense", amount: 20_00, currency: "GBP", baseAmount: 81_50, categoryId: "food" },
   ]);
   assert.equal(s.income, 3750_00); assert.equal(s.expense, 581_50);
-  assert.deepEqual(s.byCurrency.map((c) => c.currency).sort(), ["EUR", "SAR", "USD"]);
+  assert.deepEqual(s.byCurrency.map((c) => c.currency).sort(), ["GBP", "SAR", "USD"]);
 });
 
 await t("receiving accounts carry a currency and filter per invoice", () => {
   const usd = { id: "a", ...P.validatePayoutAccount({ type: "bank", currency: "USD", label: "US", holderName: "K", bankName: "Chase", number: "000123456789" }) };
-  const eur = { id: "b", ...P.validatePayoutAccount({ type: "bank", currency: "EUR", label: "EU", holderName: "K", bankName: "X", number: "DE89370400440532013000" }) };
+  const eur = { id: "b", ...P.validatePayoutAccount({ type: "bank", currency: "GBP", label: "EU", holderName: "K", bankName: "X", number: "DE89370400440532013000" }) };
   const w = { id: "w", ...P.validatePayoutAccount({ type: "sawa_wallet" }) };
-  assert.deepEqual(P.accountsForInvoice([usd, eur, w], ["a", "b", "w"], "EUR").map((a) => a.id), ["b", "w"]);
+  assert.deepEqual(P.accountsForInvoice([usd, eur, w], ["a", "b", "w"], "GBP").map((a) => a.id), ["b", "w"]);
   assert.throws(() => P.validatePayoutAccount({ type: "bank", currency: "ZZZ", label: "x", holderName: "K", bankName: "X", number: "123456" }), { code: "bad_account" });
 });
 
 await t("pay page options follow the switches", () => {
-  const accts = [{ id: "w", type: "sawa_wallet", currency: "ANY" }, { id: "b", type: "bank", currency: "EUR" },
-                 { id: "c", type: "bank", currency: "EUR", cardPayout: { status: "active" } }];
-  const inv = { status: "sent", amountDue: 100, currency: "EUR", payoutAccountIds: ["w", "b"] };
-  const bal = { EUR: 50, USD: 900, SAR: 0 };
+  const accts = [{ id: "w", type: "sawa_wallet", currency: "ANY" }, { id: "b", type: "bank", currency: "GBP" },
+                 { id: "c", type: "bank", currency: "GBP", cardPayout: { status: "active" } }];
+  const inv = { status: "sent", amountDue: 100, currency: "GBP", payoutAccountIds: ["w", "b"] };
+  const bal = { GBP: 50, USD: 900, SAR: 0 };
   // Today: every switch off, so transfer is the only way to pay
   assert.deepEqual(P.payOptions(inv, accts, {}, bal), { methods: ["transfer"], walletFrom: [] });
-  assert.deepEqual(P.payOptions(inv, accts, { wallet: true }, bal), { methods: ["wallet", "transfer"], walletFrom: ["EUR"] });
-  assert.deepEqual(P.payOptions(inv, accts, { wallet: true, card: true, fxQuotes: true }, bal), { methods: ["wallet", "transfer", "card"], walletFrom: ["EUR", "USD"] });
+  assert.deepEqual(P.payOptions(inv, accts, { wallet: true }, bal), { methods: ["wallet", "transfer"], walletFrom: ["GBP"] });
+  assert.deepEqual(P.payOptions(inv, accts, { wallet: true, card: true, fxQuotes: true }, bal), { methods: ["wallet", "transfer", "card"], walletFrom: ["GBP", "USD"] });
   // fxQuotes without the wallet does nothing
   assert.deepEqual(P.payOptions(inv, accts, { fxQuotes: true }, bal).walletFrom, []);
   // card switched on, but no bank account onboarded with the provider: no card button
@@ -249,10 +250,10 @@ await t("pay page options follow the switches", () => {
 
 await t("rows without a rate stay out of base totals", () => {
   const s = P.summarize([
-    { kind: "income", amount: 1000_00, currency: "EUR", categoryId: "salary" },
+    { kind: "income", amount: 1000_00, currency: "GBP", categoryId: "salary" },
     { kind: "expense", amount: 50_00, currency: "USD", categoryId: "food" },               // rate pending
     { kind: "expense", amount: 20_00, currency: "USD", baseAmount: 18_45, categoryId: "food" },
-  ], { base: "EUR" });
+  ], { base: "GBP" });
   assert.equal(s.expense, 18_45); assert.equal(s.ratePending, 1);
   assert.equal(s.byCurrency.find((c) => c.currency === "USD").expense, 70_00);
 });

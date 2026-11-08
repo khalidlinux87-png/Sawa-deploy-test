@@ -2,11 +2,13 @@
 // Every amount is an integer in the currency's minor unit (SDG 1.00 = 100).
 // Floats never touch money. Products of quantity and price use BigInt.
 
-// Any ISO 4217 currency the runtime knows (about 160 in V8). The number of decimals comes from
-// Intl (CLDR), e.g. JPY 0, USD 2, KWD 3. EXP_OVERRIDE pins a currency if the product needs a
-// different number of decimals than CLDR, and must never change once money is stored in it.
+// The currencies Sawa accepts: Sudanese pound, US dollar, Chinese yuan, Qatari riyal, Saudi riyal,
+// UAE dirham, pound sterling, Canadian dollar, Omani riyal, Egyptian pound. Nothing else is accepted.
+// The number of decimals comes from Intl (CLDR), e.g. USD 2, OMR 3. EXP_OVERRIDE pins a currency if
+// the product needs a different number of decimals than CLDR, and must never change once money is stored in it.
+export const ALLOWED_CURRENCIES = Object.freeze(["SDG", "USD", "CNY", "QAR", "SAR", "AED", "GBP", "CAD", "OMR", "EGP"]);
 const EXP_OVERRIDE = {};
-const CUR_SET = new Set(typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("currency") : []);
+const CUR_SET = new Set(ALLOWED_CURRENCIES);
 const expCache = new Map();
 export function currencyExp(cur) {
   if (typeof cur !== "string" || !/^[A-Z]{3}$/.test(cur) || (CUR_SET.size && !CUR_SET.has(cur))) throw new PfmError("bad_currency", String(cur));
