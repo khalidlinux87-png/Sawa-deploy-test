@@ -630,5 +630,88 @@ await t("public endpoint: per-IP limits", async () => {
   await assert.rejects(pub(r, "pay.claim", { token: r.tok, idemKey: k() }, ip), err("rate_limited"));
 });
 
+// ---------- P5: receipt photos and CSV export ----------
+
+const jpeg = (n = 64) => { const b = new Uint8Array(n); b.set([0xff, 0xd8, 0xff, 0xe0]); return b; };
+const dataUri = (bytes, type = "image/jpeg") => `data:${type};base64,` + Buffer.from(bytes).toString("base64");
+
+await t("receipts: sealed at rest, kept through edits, removed with the entry", async () => {
+  const { fs, call } = await ready();
+  const a = await call("pfm.tx.add", { idemKey: "key-rcpt-001", kind: "expense", amount: "40", categoryId: "c_food", date: "2026-11-05" });
+  const id = a.tx.id, img = dataUri(jpeg(2048));
+  assert.equal(a.tx.hasReceipt, false);
+  const r = await call("pfm.tx.receipt.set", { id, data: img });
+  assert.equal(r.hasReceipt, true); assert.equal(r.size, 2048);
+  const file = fs.docs.get(`${ROOT}/pfm/u1/files/r_${id}`).data;
+  assert.match(file.data, /^v1:1:/); assert.ok(!file.data.includes("base64"));            // sealed, not a plain data: URI
+  assert.equal((await call("pfm.tx.receipt.get", { id })).data, img);
+  let row = (await call("pfm.tx.list", { month: "2026-11" })).items[0];
+  assert.equal(row.hasReceipt, true);
+  // an edit (full rewrite of the row) keeps the flag
+  await call("pfm.tx.update", { id, rev: row.rev, amount: "41" });
+  row = (await call("pfm.tx.list", { month: "2026-11" })).items[0];
+  assert.equal(row.hasReceipt, true); assert.equal(row.amount, 4100);
+  // replace, then remove
+  await call("pfm.tx.receipt.set", { id, data: dataUri(jpeg(100)) });
+  assert.equal((await call("pfm.tx.receipt.get", { id })).size, 100);
+  await call("pfm.tx.receipt.delete", { id });
+  assert.equal(fs.docs.get(`${ROOT}/pfm/u1/files/r_${id}`), undefined);
+  assert.equal((await call("pfm.tx.receipt.get", { id })).data, null);
+  assert.equal((await call("pfm.tx.list", { month: "2026-11" })).items[0].hasReceipt, false);
+  // deleting the entry deletes its photo in the same commit
+  await call("pfm.tx.receipt.set", { id, data: img });
+  row = (await call("pfm.tx.list", { month: "2026-11" })).items[0];
+  await call("pfm.tx.delete", { id, rev: row.rev });
+  assert.equal(fs.docs.get(`${ROOT}/pfm/u1/files/r_${id}`), undefined);
+  await assert.rejects(call("pfm.tx.receipt.set", { id, data: img }), err("not_found"));
+  const actions = [...fs.docs].filter(([n]) => n.includes("/audit/u1/log/")).map(([, e]) => e.data.action);
+  assert.ok(actions.includes("tx.receipt.set") && actions.includes("tx.receipt.delete"));
+});
+
+await t("receipts: only real PNG / JPEG / WebP up to 400 KB", async () => {
+  const { fs, call } = await ready();
+  const { tx } = await call("pfm.tx.add", { idemKey: "key-rcpt-002", kind: "expense", amount: "5", categoryId: "c_food", date: "2026-11-05" });
+  await assert.rejects(call("pfm.tx.receipt.set", { id: tx.id, data: dataUri(jpeg(), "image/png") }), err("bad_receipt"));          // declared type lies
+  await assert.rejects(call("pfm.tx.receipt.set", { id: tx.id, data: "data:image/svg+xml;base64,PHN2Zz4=" }), err("bad_receipt"));
+  await assert.rejects(call("pfm.tx.receipt.set", { id: tx.id, data: dataUri(new Uint8Array(64).fill(1)) }), err("bad_receipt"));     // not an image
+  await assert.rejects(call("pfm.tx.receipt.set", { id: tx.id, data: dataUri(jpeg(400 * 1024 + 1)) }), err("bad_receipt"));          // too big
+  await call("pfm.tx.receipt.set", { id: tx.id, data: dataUri(jpeg(400 * 1024)) });                                                  // exactly the limit
+  assert.ok(fs.docs.get(`${ROOT}/pfm/u1/files/r_${tx.id}`).data.data.length < 1_000_000);                                            // sealed, still under Firestore's 1 MiB
+  await assert.rejects(call("pfm.tx.receipt.set", { id: "nope_0000001", data: dataUri(jpeg()) }), err("not_found"));
+  await assert.rejects(call("pfm.tx.receipt.get", { id: "../x" }), err("bad_id"));
+  // another user can't read it
+  assert.equal((await call("pfm.tx.receipt.get", { id: tx.id }, "u2")).data, null);
+});
+
+await t("export: booked rows only, ordered, escaped, both languages", async () => {
+  const { fs, call } = await ready({ locale: "en" });
+  const add = (k, o) => call("pfm.tx.add", { idemKey: "key-exp-" + k, kind: "expense", categoryId: "c_food", ...o });
+  await add("0001", { amount: "10", date: "2026-11-03", note: "=SUM(A1:A9)", counterparty: "Café, \"Nile\"" });
+  await add("0002", { amount: "1500", currency: "JPY", fxRate: "0.0052", date: "2026-10-20" });
+  await add("0003", { amount: "2.500", currency: "KWD", date: "2026-11-01" });                         // no rate yet
+  await call("pfm.tx.add", { idemKey: "key-exp-0004", kind: "income", amount: "2000", categoryId: "c_salary", date: "2026-11-01" });
+  const gone = await add("0005", { amount: "7", date: "2026-11-02" });
+  await call("pfm.tx.delete", { id: gone.tx.id, rev: gone.tx.rev });
+  await call("pfm.tx.receipt.set", { id: "t_key-exp-0001", data: dataUri(jpeg()) });
+  fs.docs.set(`${ROOT}/pfm/u1/tx/t_suggested01`, { updateTime: "x", data: { kind: "expense", amount: 900, currency: "GBP", baseAmount: 900, fxRate: "1", categoryId: "c_food",
+    date: "2026-11-04", month: "2026-11", status: "suggested", deleted: false, rev: 1, createdAt: "2026-11-04T00:00:00Z" } });
+  const r = await call("pfm.export", { from: "2026-10", to: "2026-11" });
+  assert.equal(r.filename, "sawa-accountant-2026-10_2026-11.csv"); assert.equal(r.rows, 4); assert.equal(r.truncated, false);
+  assert.ok(r.csv.startsWith("﻿Date,Type,Category,Amount,Currency,Amount in GBP,Exchange rate,Paid to / from,Note,Receipt\r\n"));
+  const lines = r.csv.slice(1).trimEnd().split("\r\n");
+  assert.equal(lines.length, 5);
+  assert.deepEqual(lines.slice(1).map((l) => l.slice(0, 10)), ["2026-10-20", "2026-11-01", "2026-11-01", "2026-11-03"]);
+  assert.equal(lines[1], "2026-10-20,Expense,Food & groceries,1500,JPY,7.80,0.0052,,,");
+  assert.ok(lines.some((l) => l.includes(",2.500,KWD,,,")));                                        // rate pending: base amount and rate empty
+  assert.ok(lines[4].endsWith(',"Café, ""Nile""",\'=SUM(A1:A9),yes'));                           // quoted, formula defused, receipt marked
+  assert.ok(!r.csv.includes("900") && !r.csv.includes(",7.00,"));                                  // suggested and deleted rows left out
+  const a = await call("pfm.export", { from: "2026-11", to: "2026-11", lang: "ar" });
+  assert.ok(a.csv.startsWith("﻿التاريخ,النوع,الفئة,المبلغ,العملة,المبلغ بـGBP,سعر الصرف,الطرف,ملاحظة,إيصال\r\n"));
+  assert.ok(a.csv.includes(",دخل,") && a.csv.includes(",مصروف,") && a.csv.includes(",نعم"));
+  await assert.rejects(call("pfm.export", { from: "2024-01", to: "2026-11" }), err("range_too_long"));
+  await assert.rejects(call("pfm.export", { from: "2026-12", to: "2026-11" }), err("bad_month"));
+  assert.equal((await call("pfm.export", { from: "2025-01", to: "2025-01" })).rows, 0);
+});
+
 assert.ok(PFM_OPS.includes("pfm.tx.add"));
 console.log(process.exitCode ? "FAILED" : `pfm-worker: ${n} passed`);

@@ -184,11 +184,14 @@ await t("logo check sniffs bytes and refuses SVG", () => {
 });
 
 await t("allowed currencies only, decimals from Intl", () => {
-  assert.deepEqual([...P.ALLOWED_CURRENCIES].sort(), ["AED", "CAD", "CNY", "EGP", "GBP", "OMR", "QAR", "SAR", "SDG", "USD"]);
+  assert.deepEqual([...P.ALLOWED_CURRENCIES].sort(), ["AED", "CAD", "CNY", "EGP", "GBP", "JPY", "KWD", "OMR", "QAR", "SAR", "SDG", "USD"]);
+  assert.equal(P.currencyExp("JPY"), 0); assert.equal(P.currencyExp("KWD"), 3);
+  assert.equal(P.toMinor("1500", "JPY"), 1500); assert.throws(() => P.toMinor("1.5", "JPY"), { code: "too_precise" });
+  assert.equal(P.toMinor("1.234", "KWD"), 1234); assert.throws(() => P.toMinor("1.2345", "KWD"), { code: "too_precise" });
   assert.equal(P.currencyExp("USD"), 2); assert.equal(P.currencyExp("OMR"), 3); assert.equal(P.currencyExp("SDG"), 2);
   assert.equal(P.currencyExp("CNY"), 2); assert.equal(P.currencyExp("EGP"), 2); assert.equal(P.currencyExp("CAD"), 2);
   assert.equal(P.toMinor("15.00", "CNY"), 1500); assert.throws(() => P.toMinor("1.555", "CNY"), { code: "too_precise" });
-  for (const c of ["JPY", "EUR", "KWD", "INR", "XXQ", "usd", "XXX"]) assert.throws(() => P.currencyExp(c), { code: "bad_currency" }, c);
+  for (const c of ["EUR", "INR", "BHD", "XXQ", "usd", "jpy", "XXX"]) assert.throws(() => P.currencyExp(c), { code: "bad_currency" }, c);
   const r = P.computeInvoice([{ qty: "3", unitPrice: 1250, taxRate: "10" }], { currency: "CNY" });
   assert.equal(r.total, 4125);
 });
@@ -206,6 +209,9 @@ await t("currency conversion is exact across decimal places", () => {
   assert.equal(P.convert(100_00, "USD", "CNY", "7.123"), 71230);           // 712.30 CNY
   assert.equal(P.convert(1_000_00, "CNY", "USD", "0.1384"), 13840);        // 1000.00 CNY = 138.40 USD
   assert.equal(P.convert(1_000_00, "USD", "OMR", "0.3071"), 307_100);       // 3 decimals
+  assert.equal(P.convert(100_00, "USD", "JPY", "151.237"), 15124);          // 15123.7 -> 15124 (0 decimals)
+  assert.equal(P.convert(1000, "JPY", "USD", "0.006612"), 661);             // 6.612 USD
+  assert.equal(P.convert(1_000_00, "USD", "KWD", "0.3071"), 307_100);       // 3 decimals
   assert.equal(P.convert(5, "GBP", "GBP", "9"), 5);
   assert.equal(P.convert(9_000_000_000_00, "USD", "SDG", "600.123456"), 540111110400000);
   assert.throws(() => P.convert(1, "USD", "GBP", "0"), { code: "bad_fx_rate" });
