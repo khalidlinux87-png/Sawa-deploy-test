@@ -6272,7 +6272,7 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "member.remove") { const r = await opMemberRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "member.transferOwner") { const r = await opMemberTransferOwner(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }   // C206
     if (op === "group.settings") { const r = await opGroupSettings(uid, body.payload, env); return json({ ok: true, ...r }); }
-    if (statOp.startsWith("pfm.")) { const r = await handlePfmOp(op, uid, body.payload, env, PFM_DEPS); return json({ ok: true, ...r }); }   // C263
+    if (statOp.startsWith("pfm.") || statOp.startsWith("inv.")) { const r = await handlePfmOp(op, uid, body.payload, env, PFM_DEPS); return json({ ok: true, ...r }); }   // C263
     return json({ ok: false, error: "unknown op: " + op }, 400);
   } catch (e) {
     if (statOp) { stat("err:" + statOp); if (ctx && ctx.waitUntil) ctx.waitUntil(flushStats(env)); }
