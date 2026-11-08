@@ -7,7 +7,7 @@ import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
-const { handlePfmOp } = await import("./pfm-worker.mjs");
+const { handlePfmOp, handlePfmPublic } = await import("./pfm-worker.mjs");
 const { makeFs, ROOT } = await import("./fake-firestore.mjs");
 
 const APP = path.resolve(process.argv[2] || "../Sawa-app"), NM = path.resolve(process.argv[3] || "."), OUT = path.resolve(process.argv[4] || ".");
@@ -22,6 +22,7 @@ const op = (o, p) => handlePfmOp(o, "u1", p, env, d);
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".png": "image/png", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
 const server = http.createServer((req, res) => {
   let p = decodeURIComponent(new URL(req.url, "http://x").pathname); if (p === "/") p = "/index.html";
+  if (p.startsWith("/pay/")) p = "/pay.html";   // _redirects: /pay/*  /pay.html  200
   const f = path.join(APP, p);
   if (!f.startsWith(APP) || !existsSync(f) || p === "/sw.js") { res.writeHead(404); return res.end(); }
   res.writeHead(200, { "Content-Type": MIME[path.extname(f)] || "application/octet-stream" }); res.end(readFileSync(f));
@@ -265,6 +266,74 @@ if (!alertsFired.some((x) => x === "c_food:10000")) errors.push("expected the fo
 }
 const invs = await op("inv.list", {});
 if (invs.items.length !== 1 || invs.items[0].status !== "sent" || invs.items[0].amountDue !== 403750) errors.push("invoice state: " + JSON.stringify(invs.items));
+
+// ── P4: the client opens the pay link (no account), reports the payment; the issuer confirms ──
+{
+  const inv0 = (await op("inv.list", {})).items[0];
+  const full = (await op("inv.get", { id: inv0.id })).invoice;
+  const link = `http://localhost:8765/pay/${full.payLinkToken}`;
+  const payPage = async (scheme, locale) => {
+    const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, locale, colorScheme: scheme });
+    await ctx.route(/fonts\./, (r) => r.fulfill({ body: "" }));
+    await ctx.route("https://sawa-deploy-test.khalidlinux87.workers.dev/pfm/pay", async (r) => {
+      const b = JSON.parse(r.request().postData() || "{}");
+      let out; try { out = { ok: true, ...(await handlePfmPublic(b.op, b.payload, env, d, "203.0.113.7")) }; } catch (e) { out = { ok: false, error: e.message }; }
+      await r.fulfill({ status: 200, contentType: "application/json", headers: { "Access-Control-Allow-Origin": "*" }, body: JSON.stringify(out) });
+    });
+    const page = await ctx.newPage();
+    page.on("pageerror", (e) => errors.push("pay pageerror: " + e.message));
+    await page.goto(link);
+    return { ctx, page };
+  };
+  {
+    const { ctx, page } = await payPage("light", "ar-SA");
+    await page.getByRole("heading", { level: 1 }).waitFor();
+    const h1 = await page.getByRole("heading", { level: 1 }).innerText();
+    if (!/مطلوب منك/.test(h1) || !/4,037\.50/.test(h1)) errors.push("pay page headline: " + h1);
+    if (!(await page.getByText("SA0380000000608010167519").count())) errors.push("pay page shows no account number");
+    await page.screenshot({ path: `${OUT}/p4-1-pay-ar.png`, fullPage: true });
+    await page.getByRole("button", { name: /عرض الفاتورة كاملةً/ }).click();
+    await page.waitForFunction(() => /INV-/.test(document.getElementById("frame").srcdoc || ""));
+    await page.getByRole("button", { name: "إغلاق" }).click();
+    await page.getByLabel("اسمك").fill("سارة أحمد");
+    await page.getByLabel(/رقم العمليّة/).fill("FT2611-7781");
+    await page.getByLabel(/صورة الإيصال/).setInputFiles(`${OUT}/logo.png`);
+    await page.getByRole("button", { name: "أبلغ عن الدفع" }).click();
+    await page.getByText(/وصل بلاغك/).waitFor();
+    await page.screenshot({ path: `${OUT}/p4-2-pay-reported-ar.png` });
+    await ctx.close();
+  }
+  // the issuer sees it, checks the receipt, confirms
+  {
+    const { ctx, page: pg } = await session("ar", false); const page = pg; const H = pg.locator("#pfmhost");
+    page.on("dialog", (dl) => dl.accept());
+    await H.getByText(/بلاغ دفع من عملائك/).waitFor();
+    await H.getByText(/بلاغ دفع من عملائك/).click();
+    await H.getByText(/بلاغ دفع ينتظر تحقّقك/).waitFor();
+    await H.getByRole("button", { name: /شركة النيل/ }).click();
+    await H.getByText(/يقول إنّه دفع/).waitFor();
+    await shot(page, "p4-3-report-ar");
+    await H.getByRole("button", { name: "الإيصال" }).click();
+    await H.getByRole("img", { name: "صورة الإيصال" }).waitFor();
+    await H.getByRole("img", { name: "صورة الإيصال" }).click();
+    await H.getByRole("button", { name: "وصل — أكّد" }).click();
+    await H.getByText(/دُفعت كاملةً/).waitFor();
+    await ctx.close();
+  }
+  {
+    const { ctx, page } = await payPage("dark", "en-US");
+    await page.getByRole("heading", { level: 1 }).waitFor();
+    const h1 = await page.getByRole("heading", { level: 1 }).innerText();
+    if (!/دُفعت هذه الفاتورة كاملةً/.test(h1)) errors.push("pay page after confirm: " + h1);
+    await page.getByRole("button", { name: "English" }).click();
+    await page.getByText("This invoice is paid in full.").waitFor();
+    await page.waitForTimeout(500); await page.screenshot({ path: `${OUT}/p4-4-pay-paid-en-dark.png`, fullPage: true });
+    await ctx.close();
+  }
+  const after = (await op("inv.get", { id: inv0.id })).invoice;
+  if (after.status !== "paid") errors.push("invoice not paid after confirming the report: " + after.status);
+  if (!after.payments.some((p) => p.state === "succeeded" && p.payer && p.payer.name === "سارة أحمد")) errors.push("confirmed report not recorded with the payer");
+}
 
 // ── English, dark: overview of the same data ──
 {

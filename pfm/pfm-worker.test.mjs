@@ -262,7 +262,8 @@ await t("alerts: a race between two writes still fires the 80% alert once", asyn
   assert.equal(attempts >= 2, true); assert.equal(blocked >= 1, true);   // a duplicate really was attempted, and refused
   const fired = [...fs.docs.keys()].filter((n) => n.includes(`/alerts/${MONTH}__total_8000`));
   assert.equal(fired.length, 1);
-  assert.equal(pushes.filter((p) => /%/.test(p.title)).length, 1);
+  // one push for this budget whichever alert is most serious (after day ~8 of the month that is the pace alert)
+  assert.equal(pushes.filter((p) => /كلّ المصروفات/.test(p.title)).length, 1);
 });
 
 await t("budget.list: spent, remaining, state, pace; alerts list and read", async () => {
@@ -532,6 +533,101 @@ await t("account deletion removes invoices, payments and pay links", async () =>
   const purgeColl = async (_t, rel, ok) => { for (const x of await fs.fsList(null, rel)) { if (!ok()) return false; await fs.fsCommit(null, [{ delete: x.name }]); } return true; };
   assert.equal(await purgePfm(d, "tok", "u1", () => true, purgeColl), true);
   assert.deepEqual([...fs.docs.keys()].filter((n) => n.includes("u1") || n.includes("/invoices/") || n.includes("/payLinks/")), []);
+});
+
+// ========================= P4: public pay page and claims =========================
+import { handlePfmPublic } from "./pfm-worker.mjs";
+let ipSeq = 0;
+const pub = (r, op, payload, ip) => handlePfmPublic(op, payload, r.env, r.d, ip || "10.0.0." + (++ipSeq));
+async function sentInvoice(extra = {}) {
+  const r = await shop();
+  await r.call("pfm.account.upsert", { id: r.acct.id, type: "bank", currency: "EUR", label: "Main", holderName: "Khalid", bankName: "Deutsche Bank", number: "DE89370400440532013000" });
+  const inv = (await r.call("inv.send", { id: (await draft(r.call, { payoutAccountIds: [r.acct.id], ...extra })).invoice.id })).invoice;
+  r.inv = inv; r.tok = inv.payLinkToken; return r;
+}
+const claim = (r, extra = {}) => pub(r, "pay.claim", { token: r.tok, amount: "930", payoutAccountId: r.acct.id, reference: "TRX-1", payer: { name: "Sara", phone: "+20 100" }, idemKey: k(), ...extra });
+
+await t("pay.view: the link shows the invoice; bad, draft-less and cancelled links behave", async () => {
+  const r = await sentInvoice();
+  const v = await pub(r, "pay.view", { token: r.tok });
+  assert.equal(v.number, r.inv.number); assert.equal(v.amountDue, 93000); assert.equal(v.payable, true); assert.deepEqual(v.methods, ["transfer"]);
+  assert.equal(v.accounts[0].number, "DE89370400440532013000"); assert.equal(v.issuer.name, "Khalid Design"); assert.match(v.html, new RegExp(r.inv.number));
+  assert.equal(v.client.name, "Nile Trading");
+  await assert.rejects(pub(r, "pay.view", { token: "x".repeat(22) }), err("not_found"));
+  await assert.rejects(pub(r, "pay.view", { token: "../../pfm/u1" }), err("not_found"));
+  await assert.rejects(pub(r, "pay.other", { token: r.tok }), /unknown op/);
+  await assert.rejects(handlePfmPublic("pay.view", { token: r.tok }, {}, r.d, "1.1.1.1"), /pfm_not_configured/);
+  await r.call("inv.cancel", { id: r.inv.id });
+  const c = await pub(r, "pay.view", { token: r.tok });
+  assert.equal(c.status, "cancelled"); assert.equal(c.payable, false); assert.deepEqual(c.methods, []);
+  assert.equal((await r.call("inv.link", { id: r.inv.id })).url, "https://www.sawaaap.com/pay/" + r.tok);
+});
+
+await t("pay.claim: validated, idempotent, limited, sealed, and the issuer is told", async () => {
+  const r = await sentInvoice();
+  await assert.rejects(claim(r, { payer: { name: "" } }), err("bad_payer"));
+  await assert.rejects(claim(r, { payoutAccountId: "pa_nope" }), err("bad_account"));
+  await assert.rejects(claim(r, { amount: "931" }), err("overpay"));
+  const before = r.pushes.length;
+  const key = k();
+  const c1 = await claim(r, { amount: "300", idemKey: key });
+  assert.equal(c1.state, "claimed");
+  assert.deepEqual(await claim(r, { amount: "300", idemKey: key }), c1);                 // same request again: nothing new
+  assert.equal(r.pushes.length, before + 1); assert.match(r.pushes.at(-1).title, /Sara/);
+  const g = (await r.call("inv.get", { id: r.inv.id })).invoice;
+  assert.equal(g.status, "sent"); assert.equal(g.amountPaid, 0);                           // a claim changes nothing yet
+  assert.equal(g.payments[0].payer.name, "Sara"); assert.equal(g.payments[0].reference, "TRX-1");
+  assert.ok(![...r.fs.docs.values()].some((e) => JSON.stringify(e.data).includes("TRX-1")));
+  await assert.rejects(claim(r, { amount: "631" }), err("overpay"));                           // 930 − 300 still claimed = 630 room
+  for (let i = 0; i < 4; i++) await claim(r, { amount: "1" });
+  await assert.rejects(claim(r, { amount: "1" }), err("claim_pending"));                       // 5 open claims max
+  assert.equal((await r.call("inv.list", {})).claims, 5);
+});
+
+await t("pay.claim: whole amount when partial payment is off; two full claims at once → one", async () => {
+  const r = await sentInvoice({ allowPartial: false });
+  await assert.rejects(claim(r, { amount: "100" }), err("partial_not_allowed"));
+  const res = await Promise.allSettled([claim(r), claim(r)]);
+  assert.equal(res.filter((x) => x.status === "fulfilled").length, 1);
+  assert.match(res.find((x) => x.status === "rejected").reason.message, /^overpay|^partial_not_allowed/);
+});
+
+await t("pay.claim: proof screenshot checked and kept apart", async () => {
+  const r = await sentInvoice();
+  await assert.rejects(claim(r, { proof: "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=" }), err("bad_proof"));
+  const c = await claim(r, { proof: PNG });
+  const g = (await r.call("inv.get", { id: r.inv.id })).invoice;
+  assert.equal(g.payments[0].hasProof, true); assert.equal(g.payments[0].proof, undefined);
+  assert.equal((await r.call("inv.claim.proof", { id: r.inv.id, payId: c.payId })).data, PNG);
+});
+
+await t("decide: confirm books the payment (amount can be corrected), reject frees the room", async () => {
+  const r = await sentInvoice();
+  const a = await claim(r, { amount: "500" }), b = await claim(r, { amount: "430" });
+  const c1 = await r.call("inv.claim.decide", { id: r.inv.id, payId: a.payId, decision: "confirm", amount: "480" });
+  assert.equal(c1.invoice.amountPaid, 48000); assert.equal(c1.invoice.status, "sent");
+  assert.equal(month(r.fs, "u1", MONTH).income, 48000);
+  const row = (await r.call("pfm.tx.list", { month: MONTH })).items.find((t) => t.invoiceId === r.inv.id);
+  assert.equal(row.counterparty, "Sara");
+  await assert.rejects(r.call("inv.claim.decide", { id: r.inv.id, payId: a.payId, decision: "confirm" }), err("not_found"));
+  await r.call("inv.claim.decide", { id: r.inv.id, payId: b.payId, decision: "reject", note: "not received" });
+  const doc = r.fs.docs.get(`${ROOT}/invoices/${r.inv.id}`).data;
+  assert.equal(doc.openClaims, 0); assert.equal(doc.claimedAmount, 0);
+  assert.equal((await pub(r, "pay.view", { token: r.tok })).amountDue, 45000);
+  const fin = await claim(r, { amount: "450" });
+  assert.equal((await r.call("inv.claim.decide", { id: r.inv.id, payId: fin.payId, decision: "confirm" })).invoice.status, "paid");
+  await assert.rejects(claim(r, { amount: "1" }), err("not_payable"));
+  await assert.rejects(r.call("inv.claim.decide", { id: r.inv.id, payId: fin.payId, decision: "maybe" }), err("bad_decision"));
+});
+
+await t("public endpoint: per-IP limits", async () => {
+  const r = await sentInvoice();
+  for (let i = 0; i < 60; i++) await pub(r, "pay.view", { token: r.tok }, "9.9.9.9");
+  await assert.rejects(pub(r, "pay.view", { token: r.tok }, "9.9.9.9"), err("rate_limited"));
+  for (let i = 0; i < 5; i++) await claim(r, { amount: "1" }).catch(() => 0);
+  const ip = "8.8.8.8";
+  for (let i = 0; i < 5; i++) await pub(r, "pay.claim", { token: r.tok, idemKey: k() }, ip).catch(() => 0);
+  await assert.rejects(pub(r, "pay.claim", { token: r.tok, idemKey: k() }, ip), err("rate_limited"));
 });
 
 assert.ok(PFM_OPS.includes("pfm.tx.add"));

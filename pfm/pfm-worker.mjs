@@ -52,6 +52,10 @@ const OPS = {
   "inv.cancel": opInvCancel,
   "inv.markPaid": opInvMarkPaid,
   "inv.html": opInvHtml,
+  // P4
+  "inv.claim.decide": opClaimDecide,
+  "inv.claim.proof": opClaimProof,
+  "inv.link": opInvLink,
 };
 export const PFM_OPS = Object.keys(OPS);
 
@@ -158,7 +162,7 @@ async function opGet(x) {
   const cats = [...catMap.values()].map(strip).sort((a, b) => a.order - b.order);
   return { settings: strip(s), categories: cats, today, month,
     rules: rules.map(strip), recurring: await Promise.all(recurring.map((r) => present(x, r))),
-    suggestedCount: suggested.map((dd) => js(x, dd)).filter((t) => !t.deleted).length, alerts };
+    suggestedCount: suggested.map((dd) => js(x, dd)).filter((t) => !t.deleted).length, alerts, claimsCount: await claimsOf(x) };
 }
 
 async function opInit(x) {
@@ -467,6 +471,7 @@ export async function purgePfm(d, token, uid, spend, purgeColl) {
       for (const doc of inv) {
         const rel = doc.name.slice(d.DOC_ROOT.length + 1);
         if (!(await purgeColl(token, rel + "/payments", spend))) return false;
+        if (!(await purgeColl(token, rel + "/proofs", spend))) return false;
         const tok = doc.fields && doc.fields.payLinkToken && doc.fields.payLinkToken.stringValue;
         await d.fsCommit(token, [{ delete: doc.name }, ...(tok ? [{ delete: d.DOC_ROOT + "/payLinks/" + tok }] : [])]);
       }
@@ -1023,7 +1028,8 @@ async function presentInvoice(x, inv, withPayments) {
   if (o.issuer) o.issuer = { ...o.issuer, address: await open(o.issuer.address), taxId: await open(o.issuer.taxId) };
   if (Array.isArray(o.payoutAccounts)) o.payoutAccounts = await Promise.all(o.payoutAccounts.map(async (a) => ({ ...a, number: await open(a.number) })));
   o.totals = totalsOf(inv);
-  if (withPayments) o.payments = (await x.d.fsList(x.token, `invoices/${inv.id}/payments`)).map((dd) => strip(js(x, dd))).sort((a, b) => (a.at < b.at ? -1 : 1));
+  if (withPayments) o.payments = await Promise.all((await x.d.fsList(x.token, `invoices/${inv.id}/payments`)).map((dd) => strip(js(x, dd))).sort((a, b) => (a.at < b.at ? -1 : 1))
+    .map(async (p) => ({ ...p, reference: await open(p.reference), payer: p.payer ? { name: await open(p.payer.name), phone: await open(p.payer.phone) } : null, note: await open(p.note) })));
   return o;
 }
 async function opInvGet(x) {
@@ -1037,9 +1043,9 @@ async function opInvList(x) {
   list.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
   const items = await Promise.all(list.map(async (i) => ({ id: i.id, status: i.status, number: i.number, currency: i.currency, issueDate: i.issueDate, dueDate: i.dueDate,
     clientName: i.client?.name ? await C.openField(i.client.name, x.uid, keys(x)).catch(() => "") : "", total: i.totals.total, amountPaid: i.amountPaid || 0,
-    amountDue: i.totals.total - (i.amountPaid || 0), updatedAt: i.updatedAt })));
+    amountDue: i.totals.total - (i.amountPaid || 0), openClaims: i.openClaims || 0, updatedAt: i.updatedAt })));
   const sum = (st) => items.filter((i) => st.includes(i.status));
-  return { items, outstanding: byCurrency(sum(["sent", "overdue"]), "amountDue"), overdue: sum(["overdue"]).length };
+  return { items, outstanding: byCurrency(sum(["sent", "overdue"]), "amountDue"), overdue: sum(["overdue"]).length, claims: items.reduce((a, i) => a + i.openClaims, 0) };
 }
 function byCurrency(list, field) { const m = {}; for (const i of list) m[i.currency] = (m[i.currency] || 0) + i[field]; return Object.entries(m).map(([currency, amount]) => ({ currency, amount })); }
 
@@ -1176,4 +1182,186 @@ async function overdueSweep(env, d, token, max) {
     } catch (e) { /* next invoice */ }
   }
   return n;
+}
+
+// =====================================================================================================
+// P4: public pay page (no login) · "I've paid" claims · issuer confirms or rejects
+// =====================================================================================================
+
+export const PAY_ORIGIN = "https://www.sawaaap.com";
+const payUrl = (token) => `${PAY_ORIGIN}/pay/${token}`;
+async function opInvLink(x) {
+  const inv = await loadInvoice(x, x.p.id);
+  if (!inv.payLinkToken || inv.status === "draft") throw new C.PfmError("not_sent");
+  return { url: payUrl(inv.payLinkToken) };
+}
+
+// Best-effort per-IP limiter for the public endpoint (per Worker isolate). The durable limits are in the data:
+// at most 5 open claims per invoice, and claims can't exceed what is due.
+const IPL = new Map();
+function ipOk(ip, kind, max, windowMs) {
+  const k = kind + "|" + ip, t = Date.now(), e = IPL.get(k);
+  if (!e || t - e.t > windowMs) { IPL.set(k, { t, n: 1 }); if (IPL.size > 5000) for (const [kk, v] of IPL) if (t - v.t > windowMs) IPL.delete(kk); return true; }
+  return ++e.n <= max;
+}
+
+const TOKEN_RE = /^[a-z0-9]{22}$/;
+async function invoiceByToken(x, token) {
+  if (!TOKEN_RE.test(token || "")) throw new C.PfmError("not_found", "link");
+  const link = js(x, await x.d.fsGet(x.token, `payLinks/${token}`));
+  if (!link) throw new C.PfmError("not_found", "link");
+  const inv = js(x, await x.d.fsGet(x.token, `invoices/${link.invoiceId}`));
+  if (!inv || inv.issuerUid !== link.issuerUid) throw new C.PfmError("not_found", "link");
+  return { link, inv };
+}
+
+// Entry point for POST /pfm/pay (no Authorization). Only these two operations exist here.
+export async function handlePfmPublic(op, payload, env, d, ip) {
+  if (!env.PFM_KEK_v1) throw new Error("pfm_not_configured");
+  const p = payload && typeof payload === "object" ? payload : {};
+  if (op !== "pay.view" && op !== "pay.claim") throw new Error("unknown op: " + op);
+  try {
+    if (op === "pay.view" ? !ipOk(ip, "v", 60, 60000) : !ipOk(ip, "c", 5, 600000)) throw new C.PfmError("rate_limited");
+    const token = await d.getToken(env);
+    // The issuer's uid comes from the link, never from the request.
+    const pre = { env, d, token, p };
+    const { link, inv } = await invoiceByToken(pre, p.token);
+    const x = { ...pre, uid: link.issuerUid };
+    return op === "pay.view" ? await payView(x, link, inv) : await payClaim(x, link, inv);
+  } catch (e) {
+    if (e instanceof C.PfmError) throw new Error(e.code + (e.message && e.message !== e.code ? ": " + String(e.message).slice(0, 80) : ""));
+    throw e;
+  }
+}
+
+async function payView(x, link, inv) {
+  const pi = await presentInvoice(x, inv);
+  const s = await settingsOf(x, false);
+  const logo = js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/files/logo`));
+  const lang = x.p.lang === "en" || x.p.lang === "ar" ? x.p.lang : pi.lang;
+  const payable = !link.revoked && (pi.status === "sent" || pi.status === "overdue");
+  const html = renderInvoiceHtml({ ...pi, lang, issuer: { ...pi.issuer, logoDataUri: logo ? logo.data : null }, methods: [], payUrl: null }, pi.totals);
+  const accounts = (pi.payoutAccounts || []).map((a) => ({ id: a.id, type: a.type, label: a.label, holderName: a.holderName, bankName: a.bankName, provider: a.provider,
+    branch: a.branch, details: a.details, number: a.number, currency: a.currency }));
+  return {
+    status: link.revoked && pi.status !== "paid" ? "cancelled" : pi.status, number: pi.number, lang: pi.lang, currency: pi.currency,
+    issuer: { name: pi.issuer?.name || "", logo: logo ? logo.data : null }, client: { name: pi.client.name },
+    issueDate: pi.issueDate, dueDate: pi.dueDate, total: pi.totals.total, amountPaid: pi.totals.amountPaid, amountDue: pi.totals.amountDue,
+    pendingClaims: inv.claimedAmount || 0, allowPartial: pi.allowPartial !== false, payable,
+    items: pi.items.map((it, i) => ({ description: it.description, qty: it.qty, amount: pi.totals.lines[i].amount })),
+    taxTotal: pi.totals.taxTotal, taxLabel: pi.taxLabel, accounts, methods: payable && accounts.length ? ["transfer"] : [], html,
+    tz: s ? s.tz : "UTC",
+  };
+}
+
+// "I've paid": recorded as a claim. It changes nothing on the invoice until the issuer confirms.
+async function payClaim(x, link, inv0) {
+  const p = x.p;
+  if (!ID_RE.test(p.idemKey || "")) throw new C.PfmError("bad_idem_key");
+  const payId = "c_" + p.idemKey;
+  let out, fresh = false;
+  await commitAudited(x, async () => {
+    const inv = js(x, await x.d.fsGet(x.token, `invoices/${inv0.id}`));
+    const existing = js(x, await x.d.fsGet(x.token, `invoices/${inv.id}/payments/${payId}`));
+    if (existing) { out = { payId, state: existing.state }; return { result: null }; }
+    if (link.revoked || !(inv.status === "sent" || inv.status === "overdue")) throw new C.PfmError("not_payable", inv.status);
+    if ((inv.openClaims || 0) >= 5) throw new C.PfmError("claim_pending", "the issuer has not answered earlier reports yet");
+    const amount = C.toMinor(p.amount, inv.currency);
+    const room = inv.totals.total - (inv.amountPaid || 0) - (inv.claimedAmount || 0);
+    if (amount <= 0) throw new C.PfmError("bad_amount");
+    if (amount > room) throw new C.PfmError("overpay", "due " + room);
+    if (inv.allowPartial === false && amount !== room) throw new C.PfmError("partial_not_allowed", "due " + room);
+    const acct = (inv.payoutAccounts || []).find((a) => a.id === p.payoutAccountId);
+    if (!acct) throw new C.PfmError("bad_account");
+    const name = txt(p.payer?.name, 80, "name");
+    if (!name) throw new C.PfmError("bad_payer", "name");
+    const phone = txt(p.payer?.phone, 30, "phone");
+    const reference = txt(p.reference, 80, "reference");
+    const s = await settingsOf(x);
+    const today = C.localDate(s.tz);
+    const at = p.paidAt && DATE.test(p.paidAt) && p.paidAt <= today ? p.paidAt : today;
+    let proofDoc = null;
+    if (p.proof) {
+      const m = /^data:(image\/(png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String(p.proof));
+      if (!m) throw new C.PfmError("bad_proof");
+      const bytes = Uint8Array.from(atob(m[3]), (c) => c.charCodeAt(0));
+      if (bytes.length > 400 * 1024) throw new C.PfmError("bad_proof", "too_big");
+      let type; try { type = C.sniffLogo(bytes.length > 512 * 1024 ? bytes.subarray(0, 64) : bytes); } catch { throw new C.PfmError("bad_proof"); }
+      if (type !== m[1]) throw new C.PfmError("bad_proof");
+      proofDoc = { data: `data:${type};base64,${m[3]}`, size: bytes.length, at: now() };
+    }
+    const method = acct.type === "mobile_money" ? "mobile_money" : acct.type === "bank" ? "bank_transfer" : "other";
+    const pay = { amount, currency: inv.currency, method, state: "claimed", at, payoutAccountId: acct.id, reference: reference ? await seal(x, reference) : "",
+      payer: { name: await seal(x, name), phone: phone ? await seal(x, phone) : "" }, hasProof: !!proofDoc, claimedAt: now() };
+    out = { payId, state: "claimed" }; fresh = { name, amount, number: inv.number, currency: inv.currency, locale: s.locale };
+    const writes = [
+      { update: { name: P(x, `invoices/${inv.id}/payments/${payId}`), fields: fieldsOf(x, pay) }, currentDocument: { exists: false } },
+      { transform: { document: P(x, `invoices/${inv.id}`), fieldTransforms: [{ fieldPath: "openClaims", increment: { integerValue: "1" } }, { fieldPath: "claimedAmount", increment: { integerValue: String(amount) } }] } },
+    ];
+    if (proofDoc) writes.push({ update: { name: P(x, `invoices/${inv.id}/proofs/${payId}`), fields: fieldsOf(x, proofDoc) } });
+    // the invoice's updateTime guards the "room" check against a concurrent claim or payment
+    writes.push({ update: { name: P(x, `invoices/${inv.id}`), fields: fieldsOf(x, { updatedAt: now() }) }, updateMask: { fieldPaths: ["updatedAt"] }, currentDocument: { updateTime: inv._updateTime } });
+    return { writes, audit: [{ action: "invoice.claim", ref: `invoices/${inv.id}`, after: { amount, method, payId }, actor: "payer" }], result: null };
+  });
+  if (fresh && x.d.push) {
+    const ar = fresh.locale !== "en", amt = moneyText(fresh.amount, fresh.currency);
+    await x.d.push(x.token, x.uid, ar ? `أبلغ ${fresh.name} عن دفع ${amt}` : `${fresh.name} reports paying ${amt}`,
+      ar ? `الفاتورة ${fresh.number} — تحقّق من حسابك ثمّ أكّد الدفعة أو ارفضها.` : `Invoice ${fresh.number} — check your account, then confirm or reject the payment.`).catch(() => 0);
+  }
+  return out;
+}
+
+async function opClaimProof(x) {
+  const inv = await loadInvoice(x, x.p.id);
+  const d0 = js(x, await x.d.fsGet(x.token, `invoices/${inv.id}/proofs/${segId(x.p.payId)}`));
+  return { data: d0 ? d0.data : null };
+}
+
+// The issuer decides. Confirm = the same booking as a recorded payment (invoice totals, ledger income).
+async function opClaimDecide(x) {
+  const p = x.p, confirm = p.decision === "confirm";
+  if (!confirm && p.decision !== "reject") throw new C.PfmError("bad_decision");
+  let out;
+  await commitAudited(x, async () => {
+    const inv = await loadInvoice(x, p.id);
+    const payId = segId(p.payId);
+    const pay = js(x, await x.d.fsGet(x.token, `invoices/${inv.id}/payments/${payId}`));
+    if (!pay || pay.state !== "claimed") throw new C.PfmError("not_found", "open claim");
+    const undoClaim = { transform: { document: P(x, `invoices/${inv.id}`), fieldTransforms: [{ fieldPath: "openClaims", increment: { integerValue: "-1" } }, { fieldPath: "claimedAmount", increment: { integerValue: String(-pay.amount) } }] } };
+    const note = txt(p.note, 200, "note");
+    if (!confirm) {
+      out = inv;
+      return { writes: [{ update: { name: P(x, `invoices/${inv.id}/payments/${payId}`), fields: fieldsOf(x, { state: "rejected", decidedAt: now(), note: note ? await seal(x, note) : "" }) },
+        updateMask: { fieldPaths: ["state", "decidedAt", "note"] }, currentDocument: { updateTime: pay._updateTime } }, undoClaim],
+        audit: [{ action: "invoice.claim.reject", ref: `invoices/${inv.id}`, after: { payId } }], result: null };
+    }
+    // the issuer may correct the amount to what actually arrived
+    const amount = p.amount != null ? C.toMinor(p.amount, inv.currency) : pay.amount;
+    const next = C.applyPayment({ status: inv.status, total: inv.totals.total, amountPaid: inv.amountPaid || 0, allowPartial: true }, amount);
+    const s = await settingsOf(x), cats = await categoryMap(x);
+    const payer = pay.payer?.name ? await C.openField(pay.payer.name, x.uid, keys(x)).catch(() => null) : null;
+    const tx = await buildTx(x, s, cats, { kind: "income", amount: C.fromMinor(amount, inv.currency), currency: inv.currency, fxRate: p.fxRate, categoryId: "c_invoices",
+      date: pay.at, counterparty: payer || (inv.client?.name ? await C.openField(inv.client.name, x.uid, keys(x)).catch(() => null) : null), note: inv.number || null, source: "invoice" }, null);
+    const txRow = { ...tx, invoiceId: inv.id, autoCategorized: false, rev: 1, createdAt: now(), updatedAt: now() };
+    const patch = { amountPaid: next.amountPaid, status: next.status, rev: inv.rev + 1, updatedAt: now(), ...(next.status === "paid" ? { paidAt: pay.at } : {}) };
+    out = { ...inv, ...patch };
+    const writes = [
+      { update: { name: P(x, `invoices/${inv.id}/payments/${payId}`), fields: fieldsOf(x, { state: "succeeded", amount, decidedAt: now(), note: note ? await seal(x, note) : "" }) },
+        updateMask: { fieldPaths: ["state", "amount", "decidedAt", "note"] }, currentDocument: { updateTime: pay._updateTime } },
+      { update: { name: P(x, `invoices/${inv.id}`), fields: fieldsOf(x, patch) }, updateMask: { fieldPaths: Object.keys(patch) }, currentDocument: { updateTime: inv._updateTime } },
+      undoClaim,
+      { update: { name: P(x, `pfm/${x.uid}/tx/i_${inv.id.slice(3)}_${payId}`), fields: fieldsOf(x, txRow) }, currentDocument: { exists: false } },
+      ...rollupWrites(x, C.rollupDiff(null, txRow)),
+    ];
+    if (!s.hasTx) writes.push({ update: { name: P(x, `pfm/${x.uid}`), fields: fieldsOf(x, { hasTx: true }) }, updateMask: { fieldPaths: ["hasTx"] } });
+    return { writes, audit: [{ action: "invoice.claim.confirm", ref: `invoices/${inv.id}`, after: { payId, amount, status: next.status } }], result: null };
+  });
+  return { invoice: await presentInvoice(x, out, true) };
+}
+
+// Open "I've paid" reports across the user's invoices (for "Needs you").
+async function claimsOf(x) {
+  if (!x.d.runQuery) return 0;
+  const docs = await x.d.runQuery(x.token, { from: [{ collectionId: "invoices" }], where: { fieldFilter: { field: { fieldPath: "issuerUid" }, op: "EQUAL", value: { stringValue: x.uid } } }, limit: 500 }).catch(() => []);
+  return docs.reduce((a, dd) => a + (Number(dd.fields && dd.fields.openClaims && dd.fields.openClaims.integerValue) || 0), 0);
 }

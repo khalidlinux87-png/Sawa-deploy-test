@@ -1,6 +1,6 @@
 # Sawa Wallet: Personal Accountant & Invoicing (PFM) design
 
-Status: rev 8 · **P1 (C263), P2 (C264) and P3 (C266) implemented** · Date: 2026-11-06 · Code: `pfm/` (Worker ops wired into `worker-3.js`; UI in `Sawa-app/app.p9.js`)
+Status: rev 9 · **P1 (C263), P2 (C264), P3 (C266) and P4 (C267) implemented** · Date: 2026-11-06 · Code: `pfm/` (Worker ops wired into `worker-3.js`; UI in `Sawa-app/app.p9.js`)
 
 This design follows how Sawa is already built:
 
@@ -706,6 +706,20 @@ P2 limits: budgets are in the base currency only and have no rollover yet; pushe
 
 P3 limits: no line-level discount in the editor (the server supports it); no refunds; the share text has no pay link until P4.
 
+## 7e. P4 as built (C267)
+
+| Piece | As built |
+|---|---|
+| Public endpoint | `POST {worker}/pfm/pay`, handled **before** the Authorization check in `worker-3.js`, with two operations only: `pay.view {token, lang?}` and `pay.claim`. The token (22 chars, ~113 bits) is looked up in `payLinks/`; the issuer is taken from the link, never from the request. Per-IP limits per Worker isolate: 60 views/min, 5 claims/10 min. Errors: `not_found` (404), `rate_limited` (429) |
+| `pay.view` | Issuer name and logo, client name, number, dates, items, tax, total, paid, due, open-claims amount, `allowPartial`, the invoice's account snapshot (full numbers: the issuer chose to show them), the printable HTML. A cancelled link answers `status: "cancelled"`, `payable: false` |
+| `pay.claim` | `invoices/{id}/payments/c_{idemKey}` with `state: "claimed"` (payer name/phone and reference 🔒), optional receipt photo in `invoices/{id}/proofs/{payId}` (≤ 400 KB, checked like the logo), `openClaims` / `claimedAmount` increments. Rules: invoice sent/overdue and link not revoked; account must be one on the invoice; amount ≤ due − already claimed; whole amount when `allowPartial` is off; ≤ 5 open claims. The invoice's updateTime guards the check (two full claims at once → one, tested). The issuer gets a push. **Nothing on the invoice changes until the issuer decides** |
+| Issuer | `inv.claim.decide {decision: confirm\|reject, amount?, fxRate?, note?}`: confirm books exactly like a recorded payment (invoice totals/status, ledger income with the payer as counterparty); reject frees the room. `inv.claim.proof` returns the photo. `inv.link` returns the URL. `pfm.get.claimsCount` and `inv.list.claims` feed the UI |
+| Pay page | `Sawa-app/pay.html` (standalone, no app, no login), served for `/pay/*` by `_redirects`; headers: no cache, `noindex`, `Referrer-Policy: no-referrer`. The API address is fixed in the page (a crafted link can't point it elsewhere). Arabic/English, light/dark, the app's font. One sentence leads ("You owe …"), then the accounts with copy buttons and the reference line, the items, the full invoice in a sandboxed frame (print/PDF), and the "Paid? Let … know" form (receipt photo shrunk on the device to ≤ 1280 px JPEG). The browser remembers its own report to show "Your report arrived" after a reload |
+| App | "Needs you" shows reports to check; the invoices list marks invoices with a report; the detail shows each report (payer, amount, account, date, reference, phone, receipt) with **Not received** / **Received — confirm**; "Copy pay link"; the share text now ends with the link |
+| Tests | worker 39 (view, bad/cancelled links, claim validation, idempotency, sealing, 5-claim cap, whole-amount rule, two full claims at once, proof checks, confirm with corrected amount, reject, per-IP limits) · `ui-check.mjs` P1–P4: the client opens the link in a fresh browser, sees the IBAN and amount, views the invoice, reports with a photo; the issuer sees it in "Needs you", opens the receipt, confirms; the link then shows "paid in full" (English, dark) |
+
+P4 limits: the in-memory IP limiter is per isolate (best effort); a rejected report's note is stored but not shown to the client yet; the invoice card inside Sawa chat is not built (the link is shared as text).
+
 ## 8. Delivery plan
 
 | Phase | Scope | Exit check |
@@ -713,7 +727,7 @@ P3 limits: no line-level discount in the editor (the server supports it); no ref
 | **P1** ✅ C263 | Onboarding (base currency, time zone), categories, manual ledger in any currency with user-typed rates, rollups, Overview and Ledger tabs, audit chain | Rollup rebuild = live rollup on test accounts; a USD, a JPY and a KWD entry sum correctly in a EUR base |
 | **P2** ✅ C264 | Budgets and alerts, recurring entries, categorisation rules | The 80 % alert fires once; a recurring entry is suggested, not booked, until confirmed |
 | **P3** ✅ C266 | Invoices: business settings (logo, tax toggle, receiving accounts, prefix), editor, send with yearly numbering, PDF, share, record payment (cash/transfer), overdue cron | Totals match between the editor, the PDF and the stored invoice; two sends at once get consecutive numbers; the first invoice in January is `-0001` |
-| **P4** | `/pay/{token}`: payment details, "I've paid" transfer claims and issuer confirmation, partial payments, invoice card in chat | A concurrent double tap → one payment; an underfunded wallet → clear error, nothing written; a claim changes nothing until confirmed |
+| **P4** ✅ C267 | `/pay/{token}`: payment details, "I've paid" transfer claims and issuer confirmation, partial payments, invoice card in chat | A concurrent double tap → one payment; an underfunded wallet → clear error, nothing written; a claim changes nothing until confirmed |
 | **P5** | CSV export, receipt photos | — |
 | *Later* | **Wallet** (decision 13): server-side wallet ledger with one balance per currency (§2.6), auto-sync (§5.1), wallet payment (§5.2). **Cards** (decision 10): provider, bank-account onboarding, checkout, webhook, payout to the issuer's bank, auto-refund on overpayment. **FX** (decision 11): reference-rate feed, wallet conversion with quotes and the chosen margin | Cards: a duplicate webhook → one payment; two full payments at once → one paid, one refunded. FX: a quote can be used once, and an expired one is refused |
 

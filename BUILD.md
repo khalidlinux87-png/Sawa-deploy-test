@@ -1359,3 +1359,6 @@ Budgets with single-fire alerts, recurring entries (suggested until confirmed) w
 
 ## C266 — Personal Accountant P3: invoices (Worker v124-pfm3)
 Business details, logo (Firestore data URI for now), receiving accounts, drafts, yearly numbering, send/cancel, payments booked to the ledger, printable page (`inv.html`), overdue cron. `pfm/invoice-html.mjs` is now imported by the Worker. Details: `pfm/DESIGN.md` §7d, `Sawa-app/BUILD.md` § C266.
+
+## C267 — Personal Accountant P4: public pay page (Worker v125-pfm4)
+`POST /pfm/pay` (no auth) with `pay.view` / `pay.claim`; issuer ops `inv.claim.decide`, `inv.claim.proof`, `inv.link`. The page is `Sawa-app/pay.html`. Details: `pfm/DESIGN.md` §7e, `Sawa-app/BUILD.md` § C267.

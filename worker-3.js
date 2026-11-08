@@ -1,5 +1,5 @@
 import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u0648\u0633\u0637\u0627\u0621 TURN \u0628\u0637\u0644\u0628 STUN \u0639\u0628\u0631 TCP (\u0645\u0631\u0627\u0642\u0628\u0629 \u0627\u0644\u062e\u062f\u0645\u0627\u062a)
-import { handlePfmOp, purgePfm, pfmCron } from "./pfm/pfm-worker.mjs";   // C263: \u0627\u0644\u0645\u062d\u0627\u0633\u0628 \u0627\u0644\u0634\u062e\u0635\u064a\u0651 (pfm/DESIGN.md)
+import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worker.mjs";   // C263: \u0627\u0644\u0645\u062d\u0627\u0633\u0628 \u0627\u0644\u0634\u062e\u0635\u064a\u0651 (pfm/DESIGN.md)
 /* ============================================================
    worker.js \u2014 \u0633\u0648\u0627 \u00b7 applyEdit (v2: \u0627\u0644\u062a\u062d\u0642\u0651\u0642 + \u0627\u0644\u0643\u062a\u0627\u0628\u0629 \u0625\u0644\u0649 Firestore)
    ------------------------------------------------------------
@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron } from "./pfm/pfm-worker.mjs";   // C263
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v124-pfm3";      // C263 P1 + C264 P2 + C266 P3 (invoices)
+const VER = "v125-pfm4";      // C263 P1 + C264 P2 + C266 P3 + C267 P4 (pay page)
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -6039,6 +6039,19 @@ async function handleRequest(request, env, ctx, meta) {
   try { if (new URL(request.url).pathname === "/wa/webhook") return await waWebhook(request, env, ctx); } catch (e) { return new Response("webhook error", { status: 500 }); }
   try { if (request.method === "POST" && new URL(request.url).pathname === "/ack") return await deviceAck(request, env); } catch (e) { slog("error", "ack.fail", { err: String(e && e.message || e).slice(0, 300) }); return json({ ok: false, error: publicErr(e) }, 500); }
   try { if (request.method === "GET" && new URL(request.url).pathname === "/av") return await avatarImg(request, env); } catch (e) { return new Response("", { status: 500 }); }   // C152
+  // C267 (P4): the public pay page — no Authorization; the unguessable link token picks the invoice and its issuer.
+  if (request.method === "POST" && new URL(request.url).pathname === "/pfm/pay") {
+    try {
+      let b = {}; try { b = await request.json(); } catch (e) {}
+      meta.op = "pfm.pay"; stat("ops:pfm.pay");
+      const r = await handlePfmPublic(String(b.op || ""), b.payload, env, PFM_DEPS, request.headers.get("CF-Connecting-IP") || "?");
+      return json({ ok: true, ...r });
+    } catch (e) {
+      const pub = publicErr(e);
+      if (isTransientErr(e)) return json({ ok: false, error: "server_error: busy", retry: true }, 503);
+      return json({ ok: false, error: pub }, /^rate_limited/.test(pub) ? 429 : /^not_found/.test(pub) ? 404 : 400);
+    }
+  }
   let statOp = null;
   try {
     const auth = request.headers.get("Authorization") || "";
