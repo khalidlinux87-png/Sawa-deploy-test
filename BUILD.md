@@ -1348,3 +1348,17 @@ Meta قيّدت حافظة الأعمال («prohibited from advertising, includ
 ## 🖼️ v121 — صورة الحساب والمجموعة بدقّةٍ عالية (C204 في Sawa-app/BUILD.md)
 - `profile.set` و`group.update` يقبلان `photoHd` اختياريّاً (data:image/jpeg|webp، ≤ 400 ألف حرف) ⇒ `avatars/{id}_hd`. صورةٌ جديدة بلا نسخةٍ عالية أو إزالة ⇒ تُحذف القديمة. محادثة العائلة تقبل photoHd مع photo.
 - المصغّرة `avatars/{id}` كما هي (≤ 20 ألف) — القوائم لا تجلب النسخة العالية.
+
+## C263 — Personal Accountant P1 (Worker v122-pfm)
+`pfm/` holds the design (`DESIGN.md`), the logic (`pfm-core.mjs`), the `pfm.*` ops (`pfm-worker.mjs`, routed from `worker-3.js`) and tests.
+Needs the Worker secret `PFM_KEK_v1` (32 random bytes, base64). `worker-3.js` now imports `./pfm/pfm-worker.mjs`, so deploy with wrangler (GitHub), not by pasting one file.
+Tests: `node pfm/pfm-core.test.mjs` · `node pfm/pfm-worker.test.mjs` · `node pfm/ui-check.mjs ../Sawa-app <react dir> <out dir>`. Details: `Sawa-app/BUILD.md` § C263.
+
+## C264 — Personal Accountant P2 (Worker v123-pfm2)
+Budgets with single-fire alerts, recurring entries (suggested until confirmed) with a `pfm` cron job and the `pfmDue/{uid}` index, and category rules. No new secret. Details: `pfm/DESIGN.md` §7c and `Sawa-app/BUILD.md` § C264.
+
+## C266 — Personal Accountant P3: invoices (Worker v124-pfm3)
+Business details, logo (Firestore data URI for now), receiving accounts, drafts, yearly numbering, send/cancel, payments booked to the ledger, printable page (`inv.html`), overdue cron. `pfm/invoice-html.mjs` is now imported by the Worker. Details: `pfm/DESIGN.md` §7d, `Sawa-app/BUILD.md` § C266.
+
+## C267 — Personal Accountant P4: public pay page (Worker v125-pfm4)
+`POST /pfm/pay` (no auth) with `pay.view` / `pay.claim`; issuer ops `inv.claim.decide`, `inv.claim.proof`, `inv.link`. The page is `Sawa-app/pay.html`. Details: `pfm/DESIGN.md` §7e, `Sawa-app/BUILD.md` § C267.
