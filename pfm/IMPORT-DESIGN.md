@@ -218,51 +218,46 @@ names it has already decrypted as suggestions while typing.
 
 ## 7. JSON shape (API and «نسخ JSON»)
 
+The contract is **`import-batch.schema.json`** (JSON Schema draft-07), with a valid example in
+`samples/import-batch.example.json`. It follows Khalid's `SawaWalletBatchResponse` (2026-11-08): `batch_id`,
+`total_processed`, `receipts[]`, `sender`/`recipient` as `{name, account_identifier}` objects, `amount` as `{value, currency}`,
+and a per-receipt `status` of `verified` or `requires_verification`. `pfm.import.get` returns this shape;
+`pfm.import.add` returns the same `receipts[]` for one item.
+
 ```json
 {
-  "import_id": "imp_7c1e…",
-  "rows": [
-    {
-      "id": "m_3f9a…",
-      "transaction_id": "TRX-20261107-88123",
-      "timestamp": "2026-11-07 14:32:10",
-      "sender": "Khalid A.",
-      "recipient": "Nile Electricity",
-      "amount": { "value": "45200.00", "minor": 4520000, "currency": "SDG" },
-      "fee": null,
-      "service_type": "utility",
-      "project_name": "General",
-      "project_id": "p_general",
-      "category": "c_utilities",
-      "kind": "expense",
-      "raw_source_type": "sms_notification",
-      "verify": [],
-      "duplicate_of": null
-    },
-    {
-      "id": "t_91b0…",
-      "transaction_id": "[Requires Verification]",
-      "timestamp": "2026-11-06 09:15:00",
-      "sender": "Khalid A.",
-      "recipient": "Al-Amal Building Supplies",
-      "amount": { "value": "[Requires Verification]", "minor": null, "currency": "SDG" },
-      "service_type": "commercial_supply",
-      "project_name": "House build",
-      "project_id": "p_4d2…",
-      "category": "c_maintenance",
-      "kind": "expense",
-      "raw_source_type": "image_ocr",
-      "verify": [
-        { "field": "transaction_id", "reason": "not printed on the receipt" },
-        { "field": "amount", "reason": "total is torn off" }
-      ],
-      "duplicate_of": null
-    }
-  ]
+  "transaction_id": "TXN-88492031",
+  "timestamp": "2026-06-07T14:30:00+02:00",
+  "sender":    { "name": "خالد", "account_identifier": "+249123456789", "is_me": true },
+  "recipient": { "name": "شركة النحلة للبترول", "account_identifier": "ACC-99281", "is_me": false },
+  "kind": "expense",
+  "amount": { "value": "150000.00", "minor": 15000000, "currency": "SDG" },
+  "service_type": "fuel", "service_label": "تموين وقود تجاري",
+  "project_id": "p_4d2b7e", "project_name": "إمدادات اللوجستيات",
+  "category_id": "c_ops_supplies", "category": "مؤن التشغيل",
+  "raw_source_type": "image_ocr",
+  "status": "verified", "verify": [], "duplicate_of": null
 }
 ```
+(Abridged: `id`, `item_no`, `time_known` and `fee` are in the full example.)
 
-(The names and numbers above are invented examples.) `value` is a decimal string; `minor` is what the ledger stores.
+### 7.1 Changes from the original schema, and why
+
+| Original | Now | Why |
+|---|---|---|
+| `amount.value`: number (`150000.00`) | Decimal **string** `"150000.00"` + `minor` (integer) | No floats in money (§1 decision 2). JSON numbers become binary floats in JavaScript; `minor` is exactly what the ledger stores |
+| Every field required, never empty | `transaction_id`, `timestamp`, names, `amount.value`, `currency` may be `null` | An unreadable field must be expressible without inventing a value. A number field cannot hold the text `[Requires Verification]` |
+| `status` only | `status` **+ `verify: [{field, reason}]`** | The app must know *which* field to highlight and why. Rule: `requires_verification` exactly when `verify` is not empty |
+| `timestamp` ending in `Z` | ISO 8601 with the place's offset (`+02:00` for Sudan) | A receipt prints local time. `14:30:00Z` would mean 16:30 in Khartoum. An offset keeps the printed time and is still one exact instant |
+| `service_type`: free Arabic text | Code from §1.1 (`fuel`) + `service_label` (the printed text) | Free text cannot be filtered or counted reliably: «وقود»، «تموين وقود»، «بنزين» would be three types |
+| `project_name`, `category`: names only | `project_id` / `category_id` + the name | Renaming a project or category must not break past entries or search |
+| `currency`: any string | One of the twelve accepted currencies or `null` | Decision 8; anything else is flagged, not stored |
+| — | `kind`, `fee`, `id`, `item_no`, `duplicate_of`, `is_me`, `time_known` | Income vs expense, separate fees, link back to the source item, duplicates (§4.5) |
+| `total_processed` = receipts? | `total_processed` = input items; `counts.receipts` = receipts found; `failed_items[]` | One PDF can hold many receipts, and a blank photo holds none. The batch reports both without stopping |
+
+**Markdown table.** The review screen and the chat summary show
+`رقم العمليّة | التاريخ | المبلغ | المرسل | المستقبل | نوع الخدمة | المشروع`, with `[Requires Verification]` / «يحتاج تحقّقاً» in a
+flagged cell. In JSON the same cell is `null` plus a `verify` entry.
 
 ---
 
