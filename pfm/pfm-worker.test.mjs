@@ -39,19 +39,19 @@ await t("not configured without the encryption key; not initialised before init"
 await t("init: validates, seeds categories, is idempotent, starts the audit chain", async () => {
   const { fs, call } = setup();
   await assert.rejects(call("pfm.init", { baseCurrency: "XXQ", tz: "Europe/Berlin" }), err("bad_currency"));
-  await assert.rejects(call("pfm.init", { baseCurrency: "EUR", tz: "Mars/Base" }), err("bad_tz"));
-  const r = await call("pfm.init", { baseCurrency: "EUR", tz: "Europe/Berlin", locale: "en" });
-  assert.equal(r.settings.baseCurrency, "EUR");
+  await assert.rejects(call("pfm.init", { baseCurrency: "GBP", tz: "Mars/Base" }), err("bad_tz"));
+  const r = await call("pfm.init", { baseCurrency: "GBP", tz: "Europe/Berlin", locale: "en" });
+  assert.equal(r.settings.baseCurrency, "GBP");
   assert.equal(r.categories.length, C.DEFAULT_CATEGORIES.length);
   assert.match(r.month, /^\d{4}-\d{2}$/);
   const again = await call("pfm.init", { baseCurrency: "USD", tz: "UTC" });
-  assert.equal(again.settings.baseCurrency, "EUR");                       // second init changes nothing
+  assert.equal(again.settings.baseCurrency, "GBP");                       // second init changes nothing
   assert.equal(fs.docs.get(`${ROOT}/audit/u1`).data.headSeq, 1);
 });
 
 async function ready(opts = {}) {
   const s = setup();
-  await s.call("pfm.init", { baseCurrency: "EUR", tz: "Europe/Berlin", ...opts });
+  await s.call("pfm.init", { baseCurrency: "GBP", tz: "Europe/Berlin", ...opts });
   return s;
 }
 
@@ -81,14 +81,14 @@ await t("tx.add: validation", async () => {
   await assert.rejects(call("pfm.tx.add", { ...base, categoryId: "nope" }), err("bad_category"));
   await assert.rejects(call("pfm.tx.add", { ...base, date: "2026-13-01" }), err("bad_date"));
   await assert.rejects(call("pfm.tx.add", { ...base, note: "x".repeat(301) }), err("too_long"));
-  await assert.rejects(call("pfm.tx.add", { ...base, currency: "JPY", amount: "1.5" }), err("too_precise"));
+  await assert.rejects(call("pfm.tx.add", { ...base, currency: "CNY", amount: "1.555" }), err("too_precise"));
 });
 
 await t("foreign currency: typed rate, pending rate, last-rate memory", async () => {
   const { fs, call } = await ready();
   const a = await call("pfm.tx.add", { idemKey: "key-usd-0001", kind: "expense", amount: "25.00", currency: "USD", fxRate: "0.9224", categoryId: "c_telecom", date: "2026-11-03" });
   assert.equal(a.tx.baseAmount, 2306); assert.equal(a.tx.fxSource, "manual");
-  assert.deepEqual(await call("pfm.fx.last", { from: "USD" }).then((r) => [r.to, r.rate]), ["EUR", "0.9224"]);
+  assert.deepEqual(await call("pfm.fx.last", { from: "USD" }).then((r) => [r.to, r.rate]), ["GBP", "0.9224"]);
   const b = await call("pfm.tx.add", { idemKey: "key-usd-0002", kind: "expense", amount: "10", currency: "USD", categoryId: "c_telecom", date: "2026-11-04" });
   assert.equal(b.tx.baseAmount, null); assert.equal(b.tx.fxSource, "pending");
   let m = month(fs, "u1", "2026-11");
@@ -97,8 +97,8 @@ await t("foreign currency: typed rate, pending rate, last-rate memory", async ()
   await call("pfm.tx.update", { id: b.tx.id, rev: 1, fxRate: "0.92" });
   m = month(fs, "u1", "2026-11");
   assert.equal(m.expense, 2306 + 920); assert.equal(m.ratePending, 0);
-  const y = await call("pfm.tx.add", { idemKey: "key-jpy-0001", kind: "expense", amount: "1500", currency: "JPY", fxRate: "0.0061", categoryId: "c_food", date: "2026-11-04" });
-  assert.equal(y.tx.amount, 1500); assert.equal(y.tx.baseAmount, 915);           // ¥1,500 × 0.0061 = €9.15
+  const y = await call("pfm.tx.add", { idemKey: "key-jpy-0001", kind: "expense", amount: "1500", currency: "CNY", fxRate: "0.0061", categoryId: "c_food", date: "2026-11-04" });
+  assert.equal(y.tx.amount, 150000); assert.equal(y.tx.baseAmount, 915);        // ¥1,500.00 × 0.0061 = £9.15
 });
 
 await t("tx.update and tx.delete keep rollups exact, with stale-write protection", async () => {
@@ -373,11 +373,11 @@ const PNG = "data:image/png;base64," + Buffer.concat([Buffer.from([0x89, 0x50, 0
 async function shop(opts = {}) {
   const r = await ready2(opts);
   await r.call("pfm.biz.set", { name: "Khalid Design", contact: "+966 51 234 5678", address: "Riyadh, King Fahd Rd", taxId: "300123456700003", invoicePrefix: "INV" });
-  const acct = await r.call("pfm.account.upsert", { type: "bank", currency: "EUR", label: "Main", holderName: "Khalid", bankName: "Deutsche Bank", number: "DE89 3704 0044 0532 0130 00" });
+  const acct = await r.call("pfm.account.upsert", { type: "bank", currency: "GBP", label: "Main", holderName: "Khalid", bankName: "Deutsche Bank", number: "DE89 3704 0044 0532 0130 00" });
   r.acct = acct.account;
   return r;
 }
-const draft = (call, extra = {}) => call("inv.create", { client: { name: "Nile Trading", contact: "billing@nile.example" }, currency: "EUR",
+const draft = (call, extra = {}) => call("inv.create", { client: { name: "Nile Trading", contact: "billing@nile.example" }, currency: "GBP",
   items: [{ description: "Design work", qty: "2", unitPrice: "450.00" }, { description: "Hosting", qty: "1", unitPrice: "30" }], issueDate: TODAY, ...extra });
 
 await t("business settings: sealed at rest, tax rates and prefix validated, next number preview", async () => {
@@ -399,7 +399,7 @@ await t("receiving accounts: masked, sealed, number change pushes a warning, wal
   await assert.rejects(call("pfm.account.upsert", { type: "bank", label: "X", holderName: "K", bankName: "B", number: "DE00370400440532013000" }), err("bad_account"));
   await assert.rejects(call("pfm.account.upsert", { type: "sawa_wallet" }), err("bad_account"));
   const before = pushes.length;
-  await call("pfm.account.upsert", { id: acct.id, type: "bank", currency: "EUR", label: "Main", holderName: "Khalid", bankName: "Deutsche Bank", number: "GB82WEST12345698765432" });
+  await call("pfm.account.upsert", { id: acct.id, type: "bank", currency: "GBP", label: "Main", holderName: "Khalid", bankName: "Deutsche Bank", number: "GB82WEST12345698765432" });
   assert.equal(pushes.length, before + 1); assert.match(pushes.at(-1).body, /5432/);
   await call("pfm.account.archive", { id: acct.id });
   assert.equal((await call("pfm.biz.get")).accounts[0].archived, true);
@@ -421,7 +421,7 @@ await t("drafts: totals on the server, tax only when registered, client sealed, 
   assert.equal(d1.invoice.status, "draft"); assert.equal(d1.invoice.number, null); assert.equal(d1.invoice.totals.total, 93000);
   assert.equal(d1.invoice.client.name, "Nile Trading");
   assert.ok(!JSON.stringify(fs.docs.get(`${ROOT}/invoices/${d1.invoice.id}`).data).includes("Nile Trading"));
-  assert.equal((await call("inv.preview", { currency: "EUR", items: [{ description: "a", qty: "3", unitPrice: "1.10" }] })).totals.total, 330);
+  assert.equal((await call("inv.preview", { currency: "GBP", items: [{ description: "a", qty: "3", unitPrice: "1.10" }] })).totals.total, 330);
   await call("pfm.biz.set", { taxRegistered: true, taxLabel: "VAT", taxRates: [{ id: "std", label: "Standard", rate: "19" }] });
   const u = await call("inv.update", { id: d1.invoice.id, rev: 1, items: [{ description: "Design work", qty: "2", unitPrice: "450", taxRateId: "std", discount: { type: "amt", amount: "50" } }],
     invoiceDiscount: { type: "pct", rate: "10" } });
@@ -498,7 +498,7 @@ await t("printable page: number, logo, accounts, escaped client text; list and o
   const dft = await draft(call);
   assert.match((await call("inv.html", { id: dft.invoice.id, lang: "ar" })).html, /مسوّدة/);
   const l = await call("inv.list", {});
-  assert.equal(l.items.length, 2); assert.deepEqual(l.outstanding, [{ currency: "EUR", amount: 93000 }]);
+  assert.equal(l.items.length, 2); assert.deepEqual(l.outstanding, [{ currency: "GBP", amount: 93000 }]);
   assert.equal((await call("inv.list", { status: "draft" })).items.length, 1);
   assert.equal(l.items.find((i) => i.id === inv.id).clientName, "<b>Nile</b> & Co");
 });
@@ -506,7 +506,7 @@ await t("printable page: number, logo, accounts, escaped client text; list and o
 await t("invoices are private to their issuer", async () => {
   const { call } = await shop();
   const d0 = await draft(call);
-  await call("pfm.init", { baseCurrency: "EUR", tz: "Europe/Berlin" }, "u2");
+  await call("pfm.init", { baseCurrency: "GBP", tz: "Europe/Berlin" }, "u2");
   await assert.rejects(call("inv.get", { id: d0.invoice.id }, "u2"), err("not_found"));
   await assert.rejects(call("inv.send", { id: d0.invoice.id }, "u2"), err("not_found"));
   assert.equal((await call("inv.list", {}, "u2")).items.length, 0);
@@ -541,7 +541,7 @@ let ipSeq = 0;
 const pub = (r, op, payload, ip) => handlePfmPublic(op, payload, r.env, r.d, ip || "10.0.0." + (++ipSeq));
 async function sentInvoice(extra = {}) {
   const r = await shop();
-  await r.call("pfm.account.upsert", { id: r.acct.id, type: "bank", currency: "EUR", label: "Main", holderName: "Khalid", bankName: "Deutsche Bank", number: "DE89370400440532013000" });
+  await r.call("pfm.account.upsert", { id: r.acct.id, type: "bank", currency: "GBP", label: "Main", holderName: "Khalid", bankName: "Deutsche Bank", number: "DE89370400440532013000" });
   const inv = (await r.call("inv.send", { id: (await draft(r.call, { payoutAccountIds: [r.acct.id], ...extra })).invoice.id })).invoice;
   r.inv = inv; r.tok = inv.payLinkToken; return r;
 }
