@@ -157,11 +157,13 @@ export async function readImage(img, ocr, templates, ctx = {}) {
     for (const c of cells) {
       if (c.whole) continue;
       const parts = [c.right, c.left].map((box) => ({ box, crop: prepCrop(img, box, c.bg, 3) }));
-      // Which half is the label? Try both, with fallbacks: labels are short and OCR sometimes reads Arabic as Latin.
+      // Which half is the label? Try both, with fallbacks: labels are short, OCR sometimes reads Arabic as Latin, and a
+      // short Latin label can turn to noise at 3× ("Trx. ID") while it reads cleanly at 2×.
       let lab = null;
-      for (const mode of ["mix", "ara", "eng"]) {
+      for (const [mode, scale] of [["mix", 3], ["ara", 3], ["eng", 3], ["mix", 2], ["eng", 2]]) {
         for (let i = 0; i < 2 && !lab; i++) {
-          const r = await ocr(parts[i].crop, mode), m = matchLabel(r.text, tpl.labels);
+          const crop = scale === 3 ? parts[i].crop : prepCrop(img, parts[i].box, c.bg, scale);
+          const r = await ocr(crop, mode), m = matchLabel(r.text, tpl.labels);
           if (m) lab = { i, m, r };
         }
         if (lab) break;
@@ -179,4 +181,24 @@ export async function readImage(img, ocr, templates, ctx = {}) {
     if (r) return { ...r, cells: cells.length };
   }
   return null;
+}
+
+/**
+ * After the user confirms which accounts are theirs, decide income or spending again without re-reading the image:
+ * same rule as extractFromCells (sender = me → expense, recipient = me → income, both → transfer).
+ */
+export function recomputeKind(r, myAccounts) {
+  const own = new Set((myAccounts || []).map((a) => String(a).replace(/\D/g, "")));
+  const mine = (a) => !!a && own.has(String(a).replace(/\D/g, ""));
+  const fromMe = mine(r.sender.account_identifier), toMe = mine(r.recipient.account_identifier);
+  const verify = r.verify.filter((v) => !(v.field === "kind" && /confirm it is yours|neither account|add your account/.test(v.reason)));
+  let kind = r.kind;
+  if (fromMe && toMe) kind = "transfer";
+  else if (fromMe) kind = "expense";
+  else if (toMe) kind = "income";
+  else if (!r.own_account_hint) { kind = null; verify.push({ field: "kind", reason: own.size ? "neither account is one of yours" : "add your account numbers to tell income from spending" }); }
+  else verify.push({ field: "kind", reason: `new account ${r.own_account_hint} sent this transfer: confirm it is yours` });
+  const own_account_hint = fromMe ? null : r.own_account_hint;
+  return { ...r, kind, own_account_hint, sender: { ...r.sender, is_me: fromMe }, recipient: { ...r.recipient, is_me: toMe },
+    verify, status: verify.length ? "requires_verification" : "verified" };
 }

@@ -1,6 +1,6 @@
 # Sawa Wallet Engine: bulk receipt and payment-message import (P6) design
 
-Status: rev 3 · **reader prototype built for Bankak (§4.7); the rest not built** · Date: 2026-11-09 (rev 2: Sawa's own reader instead of a paid AI service, decision I1) · Extends `DESIGN.md` (PFM rev 9, P1–P5 built)
+Status: rev 4 · **Bankak import built end to end (§4.7, §4.8, C271)**; search, projects and other issuers not built · Date: 2026-11-09 (rev 2: Sawa's own reader instead of a paid AI service, decision I1) · Extends `DESIGN.md` (PFM rev 9, P1–P5 built)
 
 **What it does.** The user hands the Personal Accountant a batch: photos of receipts, PDF invoices or statements, or
 pasted payment messages (SMS or email). Sawa reads every transaction in it, fills in the fields below, files each one
@@ -257,8 +257,22 @@ and English; two were scrolled so the top rows were cut off), ~3 s per image in 
 | Comment | 2 | 0 | 4 (Arabic letters) | 1 |
 
 Before the two-read rule one read gave `55000.00` for `35000.00`; it is now caught by the second read. Comments are
-shown for the user to edit and are never used for money. Next: more samples (target 20 per layout), Arabic comment and
-name accuracy (larger crops, fine-tuning §4.6), and the app side (Web Worker, progress, review table).
+shown for the user to edit and are never used for money.
+
+### 4.8 In the app (C271)
+
+Ledger → «استيراد». The app loads `/ocr/v1/sawa-reader.js` (built from this folder by `dev/bundle.mjs`) and the OCR
+files from its own origin, reads each picked image on the phone, and shows a review card per image: status (ready /
+needs checking / repeated / between your accounts / not recognised), the flags in plain words, editable amount, date,
+type, party, category and note, and an "add" tick (on for clean rows, off for flagged ones until the user checks them).
+A new sender account on a success screen asks «هل هو حسابك؟» once (`pfm.import.prefs.set`), then every row is decided
+again (`recomputeKind`; category and party follow a type change). Saving calls `pfm.tx.add` with `ref {issuer, id}`
+(or an idemKey when the screen shows no reference, with a note that a repeat would not be caught), then attaches the
+shrunk screenshot as the receipt, then stores the confirmed names per account. Repeats: inside a batch by reference,
+across batches by the server (`duplicate: true`).
+
+Not built yet from this design: the server-side import batch (§3 `pfm.import.*` beyond prefs), suggested rows,
+projects (§1.2), seven-field search (§5), text/SMS import (§4.2), PDFs, share targets, other issuers.
 
 ---
 
