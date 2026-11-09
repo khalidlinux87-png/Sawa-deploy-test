@@ -128,6 +128,7 @@ await t("change order: a second revision needs a reason and supersedes the basel
   const all = (await s.call("pfm.proj.get", { pid })).estimates;
   assert.equal(all.find((e) => e.id === base.id).status, "superseded");
   assert.equal(all.find((e) => e.id === co.estimate.id).status, "baseline");
+  assert.equal(typeof all.find((e) => e.id === co.estimate.id).rev, "number");   // the editor needs the revision to save
 });
 
 await t("ledger: lines must exist on the baseline; ids are idempotent; health follows", async () => {
@@ -357,6 +358,38 @@ await t("purge: an owner's projects go; a member only loses membership; nothing 
   // u2's project is still there, and u1 is no longer one of its members
   assert.ok(s.fs.docs.get(`${ROOT}/pfmProjects/${theirs.id}`));
   assert.equal(s.fs.docs.get(`${ROOT}/pfmProjects/${theirs.id}/members/u1`), undefined);
+});
+
+// ---------- export ----------
+
+await t("export: CSV defuses formulas, keeps numbers as numbers, and the viewer can export; a stranger cannot", async () => {
+  const s = await ready();
+  const { project } = await s.call("pfm.proj.create", { ...PROJ, name: "<b>Villa</b>", description: "x", idemKey: "proj-exp-0001" });
+  const pid = project.id;
+  await s.call("pfm.proj.estimate.create", { pid, idemKey: "est-exp-0001" }).then(async (r) => {
+    await s.call("pfm.proj.estimate.lines", { pid, eid: r.estimate.id, rev: r.estimate.rev, lines: LINES });
+    await s.call("pfm.proj.estimate.approve", { pid, eid: r.estimate.id, rev: r.estimate.rev + 1 });
+  });
+  await s.call("pfm.proj.tx.add", { pid, idemKey: "tx-exp-0001", kind: "expense", amount: "12.00", category: "other", occurredOn: "2026-11-02", description: "=HYPERLINK(\"x\")" });
+  const csv = (await s.call("pfm.proj.export", { pid })).csv;
+  assert.ok(csv.includes("'=HYPERLINK"), "formula cell is defused");
+  assert.ok(/,-?\d+\.\d\d,/.test(csv) && !csv.includes("'12.00"), "amounts stay numeric");
+  assert.ok(csv.includes("Cement"));
+  await share(s, pid, "u2", "viewer");
+  assert.ok((await s.call("pfm.proj.export", { pid }, "u2")).csv.length > 0, "viewer exports");
+  await assert.rejects(s.call("pfm.proj.export", { pid }, "u9"), err("not_found"));
+});
+
+await t("report: user text is escaped; the report is self-contained and carries the figures", async () => {
+  const s = await ready();
+  const pid = await withBaseline(s, "u1", { name: "<img src=x onerror=alert(1)>" });
+  const { html, filename } = await s.call("pfm.proj.report", { pid, lang: "en" });
+  assert.ok(!html.includes("<img src=x"), "project name is escaped");
+  assert.ok(html.includes("&lt;img src=x"));
+  assert.ok(html.includes("<meta charset=\"utf-8\">") && html.includes("dir=\"ltr\""));
+  assert.ok(html.includes("2,350.00") || html.includes("2350.00"), "estimate total shown");
+  assert.equal(filename, `project-${pid}.html`);
+  assert.equal((await s.call("pfm.proj.report", { pid, lang: "ar" })).html.includes('dir="rtl"'), true);
 });
 
 console.log(process.exitCode ? "FAILED" : `projects-worker: ${n} passed`);

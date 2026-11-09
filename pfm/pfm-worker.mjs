@@ -1671,7 +1671,7 @@ async function opProjGet(x) {
   await projSchemaReady(x);
   const pid = segId(x.p.pid);
   const { p, role } = await accessOf(x, pid, "viewer");
-  const estimates = (await estimatesOf(x, pid)).map((e) => ({ id: e.id, revision: e.revision, status: e.status, reason: e.reason ?? null, total: e.total ?? 0, lineCount: e.lineCount ?? 0, approvedAt: e.approvedAt ?? null }));
+  const estimates = (await estimatesOf(x, pid)).map((e) => ({ id: e.id, revision: e.revision, status: e.status, rev: e.rev, reason: e.reason ?? null, total: e.total ?? 0, lineCount: e.lineCount ?? 0, approvedAt: e.approvedAt ?? null }));
   const { estimateId, health } = await healthFor(x, p, undefined);
   const members = (await membersOf(x, pid)).length;
   return { project: await presentProject(x, p), role, members, estimates, estimateId, health };
@@ -2005,7 +2005,8 @@ async function opProjVariance(x) {
     const r = byKey.get(v.lineKey) || {};
     lines.push({ ...v, name: await openP(x, pid, r.name), unit: r.unit ?? null, category: r.category ?? null, notes: await openP(x, pid, r.notes) });
   }
-  return { estimateId: eid, currency: p.currency, lines };
+  const est = eid ? await getDoc(x, J.paths.estimate(pid, eid)) : null;
+  return { estimateId: eid, estimateRev: est ? est.rev : null, currency: p.currency, lines };
 }
 
 async function opProjCharts(x) {
@@ -2189,4 +2190,126 @@ export async function purgeProjects(d, token, uid, spend) {
       }
     }
   }
+}
+
+// =====================================================================================================
+// Projects export (PROJECTS.md §8): a CSV for spreadsheets and a self-contained printable report.
+// Both read the same snapshot as the screens. Text is escaped; amounts are formatted from minor units.
+// =====================================================================================================
+
+Object.assign(OPS, { "pfm.proj.export": opProjExport, "pfm.proj.report": opProjReport });
+PFM_OPS.push("pfm.proj.export", "pfm.proj.report");
+
+const escH = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const fmtMoney = (minor, cur) => (minor == null ? "" : C.fromMinor(minor, cur) + " " + cur);
+
+async function projectSnapshot(x, pid) {
+  const { p, role } = await accessOf(x, pid, "viewer");
+  const eid = p.baselineEstimateId || null;
+  const lines = eid ? await linesOf(x, pid, eid) : [];
+  const txs = await txsOf(x, pid);
+  const { health } = await healthFor(x, p, eid, txs);
+  const byKey = new Map(lines.map((r) => [r.id, r]));
+  const vlines = [];
+  for (const v of health.lines) {
+    const r = byKey.get(v.lineKey) || {};
+    vlines.push({ ...v, name: (await openP(x, pid, r.name)) || "", unit: r.unit ?? "", category: r.category ?? "" });
+  }
+  const ledger = [];
+  for (const t of [...txs].sort((a, b) => (a.occurredOn < b.occurredOn ? -1 : a.occurredOn > b.occurredOn ? 1 : 0))) ledger.push(await presentTx(x, pid, t));
+  const series = J.chartSeries(lines.map((r) => ({ lineKey: r.id, category: r.category, estTotal: r.estTotal })), txs);
+  return { p: await presentProject(x, p), role, health, vlines, ledger, series, estimateId: eid };
+}
+
+// Text columns are formula-defused (csvCell with text=true); number columns are not, so negatives stay numbers.
+export function projectCsv(snap, ar) {
+  const L = (a, e) => (ar ? a : e), cur = snap.p.currency;
+  const T = (v) => csvCell(v, true), N = (v) => csvCell(v, false);
+  const row = (cells) => cells.join(",") + "\r\n";
+  const lineName = (k) => (snap.vlines.find((v) => v.lineKey === k) || {}).name || "";
+  let out = "﻿";
+  out += row([T(L("المشروع", "Project")), T(snap.p.name)]);
+  out += row([T(L("العملة", "Currency")), T(cur), T(L("الميزانيّة", "Budget")), N(C.fromMinor(snap.p.targetBudget, cur))]);
+  out += row([]);
+  out += row(["Item", "Unit", "Est. qty", "Actual qty", "Est. unit price", "Est. total", "Actual cost", "Variance", "Status"].map((c, i) => T(i === 0 ? L("البند", "Item") : c)));
+  for (const v of snap.vlines) out += row([T(v.name), T(v.unit), N(v.estQty), N(v.actualQty), N(C.fromMinor(v.estUnitPrice, cur)), N(C.fromMinor(v.estTotal, cur)), N(C.fromMinor(v.actualCost, cur)), N(C.fromMinor(v.totalVariance, cur)), T(v.status)]);
+  out += row([]);
+  out += row([L("التاريخ", "Date"), L("النوع", "Type"), L("الوصف", "Description"), L("الطرف الآخر", "Counterparty"), L("البند أو الفئة", "Line or category"), L("المبلغ", "Amount"), L("العملة الأصلية", "Original currency"), L("المبلغ الأصلي", "Original amount"), L("الحالة", "Status")].map((c) => T(c)));
+  for (const t of snap.ledger) {
+    out += row([T(t.occurredOn), T(t.kind), T(t.description || ""), T(t.counterparty || ""), T(t.lineKey ? lineName(t.lineKey) : t.category || ""),
+      N(C.fromMinor(t.amount, cur)), T(t.originalCurrency), N(C.fromMinor(t.originalAmount, t.originalCurrency)), T(t.status)]);
+  }
+  return out;
+}
+
+const STATUS_COLOR = { green: "#15803d", amber: "#b45309", red: "#b91c1c" };
+const LINE_COLOR = { on_budget: "#15803d", warning: "#b45309", over_budget: "#b91c1c", not_started: "#64748b" };
+export function projectReportHtml(snap, ar, issuedOn) {
+  const cur = snap.p.currency, h = snap.health, t = (a, e) => (ar ? a : e), m = (v) => fmtMoney(v, cur);
+  const cats = snap.series.byCategory.filter((c) => c.estimated || c.actual);
+  const max = Math.max(1, ...cats.map((c) => Math.max(c.estimated, c.actual)));
+  const bars = cats.map((c) => `<div class="bar"><div class="lbl">${escH(t(BOQ_AR[c.category], BOQ_EN[c.category]))}</div>
+      <div class="track"><div class="fill est" style="width:${(c.estimated / max) * 100}%"></div></div>
+      <div class="track"><div class="fill act" style="width:${(c.actual / max) * 100}%;background:${c.actual > c.estimated ? "#b91c1c" : "#0f766e"}"></div></div>
+      <div class="sub">${escH(m(c.actual))} / ${escH(m(c.estimated))}</div></div>`).join("");
+  const boq = snap.vlines.map((v) => `<tr><td>${escH(v.name)}</td><td>${escH(v.unit)}</td><td class="n">${escH(v.estQty)}</td><td class="n">${escH(v.actualQty)}</td>
+      <td class="n">${escH(m(v.estTotal))}</td><td class="n">${escH(m(v.actualCost))}</td><td class="n">${escH(m(v.totalVariance))}</td>
+      <td><span class="chip" style="background:${LINE_COLOR[v.status] || "#64748b"}">${escH(t(LINE_AR[v.status], LINE_EN[v.status]))}</span></td></tr>`).join("");
+  const ledger = snap.ledger.map((x) => `<tr><td>${escH(x.occurredOn)}</td><td>${escH(t(KIND_AR[x.kind], KIND_EN[x.kind]))}</td><td>${escH(x.description || "")}</td>
+      <td>${escH(x.counterparty || "")}</td><td class="n">${escH(m(x.amount))}</td><td>${x.status === "voided" ? escH(t("ملغاة", "Voided")) : escH(t("مُسجّلة", "Posted"))}</td></tr>`).join("");
+  const cell = (label, value, color) => `<div class="card"><div class="k">${escH(label)}</div><div class="v"${color ? ` style="color:${color}"` : ""}>${escH(value)}</div></div>`;
+  return `<!doctype html><html lang="${ar ? "ar" : "en"}" dir="${ar ? "rtl" : "ltr"}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>${escH(snap.p.name)}</title>
+<style>
+  body{font-family:system-ui,sans-serif;color:#0f172a;margin:0;padding:18px;font-size:12px}
+  header{display:flex;justify-content:space-between;border-bottom:3px solid #0f766e;padding-bottom:8px}
+  h1{font-size:20px;margin:0} .meta{color:#64748b;margin-top:4px} .brand{color:#0f766e;font-weight:800}
+  h2{font-size:14px;margin:18px 0 8px;border-inline-start:4px solid #0f766e;padding-inline-start:8px}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+  .card{border:1px solid #e2e8f0;border-radius:8px;padding:8px} .k{color:#64748b;font-size:11px} .v{font-weight:800;margin-top:3px}
+  .pill{display:inline-block;color:#fff;border-radius:999px;padding:2px 10px;font-weight:800;background:${STATUS_COLOR[h.status] || "#15803d"}}
+  table{width:100%;border-collapse:collapse;margin-top:6px} th{background:#f1f5f9;text-align:start;font-size:11px;padding:5px}
+  td{border-bottom:1px solid #e2e8f0;padding:5px;vertical-align:top} td.n{text-align:end;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .chip{color:#fff;border-radius:999px;padding:1px 8px;font-size:11px;font-weight:700;white-space:nowrap}
+  .bar{margin-bottom:8px} .lbl{font-weight:700;margin-bottom:3px} .track{height:8px;border-radius:4px;background:#e2e8f0;margin-bottom:3px;overflow:hidden}
+  .fill{height:100%} .fill.est{background:#94a3b8} .sub{color:#64748b;font-size:11px}
+  footer{margin-top:18px;color:#94a3b8;font-size:10px;text-align:center}
+  @media print{body{padding:0} h2{break-after:avoid} table,.card,.bar{break-inside:avoid}}
+</style></head><body>
+<header><div><h1>${escH(snap.p.name)}</h1><div class="meta">${escH(snap.p.template)} · ${escH(snap.p.startDate || "—")} → ${escH(snap.p.endDate || t("مفتوح", "open"))}</div></div>
+<div style="text-align:end"><div class="brand">Sawa Wallet</div><div class="meta">${escH(t("تاريخ الإصدار", "Issued"))} ${escH(issuedOn)}</div></div></header>
+<h2>${escH(t("الملخّص", "Summary"))} <span class="pill">${escH(t(STATUS_AR[h.status], STATUS_EN[h.status]))}</span></h2>
+<div class="cards">${cell(t("الميزانيّة المستهدفة", "Target budget"), m(snap.p.targetBudget))}${cell(t("التقدير", "Estimate"), m(h.estimatedTotal))}${cell(t("المصروف الفعلي", "Actual spend"), m(h.actualSpend))}${cell(t("التوقّع عند الإتمام", "Forecast at completion"), m(h.forecastAtCompletion), h.forecastVsBudget > 0 ? "#b91c1c" : "")}
+${cell(t("الإيرادات", "Revenue"), m(h.revenue))}${cell(t("الصافي", "Net"), m(h.net))}${cell(t("الهامش", "Margin"), h.marginBp == null ? "—" : (h.marginBp / 100).toFixed(1) + "%")}${cell(t("الرصيد النقدي", "Cash position"), m(h.cashPosition))}</div>
+<h2>${escH(t("التقدير مقابل الفعلي لكلّ فئة", "Estimate vs actual by category"))}</h2>${bars || `<div class="meta">${escH(t("لا بيانات بعد", "No data yet"))}</div>`}
+<h2>${escH(t("بنود التقدير", "Estimate items"))}</h2>
+<table><tr><th>${escH(t("البند", "Item"))}</th><th>${escH(t("الوحدة", "Unit"))}</th><th class="n">${escH(t("مقدّر", "Est. qty"))}</th><th class="n">${escH(t("فعلي", "Actual qty"))}</th>
+<th class="n">${escH(t("التقدير", "Est. total"))}</th><th class="n">${escH(t("الفعلي", "Actual"))}</th><th class="n">${escH(t("الانحراف", "Variance"))}</th><th>${escH(t("الحالة", "Status"))}</th></tr>${boq}</table>
+<h2>${escH(t("سجلّ الحركات", "Entries"))}</h2>
+<table><tr><th>${escH(t("التاريخ", "Date"))}</th><th>${escH(t("النوع", "Type"))}</th><th>${escH(t("الوصف", "Description"))}</th><th>${escH(t("الطرف الآخر", "Counterparty"))}</th><th class="n">${escH(t("المبلغ", "Amount"))}</th><th>${escH(t("الحالة", "Status"))}</th></tr>${ledger}</table>
+<footer>Sawa Wallet · ${escH(snap.p.name)}</footer></body></html>`;
+}
+const BOQ_AR = { raw_materials: "مواد خام", labor: "عمالة", equipment_rental: "تأجير معدّات", permits: "تصاريح", other: "أخرى" };
+const BOQ_EN = { raw_materials: "Raw materials", labor: "Labour", equipment_rental: "Equipment rental", permits: "Permits", other: "Other" };
+const LINE_AR = { on_budget: "ضمن التقدير", warning: "فوق التقدير", over_budget: "تجاوز التسامح", not_started: "لم يبدأ" };
+const LINE_EN = { on_budget: "On estimate", warning: "Above estimate", over_budget: "Over tolerance", not_started: "Not started" };
+const STATUS_AR = { green: "ضمن الميزانيّة", amber: "يقترب من الحدّ", red: "تجاوز الميزانيّة" };
+const STATUS_EN = { green: "On budget", amber: "Approaching budget", red: "Over budget" };
+const KIND_AR = { expense: "مصروف", revenue: "إيراد", capital_injection: "رأس مال", partner_contribution: "مساهمة شريك", grant: "منحة", loan_draw: "قرض مستلم", loan_repayment: "سداد قرض" };
+const KIND_EN = { expense: "Expense", revenue: "Revenue", capital_injection: "Capital", partner_contribution: "Partner", grant: "Grant", loan_draw: "Loan received", loan_repayment: "Loan repayment" };
+
+async function opProjExport(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  const snap = await projectSnapshot(x, pid);
+  const ar = x.p.lang !== "en";
+  return { filename: `project-${pid}.csv`, csv: projectCsv(snap, ar), rows: snap.ledger.length };
+}
+
+async function opProjReport(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  const snap = await projectSnapshot(x, pid);
+  const ar = x.p.lang !== "en";
+  return { filename: `project-${pid}.html`, html: projectReportHtml(snap, ar, new Date().toISOString().slice(0, 10)) };
 }
