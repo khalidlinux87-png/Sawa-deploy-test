@@ -636,6 +636,7 @@ reached only through HMAC-signed links that expire in 15 minutes. The R2 bucket 
 | `invoice-pdf.mjs` | Worker pipeline: recompute totals → HTML → hash → R2 cache → Browser Rendering → signed link, and `serveSignedFile` | Not deployed: needs the bindings below |
 | `projects-core.mjs` | Projects & cost estimator: BOQ lines, line and project variance, forecast, margin, alert keys, lifecycle guards (spec: `PROJECTS.md`) | Tested: `node pfm/projects-core.test.mjs` (15 tests) |
 | `projects-migrations.mjs` | Versioned, idempotent schema migrations for the Projects subtree, tracked in `pfm/{uid}/meta/projects` | Tested: `node pfm/projects-migrations.test.mjs` (7 tests) |
+| `pfm-worker.mjs` (Projects section) | P6b Worker ops `pfm.proj.*`, and the purge of the projects subtree | Tested: `node pfm/projects-worker.test.mjs` (10 tests) |
 
 How `computeInvoice` handles tax (the rule the code and tests enforce):
 1. `gross = round(qty × unitPrice)` per line (BigInt, half away from zero).

@@ -1376,3 +1376,10 @@ Spec `pfm/PROJECTS.md` (decisions P1–P10). Project ledger in its own subtree `
 - Tests: `projects-core.test.mjs` 15 · `projects-migrations.test.mjs` 7 · `pfm-core.test.mjs` 29 (unchanged).
 - Not yet: Worker ops, Firestore adapter for the runner, app screens, PDF/Excel export. Next: P6b. Details: `pfm/PROJECTS.md` §9.
 - Upload: nothing to deploy yet (no Worker or app file imports these modules).
+
+## C272 — Personal Accountant P6b: Projects Worker ops (no deploy yet)
+Adds the `pfm.proj.*` ops to `pfm/pfm-worker.mjs`: create, list, get, update, status, estimate create/lines/approve, ledger add/void/list, health, variance, alerts list/ack. Rules are in `pfm/projects-core.mjs`; migrations run on every op. `worker-3.js` is unchanged (it routes `pfm.*` by prefix). Purge now removes the projects subtree and `pfm/{uid}/meta`.
+- Fixed while testing: reads used the full document root, so existing rows were never found (reads take paths relative to the root); approval passed raw rows where line keys were needed; approve returned the pre-approval revision; alert keys contain colons, so they get their own check.
+- Tests: `projects-worker.test.mjs` 10 · `pfm-worker.test.mjs` 42 · `projects-core` 15 · `projects-migrations` 7 · `pfm-core` 29, all passing. `ui-check.mjs` cannot run here (no `node_modules/react`), the same before this change.
+- Not deployed. Upload when you deploy: `worker-3.js` is unchanged, but `pfm/` changed (`pfm-worker.mjs`, `projects-core.mjs`, `projects-migrations.mjs`), and the Worker imports them. Deploy through wrangler, not a paste.
+- Details: `pfm/PROJECTS.md` §5 and §9.

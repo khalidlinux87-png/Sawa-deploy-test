@@ -1,6 +1,6 @@
 # Personal Accountant: Projects & cost estimator (spec)
 
-Status: **P6a scaffold built** (data model, calculation module, migrations, tests). Worker ops, UI, rules and exports are not built yet.
+Status: **P6a and P6b built** (data model, calculation module, migrations, Worker ops, tests). App screens and exports are not built yet. No Firestore rules are needed.
 Extends `pfm/DESIGN.md`. Everything there still applies: integer minor units, decimal text for rates and quantities,
 server-side totals, encrypted free text, the audit chain, and the twelve accepted currencies (decision 8).
 
@@ -53,7 +53,7 @@ Paths are relative to the document root. 🔒 = sealed with the user's key (`sea
 { name: "House", nameSealed?: …,                 // name is clear text; description and counterparty fields are 🔒
   template: "house_construction" | "event" | "small_business" | "agri_season" | "custom",
   description: 🔒 string,
-  currency: "SDG",                                // fixed once any money is recorded (P4)
+  currency: "SDG",                                // fixed at creation (P4); pfm.proj.update refuses a change
   startDate: "2026-11-01" | null, endDate: "2026-12-31" | null,
   targetBudget: 300000,                           // minor units, > 0
   status: "planning" | "active" | "on_hold" | "completed" | "archived",
@@ -115,7 +115,7 @@ Creation uses a "document must not exist" precondition. Two concurrent writers t
 - `alerts`: `(acknowledgedAt, createdAt desc)`.
 
 ### 3.8 Size limits (v1)
-Up to **2,000 ledger rows per project** and **500 lines per revision**. Health is recomputed from the rows on each read. Above that
+Up to **2,000 ledger rows per project** and **400 lines per revision** (a commit holds at most 500 writes, and each line is one write). Health is recomputed from the rows on each read. Above that
 limit a rollup document (`pfm/{uid}/projects/{pid}/rollup` ⚙, updated with increments like `months/`) is needed. Not built yet.
 
 ---
@@ -163,29 +163,35 @@ in `clear`.
 
 ---
 
-## 5. Operations (planned, not built)
+## 5. Operations (built in P6b)
 
-Same house convention as `DESIGN.md` §3: `POST /api`, `{ op, ...payload }`, `idemKey` on every mutation.
+Same house convention as `DESIGN.md` §3: `POST /api`, `{ op, ...payload }`. The prefix is `pfm.proj.` because the personal
+ledger already uses `pfm.alerts.*`. `worker-3.js` needs no change: it routes every `pfm.*` op to `handlePfmOp`.
+Every op first brings the schema up to date (`migrateProjects`). Every write carries a precondition on the project row, so
+writes to one project run one at a time: a racing writer re-reads and retries (`busy` after four tries).
+Creates use the client's `idemKey` as the document ID, so a retry returns the first result.
 
-| op | Payload → result | Rule |
+| op | Payload → result | Rules enforced |
 |---|---|---|
-| `pfm.project.create` | `validateProjectInput` fields → `{project}` | Audit `project.create` |
-| `pfm.project.update` | `{pid, rev, …changed}` → `{project}` | Currency and template are refused after the first entry; the server refuses `rev` mismatches (`409 stale`) |
-| `pfm.project.status` | `{pid, to}` → `{project}` | `assertProjectTransition` |
-| `pfm.estimate.create` | `{pid, fromBaseline?: true}` → `{estimate}` | Copies the baseline's lines under the same `lineKey`s when `fromBaseline`; `reason` required for revision > 1 |
-| `pfm.estimate.lines` | `{pid, eid, rev, lines: […]}` → `{estimate, total, byCategory}` | Draft only (`baseline_locked`); `validateBoqLine` for each line |
-| `pfm.estimate.approve` | `{pid, eid}` → `{estimate, project}` | `assertCanApprove`; supersedes the old baseline; sets `baselineEstimateId`; project → `active`; runs `alertsFor` once |
-| `pfm.ptx.add` | `validateProjectTx` fields → `{tx, health}` | Writes the row, the audit entry and the alert documents in one commit |
-| `pfm.ptx.void` | `{pid, txId, reason}` → `{tx, health}` | Status change only, never a delete |
-| `pfm.ptx.list` | `{pid, from?, to?, kind?, lineKey?, cursor?}` → `{items, cursor}` | 50 per page, decrypts 🔒 fields for the owner |
-| `pfm.health` | `{pid, eid?}` → `projectHealth` output | `eid` defaults to the baseline |
-| `pfm.variance` | `{pid, eid?}` → `lines[]` | Per-line decomposition |
-| `pfm.alerts.list` / `pfm.alerts.ack` | `{pid, unacknowledged?}` / `{pid, key}` | |
-| `pfm.export` *(P6e)* | `{pid, format: "pdf"\|"xlsx"}` | Renders from the same health model; PDF through the existing invoice HTML pipeline |
+| `pfm.proj.create` | `idemKey` + project fields → `{project}` | Needs `pfm.init`. `validateProjectInput`. Description is sealed. Audit `project.create` |
+| `pfm.proj.list` | → `{items}`, each with a health summary | |
+| `pfm.proj.get` | `{pid}` → `{project, estimates, estimateId, health}` | |
+| `pfm.proj.update` | `{pid, rev, …changed}` → `{project}` | `stale` if `rev` differs · `currency_locked` · an edit that changes nothing writes nothing · audit diff |
+| `pfm.proj.status` | `{pid, rev, to}` → `{project}` | `assertProjectTransition` (§3.2) |
+| `pfm.proj.estimate.create` | `idemKey`, optional `reason`, `fromBaseline` → `{estimate}` | One open draft at a time (`draft_exists`) · revision > 1 needs `reason` · `fromBaseline` copies the baseline's lines (sealed text copied as-is) · at most 400 lines |
+| `pfm.proj.estimate.lines` | `{pid, eid, rev, lines}` → `{estimate, totals}` | Draft only (`baseline_locked`) · `stale` · every line through `validateBoqLine` · unique `lineKey`s · lines not in the new set are deleted in the same commit |
+| `pfm.proj.estimate.approve` | `{pid, eid, rev}` → `{estimate}` | `assertCanApprove` · supersedes the old baseline in the same commit · project → `active` · alerts computed once |
+| `pfm.proj.tx.add` | `idemKey` + entry fields → `{tx}` | An expense `lineKey` must exist on the baseline (`bad_line`) · idempotent on `idemKey` · alerts written in the same commit |
+| `pfm.proj.tx.void` | `{pid, txId, reason}` → `{tx}` | Status change only, never a delete · reason required · alerts recomputed without the entry |
+| `pfm.proj.tx.list` | `{pid, kind?, lineKey?}` → `{items, truncated}` | Decrypts description, counterparty and void reason for the owner |
+| `pfm.proj.health` | `{pid, estimateId?}` → `{estimateId, health}` | Default estimate is the baseline; with no baseline only the ledger counts |
+| `pfm.proj.variance` | `{pid, estimateId?}` → `{estimateId, currency, lines}` | Adds name, unit, category and notes to each line's variance |
+| `pfm.proj.alerts.list` | `{pid, unacknowledged?}` → `{items}` | |
+| `pfm.proj.alerts.ack` | `{pid, key}` → `{alert}` | The key may contain `:` (for example `budget:100:e_…`); nothing else may |
+| `pfm.export` *(P6e)* | `{pid, format: "pdf" or "xlsx"}` | Not built |
 
-The Worker wraps each mutation in a precondition commit. Idempotency is by `idemKey`, the same as the personal ledger.
-
----
+Account deletion: `purgePfm` now removes `pfm/{uid}/meta` and calls `purgeProjects`, which deletes each project's
+lines, revisions, ledger and alerts before the project row. Covered by the purge test.
 
 ## 6. Security and audit
 
@@ -205,8 +211,10 @@ The Worker wraps each mutation in a precondition commit. Idempotency is by `idem
 | `projects-core.test.mjs` | Worked examples, rounding invariants, statuses, alert once/re-arm, lifecycle | `node pfm/projects-core.test.mjs` · 15 passed |
 | `projects-migrations.mjs` | `MIGRATIONS` (v1 `projects_init`), `migrateProjects(db, uid)`, ordering check at import | Built, tested |
 | `projects-migrations.test.mjs` | Fresh user, idempotent re-run, `schema_ahead`, failed step retried, ordering | `node pfm/projects-migrations.test.mjs` · 7 passed |
+| `pfm-worker.mjs` (P6b section) | The ops in §5 and the purge of the projects subtree | Covered by `projects-worker.test.mjs`; `pfm-worker.test.mjs` (42) still passes |
+| `projects-worker.test.mjs` | Create and idempotency, sealing, update and status rules, estimate lifecycle and change orders, ledger line checks, alerts once and cleared on void, concurrent entries with an intact audit chain, purge | `node pfm/projects-worker.test.mjs` · 10 passed |
 
-Not built: Worker routes (`pfm-worker.mjs`), the Firestore adapter for the migration runner, app screens (`app.p9.js`), export.
+Not built: app screens (`app.p9.js`), export (P6e), and the wallet link (P6d, blocked on `DESIGN.md` decision 13).
 
 ---
 
@@ -229,7 +237,7 @@ Colours follow the app's `colors` tokens, not fixed hex values, as in C270. Stat
 | Phase | Scope | Exit check |
 |---|---|---|
 | **P6a** ✅ (this change) | Data model, calculation module, migrations, tests | Worked examples match the spec; rounding never breaks `quantityEffect + priceEffect = totalVariance`; a second migration run writes nothing |
-| P6b | Worker ops §5 (create, lines, approve, entries, void, health, alerts); Firestore adapter for the migration runner; purge job recursion | Concurrent approvals produce one baseline; a duplicate `idemKey` writes once; a voided entry leaves totals unchanged |
+| P6b ✅ | Worker ops §5; purge of the projects subtree | Concurrent approvals produce one baseline (the second supersedes the first); a duplicate `idemKey` writes once; a voided entry leaves totals unchanged; concurrent entries keep the audit chain intact |
 | P6c | App: projects list, wizard, estimator, dashboard, ledger, variance | Phone-width layouts in both languages; `ui-check.mjs` extended with a project run-through |
 | P6d | Wallet link (**blocked** on `DESIGN.md` decision 13) | Tagging a wallet payment writes one entry; reversing the payment voids it |
 | P6e | PDF and Excel export from the same health model | A worksheet's totals match the API response to the minor unit |
