@@ -73,7 +73,7 @@ const page = await ctx.newPage();
 page.on("pageerror", (e) => errors.push("pageerror: " + e.message));
 page.on("console", (m) => { if (m.type() === "error" && !/favicon|404|Failed to load resource/.test(m.text())) errors.push("console: " + m.text()); });
 await page.exposeFunction("__pfmCall", async (o, p) => { try { return { ok: true, ...(await op(o, JSON.parse(JSON.stringify(p || {})))) }; } catch (e) { return { ok: false, error: e.message }; } });
-await page.goto("http://localhost:8766/");
+const mount = async () => {
 await page.waitForFunction(() => window.SawaApp && typeof AccountantScreen === "function", null, { timeout: 20000 });
 await page.evaluate(() => {
   window.SawaSync = window.SawaSync || {};
@@ -82,6 +82,9 @@ await page.evaluate(() => {
   document.body.appendChild(host); const st = document.createElement("style"); st.textContent = "body > *:not(#pfmhost){display:none!important}"; document.head.appendChild(st);
   ReactDOM.createRoot(host).render(React.createElement(ThemeContext.Provider, { value: { colors: lightColors, isDark: false } }, React.createElement(ToastProvider, null, React.createElement(AccountantScreen, { onBack() {} }))));
 });
+};
+await page.goto("http://localhost:8766/");
+await mount();
 const H = page.locator("#pfmhost"), shot = (name) => page.screenshot({ path: `${OUT}/${name}.png` });
 
 await H.getByText("لنبدأ").waitFor();
@@ -156,6 +159,26 @@ await dlg.getByText(/كانت مسجّلة من قبل فلم تُكرَّر/).w
 await shot("i5-duplicate");
 const after = (await op("pfm.tx.list", { month: "2026-11" })).items.filter((t) => t.source === "import");
 check(after.length === 4, "re-import must not add an entry, got " + after.length);
+
+// C281: the batch survives an app restart: pick two, restart while reading, the bar brings them back read
+await dlg.locator('input[type="file"]').setInputFiles([shots.b, shots.c]);
+await dlg.getByText(/3 صورة · /).waitFor();
+await page.reload(); await mount();
+await H.getByText(/2 بانتظار المراجعة والإضافة/).waitFor({ timeout: 180000 });
+await shot("i6-after-restart");
+await bar.click();
+await page.waitForFunction(() => { const t = document.querySelector('[role="dialog"][aria-label="استيراد إيصالات"]').innerText; return /3 صورة/.test(t) && !/يُقرأ…|قراءة \d|في الانتظار/.test(t); }, null, { timeout: 120000 });
+const kept = await dlg.innerText();
+check(/مسجّلة من قبل/.test(kept), "the row added before the restart is still shown as recorded");
+const amounts2 = await dlg.locator('input[inputmode="decimal"]').evaluateAll((els) => els.map((e) => e.value));
+check(amounts2.includes("35000.00") && amounts2.includes("2000000.00"), "both images read after the restart: " + amounts2);
+await dlg.getByRole("button", { name: "إنهاء الدفعة ومسح القائمة" }).click();
+await dlg.getByRole("button", { name: "اختيار الصور" }).waitFor();
+await page.waitForTimeout(500);
+await page.reload(); await mount();
+await H.getByRole("tab", { name: "السجلّ" }).waitFor();
+await page.waitForTimeout(1500);
+check(!(await bar.count()), "a cleared batch does not come back after a restart");
 
 await browser.close(); server.close();
 console.log(`read 4 invented screenshots in ${readMs} ms (engine download included)`);

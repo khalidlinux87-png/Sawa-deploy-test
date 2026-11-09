@@ -296,7 +296,13 @@ reads, edits, the reading loop and the save loop) now lives in the app session, 
 the accountant screen goes on reading, the accountant screen shows a bar («استيراد الإيصالات: قراءة 2 من 5…» or «N بانتظار
 المراجعة والإضافة») that reopens it, and the Import button counts it. The engines stay up while a batch reads. A batch with
 nothing left to add is cleared when the sheet closes; «إنهاء الدفعة ومسح القائمة» clears it by hand. Not kept across an app
-restart (the picked images are in memory only).
+restart (the picked images are in memory only) — until C281:
+
+**C281: kept across restarts.** The batch is also written to IndexedDB («sawa-import», one record per image): the image
+itself until it is read, then the reading, the user's edits, the save status and the shrunk receipt (the original is
+dropped). New images are written at once, edits a moment later, everything on `pagehide`. When the accountant screen
+opens after a restart the batch comes back and the images that were not read yet are read again. Clearing the batch
+clears the store; signing out and another account signing in on the phone delete it (`sawa-chat.js`).
 
 ### 4.8 In the app (C273)
 
