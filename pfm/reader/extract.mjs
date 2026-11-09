@@ -25,7 +25,7 @@ export const HINTS = [
  * Returns null when this template does not match (too few labels found).
  */
 export function extractFromCells(cells, tpl, ctx = {}) {
-  const got = {}, conf = {}, alt = {};
+  const got = {}, conf = {}, alt = {}, variant = {};
   for (const c of cells) {
     const halves = [c.a, c.b].filter(Boolean);
     let lab = null, val = null;
@@ -35,6 +35,7 @@ export function extractFromCells(cells, tpl, ctx = {}) {
     }
     if (!lab || got[lab.m.field] !== undefined) continue;
     got[lab.m.field] = val ? val.text : "";
+    variant[lab.m.field] = lab.m.variant;
     conf[lab.m.field] = val ? val.conf : 0;
     if (val && val.alt !== undefined) alt[lab.m.field] = val.alt;
   }
@@ -71,7 +72,17 @@ export function extractFromCells(cells, tpl, ctx = {}) {
   }
 
   // Accounts and parties
-  const acct = (f) => (got[f] === undefined || isNA(got[f]) ? null : parseGrouped(got[f], tpl.parse.account.groups));
+  // Accounts: all digit groups present; when the issuer's accounts end in a fixed group (Bankak: 0001) and the reading
+  // starts with it, the groups came out in right-to-left order and are put back.
+  const acct = (f) => {
+    if (got[f] === undefined || isNA(got[f])) return null;
+    const a = parseGrouped(got[f], tpl.parse.account.groups), sfx = tpl.parse.account.suffix;
+    if (!a || !sfx) return a;
+    const g = a.split(" ");
+    if (g[g.length - 1] === sfx) return a;
+    if (g[0] === sfx) return g.reverse().join(" ");
+    return null;                                           // neither end is the suffix: misread, flagged below
+  };
   const fromAcc = acct("from_account"), toAcc = acct("to_account");
   if (got.from_account !== undefined && !fromAcc) flag("sender", `account unreadable: "${got.from_account}"`);
   if (got.to_account !== undefined && !toAcc) flag("recipient", `account unreadable: "${got.to_account}"`);
@@ -88,8 +99,16 @@ export function extractFromCells(cells, tpl, ctx = {}) {
   if (!toAcc && !toName) flag("recipient", "no name or account");
   if (!fromAcc) flag("sender", "no account");
 
-  let kind = null;
-  if (fromMe && toMe) kind = "transfer";
+  // Income or spending comes from who sent and who received. The green success screen is shown only to the person
+  // who made the transfer, so its sender account is the user's own: if it is not known yet, it is proposed
+  // (own_account_hint) and the row is flagged once, until the user confirms the account.
+  const successScreen = tpl.senderOnly && tpl.senderOnly.includes(variant.from_account);
+  let kind = null, own_account_hint = null;
+  if (successScreen && fromAcc && !fromMe) {
+    own_account_hint = fromAcc;
+    kind = toMe ? "transfer" : "expense";
+    flag("kind", `new account ${fromAcc} sent this transfer: confirm it is yours`);
+  } else if (fromMe && toMe) kind = "transfer";
   else if (fromMe) kind = "expense";
   else if (toMe) kind = "income";
   else flag("kind", (ctx.myAccounts || []).length ? "neither account is one of yours" : "add your account numbers to tell income from spending");
@@ -111,6 +130,7 @@ export function extractFromCells(cells, tpl, ctx = {}) {
     project_id: ctx.projectId || "p_general", project_name: ctx.projectName || "General",
     category_id: hint ? hint.categoryId : "c_uncategorized",
     raw_source_type: ctx.source || "image_ocr",
+    own_account_hint,
     name_source: known ? "known_account" : ocrName ? "ocr" : null,
     status: verify.length ? "requires_verification" : "verified",
     verify,

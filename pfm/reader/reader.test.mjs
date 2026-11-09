@@ -74,7 +74,7 @@ await t("extract: a clean English success screen is verified", () => {
   assert.equal(r.recipient.name, "Test Supplier Ltd");
   assert.equal(r.service_type, "fuel");
   assert.equal(r.category_id, "c_transport");
-  assert.equal(r.template, "bankak@1");
+  assert.equal(r.template, "bankak@2");
 });
 
 await t("extract: Arabic labels, incoming transfer, Arabic note hints", () => {
@@ -114,8 +114,9 @@ await t("extract: a failed transfer is flagged", () => {
   assert.ok(extractFromCells(rows, bankak, ctx).verify.some((v) => v.field === "kind" && /Failed/.test(v.reason)));
 });
 
-await t("extract: without the user's accounts, income vs spending is flagged", () => {
-  const r = extractFromCells(english(), bankak, {});
+await t("extract: on a history screen, without the user's accounts, income vs spending is flagged", () => {
+  const hist = english().map((c) => (c.a.text === "From Account" ? cell("From", ME) : c.a.text === "To Account" ? cell("To", OTHER) : c));
+  const r = extractFromCells(hist, bankak, {});
   assert.equal(r.kind, null);
   assert.ok(r.verify.some((v) => v.field === "kind"));
 });
@@ -128,6 +129,30 @@ await t("extract: a known account's confirmed name beats a shaky OCR name", () =
   assert.equal(r.recipient.name, "Test Supplier Ltd");
   assert.equal(r.name_source, "known_account");
   assert.equal(r.status, "verified");
+});
+
+await t("extract: account groups read right-to-left are put back; a missing 0001 is flagged", () => {
+  const r = extractFromCells(english({ from: "0001 3333 2222 1111", to: "0001 7777 8888 9999" }), bankak, ctx);
+  assert.equal(r.sender.account_identifier, ME);
+  assert.equal(r.recipient.account_identifier, OTHER);
+  assert.equal(r.kind, "expense");
+  const bad = extractFromCells(english({ to: "9999 8888 7777 0007" }), bankak, ctx);
+  assert.equal(bad.recipient.account_identifier, null);
+  assert.ok(bad.verify.some((v) => v.field === "recipient"));
+});
+
+await t("extract: a success screen proposes its sender account as the user's own", () => {
+  const r = extractFromCells(english(), bankak, { myAccounts: [] });
+  assert.equal(r.own_account_hint, ME);
+  assert.equal(r.kind, "expense");
+  assert.match(r.verify.find((v) => v.field === "kind").reason, /confirm it is yours/);
+  // Once confirmed, the same screen is clean.
+  assert.equal(extractFromCells(english(), bankak, ctx).own_account_hint, null);
+  // The history screen ("From") is not proof of ownership: an incoming transfer shows someone else there.
+  const hist = english().map((c) => (c.a.text === "From Account" ? cell("From", OTHER) : c.a.text === "To Account" ? cell("To", ME) : c));
+  const h = extractFromCells(hist, bankak, ctx);
+  assert.equal(h.kind, "income");
+  assert.equal(h.own_account_hint, null);
 });
 
 await t("extract: not a Bankak screen → null", () => {

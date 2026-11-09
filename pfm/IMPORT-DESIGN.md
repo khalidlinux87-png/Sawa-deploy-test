@@ -227,7 +227,7 @@ are masked on the phone (names, phones, account numbers) before upload, and kept
 
 Built in `pfm/reader/`: `image.mjs` (ruled rows → cells → label and value halves, borders trimmed, crops prepared),
 `text.mjs` (Arabic normalisation, label matching, dates, strict money and account shapes), `extract.mjs` (cells → one
-receipt in the schema's shape, with `verify`), `templates/bankak.mjs`, `reader.test.mjs` (16 tests, invented data only),
+receipt in the schema's shape, with `verify`), `templates/bankak.mjs` (v2), `reader.test.mjs` (18 tests, invented data only),
 `reader-eval.mjs` + `dev/ocr-node.mjs` (Tesseract in Node, to measure on private samples).
 
 How it reads a screenshot: find the ruled rows; split each into two halves; OCR both (Arabic+English, then Arabic only,
@@ -235,7 +235,11 @@ then English if no label is recognised); the half that matches a label is the la
 accounts, amount) are re-read with the English engine, because Arabic line direction reverses digit groups. **The amount
 is read twice with two engines and both reads must agree**, have the exact shape `1,234.00`, and clear the confidence bar.
 
-Template facts: currency SDG (the screens' transfer button reads SDG), Sudan time, 16-digit accounts, two decimals.
+Template facts (confirmed by Khalid, 2026-11-09): currency SDG, Sudan time, 16-digit accounts **always ending in 0001**
+(a reading that starts with 0001 came out right-to-left and is put back in order), two decimals.
+**Income or spending follows sender and recipient.** The green success screen is shown only to the person who made the
+transfer, so its sender account is the user's own: a new one is proposed (`own_account_hint`) and confirmed once.
+Samples and their correct answers: private repository **Sawa-Samples** (never in this public one).
 A *Status* other than Success/نجاح is flagged. Income vs spending comes from the user's own account numbers.
 Names: a name already confirmed for that account number wins over OCR (`ctx.knownAccounts`); a new name read with low
 confidence is flagged.
