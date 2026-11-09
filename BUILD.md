@@ -1369,6 +1369,32 @@ Business details, logo (Firestore data URI for now), receiving accounts, drafts,
 ## C269 — Personal Accountant P5: receipt photos and CSV export; KWD and JPY
 `pfm.tx.receipt.set/get/delete` (sealed photo per entry in `pfm/{uid}/files/r_{txId}`), `pfm.export` (CSV in the response). Currencies now twelve (KWD, JPY added). Fix: `sealField` base64 no longer overflows on large input. No new secret, no Firestore rules. Tests: core 29 · worker 42 · ui-check P1–P5. Details: `pfm/DESIGN.md` §7f, `Sawa-app/BUILD.md` § C269.
 
+## C271 — Personal Accountant P6a: Projects scaffold (no Worker, app or rules change)
+Spec `pfm/PROJECTS.md` (decisions P1–P10). Project ledger in its own subtree `pfm/{uid}/projects/{pid}/…`, separate from the personal ledger. Wallet link deferred (`DESIGN.md` decision 13). Firestore and the Worker, not PostgreSQL.
+- `pfm/projects-core.mjs`: validators, BOQ line totals, line variance (quantity and price effects sum exactly to the total), project health with EAC, margin and cash position, keyed alerts that re-arm, lifecycle guards.
+- `pfm/projects-migrations.mjs`: versioned, idempotent migrations tracked in `pfm/{uid}/meta/projects`; `projects_init` records the baseline (nothing to backfill: the fields are new).
+- Tests: `projects-core.test.mjs` 15 · `projects-migrations.test.mjs` 7 · `pfm-core.test.mjs` 29 (unchanged).
+- Not yet: Worker ops, Firestore adapter for the runner, app screens, PDF/Excel export. Next: P6b. Details: `pfm/PROJECTS.md` §9.
+- Upload: nothing to deploy yet (no Worker or app file imports these modules).
+
+## C272 — Personal Accountant P6b: Projects Worker ops (no deploy yet)
+Adds the `pfm.proj.*` ops to `pfm/pfm-worker.mjs`: create, list, get, update, status, estimate create/lines/approve, ledger add/void/list, health, variance, alerts list/ack. Rules are in `pfm/projects-core.mjs`; migrations run on every op. `worker-3.js` is unchanged (it routes `pfm.*` by prefix). Purge now removes the projects subtree and `pfm/{uid}/meta`.
+- Fixed while testing: reads used the full document root, so existing rows were never found (reads take paths relative to the root); approval passed raw rows where line keys were needed; approve returned the pre-approval revision; alert keys contain colons, so they get their own check.
+- Tests: `projects-worker.test.mjs` 10 · `pfm-worker.test.mjs` 42 · `projects-core` 15 · `projects-migrations` 7 · `pfm-core` 29, all passing. `ui-check.mjs` cannot run here (no `node_modules/react`), the same before this change.
+- Not deployed. Upload when you deploy: `worker-3.js` is unchanged, but `pfm/` changed (`pfm-worker.mjs`, `projects-core.mjs`, `projects-migrations.mjs`), and the Worker imports them. Deploy through wrangler, not a paste.
+- Details: `pfm/PROJECTS.md` §5 and §9.
+
+## C273 — Personal Accountant P6-share: shared projects, copy to the personal ledger, charts (no deploy yet)
+Decisions (owner, 2026-11-09): no tax on estimate lines (P11) · copy an expense to the personal ledger, opt-in per entry (P12) · share projects with roles (P13).
+- Layout change (nothing deployed yet): project data is top-level `pfmProjects/{pid}`, with `members/{uid}`, `estimates`, `tx`, `alerts`. Each user keeps `pfm/{uid}/projectIndex/{pid}`. Invites are `pfmInvites/{token}`. Sealed text is bound to the project (`proj:{pid}`).
+- Roles on every op: owner (members, invites, deletion), editor (entries, estimates, alerts), viewer (reads). Non-members get `not_found`.
+- Invites: 1–30 days (default 7), 1–10 uses (default 1), counted atomically.
+- Copy to personal: `copyToPersonal: {categoryId}` books a linked row in the recorder's ledger in the same commit. Edits and deletes from the personal side are refused (`linked_project_entry`). Voiding the entry voids the copy when the recorder voids it; other members' copies are kept, and the reply says so.
+- Charts: `pfm.proj.charts` returns estimate vs actual by category, monthly totals and a daily running balance.
+- Deletion: owners delete the project for everyone; members only leave. Account deletion follows the same rule.
+- Tests: `projects-worker.test.mjs` 18 · `projects-core` 16 · `pfm-worker` 42 · `projects-migrations` 7 · `pfm-core` 29, all passing.
+- Upload pack (not committed): `upload-pack/` with `README-upload.txt` and `CHECKSUMS.txt`. Required files: `worker-3.js` and the five `pfm/` modules listed there.
+- Details: `pfm/PROJECTS.md` §2 (P11–P14), §3, §5.
 ## 🔔 v126 — مواعيد صلة الرحم + «ملفّك لا يُسجَّل متوفّى» (C271 في Sawa-app/BUILD.md)
 - `kin.remind.set` ⇒ `kinrem/{uid}` (الاسم الأوّل · المدّة 1–365 · آخر تواصل · الساعة · المنطقة الزمنيّة؛ ≤ 300 قريب). خطّةٌ فارغة أو مطفأة ⇒ يُحذف المستند.
 - المجدوِل `kinReminders` (مع schedReminders/taskReminders، `LIM.rem` لكلّ تشغيل): ملخّصٌ واحد بكلّ من حان، في الساعة المختارة، ولا أكثر من إشعارٍ كلّ ١٢ ساعة · `rq` يُكتب أوّلاً (لا تكرار). `kinPlan` نقيّة.

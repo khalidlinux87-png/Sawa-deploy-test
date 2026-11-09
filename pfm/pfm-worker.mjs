@@ -7,6 +7,8 @@
 // the loser re-reads and retries.
 import * as C from "./pfm-core.mjs";
 import { renderInvoiceHtml } from "./invoice-html.mjs";
+import * as J from "./projects-core.mjs";
+import { migrateProjects } from "./projects-migrations.mjs";
 
 const MAX_TRIES = 4;
 const ID_RE = /^[A-Za-z0-9_-]{8,40}$/;
@@ -350,6 +352,7 @@ async function loadTxForEdit(x) {
   const id = segId(x.p.id);
   const old = js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/tx/${id}`));
   if (!old || old.deleted) throw new C.PfmError("not_found", "transaction");
+  if (old.projectRef) throw new C.PfmError("linked_project_entry", "edit this entry in its project");
   if (x.p.rev !== old.rev) throw new C.PfmError("stale", "reload and try again");
   return old;
 }
@@ -470,8 +473,9 @@ async function opAuditList(x) {
 
 // Called by the Worker's purge job. Returns true when everything is gone (false = budget ran out; the job retries).
 export async function purgePfm(d, token, uid, spend, purgeColl) {
-  for (const c of ["tx", "categories", "months", "fxLast", "recurring", "budgets", "alerts", "rules", "idem", "payoutAccounts", "files", "invoiceNumbers", "import"])
+  for (const c of ["tx", "categories", "months", "fxLast", "recurring", "budgets", "alerts", "rules", "idem", "payoutAccounts", "files", "invoiceNumbers", "import", "meta"])
     if (!(await purgeColl(token, `pfm/${uid}/${c}`, spend))) return false;
+  if (!(await purgeProjects(d, token, uid, spend, purgeColl))) return false;   // P6b: subcollections first
   if (!(await purgeColl(token, `audit/${uid}/log`, spend))) return false;
   // the user's own invoices (issued). Paid invoices are financial records of the client too, but they live
   // under the issuer here, so they go with the issuer's account (the client keeps their own ledger row).
@@ -1497,4 +1501,692 @@ async function opExport(x) {
   }
   return { filename: `sawa-accountant-${months[0]}_${months[months.length - 1]}.csv`, csv: "﻿" + lines.join("\r\n") + "\r\n",
     rows: rows.length, truncated, from: months[0], to: months[months.length - 1] };
+}
+
+// =====================================================================================================
+// Projects, shared between users (PROJECTS.md §2, §3, §5). The rules are in projects-core.mjs; this part reads,
+// checks roles and commits. Project data is top-level (`pfmProjects/{pid}`) so members can reach it. Each user has a
+// `pfm/{uid}/projectIndex/{pid}` for their list. Every op checks the caller's `members/{uid}` role.
+// Sealed text is bound to the project (`proj:{pid}`), so every member can open it through the Worker.
+// Every mutation is one commit: preconditions on the project row serialise writes to one project.
+// =====================================================================================================
+
+const PROJ_MAX_LINES = 400;     // a commit holds at most 500 writes
+const PROJ_MAX_TX = 3000;       // fsList reads at most 3000 rows
+const pbind = (pid) => "proj:" + pid;
+const sealP = (x, pid, v) => (v ? C.sealField(v, pbind(pid), ...curKey(x)) : null);
+const openP = (x, pid, s) => (s ? C.openField(s, pbind(pid), keys(x)).catch(() => null) : null);
+
+const PJ_OPS = {
+  "pfm.proj.create": opProjCreate,
+  "pfm.proj.list": opProjList,
+  "pfm.proj.get": opProjGet,
+  "pfm.proj.update": opProjUpdate,
+  "pfm.proj.status": opProjStatus,
+  "pfm.proj.delete": opProjDelete,
+  "pfm.proj.estimate.create": opEstCreate,
+  "pfm.proj.estimate.lines": opEstLines,
+  "pfm.proj.estimate.approve": opEstApprove,
+  "pfm.proj.tx.add": opPtxAdd,
+  "pfm.proj.tx.void": opPtxVoid,
+  "pfm.proj.tx.list": opPtxList,
+  "pfm.proj.health": opProjHealth,
+  "pfm.proj.variance": opProjVariance,
+  "pfm.proj.charts": opProjCharts,
+  "pfm.proj.alerts.list": opProjAlertsList,
+  "pfm.proj.alerts.ack": opProjAlertAck,
+  "pfm.proj.members.list": opMembersList,
+  "pfm.proj.members.role": opMembersRole,
+  "pfm.proj.members.remove": opMembersRemove,
+  "pfm.proj.invite.create": opInviteCreate,
+  "pfm.proj.invite.accept": opInviteAccept,
+};
+Object.assign(OPS, PJ_OPS);
+PFM_OPS.push(...Object.keys(PJ_OPS));
+
+// ---------- small helpers ----------
+
+// Brings the user's Projects data to the code's schema version. Cheap when already current (one read).
+async function projSchemaReady(x) {
+  await migrateProjects({
+    get: async (path) => js(x, await x.d.fsGet(x.token, path)),
+    set: async (path, data) => { await x.d.fsCommit(x.token, [{ update: { name: P(x, path), fields: fieldsOf(x, data) } }]); },
+  }, x.uid, { now });
+}
+// Reads take paths relative to the document root; writes use P(x, rel), which adds the root.
+const getDoc = async (x, rel) => js(x, await x.d.fsGet(x.token, rel));
+const listDocs = async (x, rel) => (await x.d.fsList(x.token, rel)).map((d) => js(x, d));
+const createAt = (x, rel, data) => ({ update: { name: P(x, rel), fields: fieldsOf(x, data) }, currentDocument: { exists: false } });
+const updateAt = (x, rel, data, mask, updateTime) => ({
+  update: { name: P(x, rel), fields: fieldsOf(x, data) },
+  ...(mask ? { updateMask: { fieldPaths: mask } } : {}),
+  currentDocument: { updateTime },
+});
+const deleteAt = (x, rel) => ({ delete: P(x, rel) });
+const pick = (o, ks) => Object.fromEntries(ks.filter((k) => o[k] !== undefined).map((k) => [k, o[k]]));
+// The fields that differ between two plain objects: { before, after }
+function diffKeys(a, b) {
+  const before = {}, after = {};
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) if (JSON.stringify(a[k] ?? null) !== JSON.stringify(b[k] ?? null)) { before[k] = a[k] ?? null; after[k] = b[k] ?? null; }
+  return { before, after };
+}
+const linesOf = (x, pid, eid) => listDocs(x, J.paths.lines(pid, eid));
+const txsOf = (x, pid) => listDocs(x, J.paths.tx(pid));
+const alertsOf = (x, pid) => listDocs(x, J.paths.alerts(pid));
+const membersOf = (x, pid) => listDocs(x, J.paths.members(pid));
+async function estimatesOf(x, pid) {
+  return (await listDocs(x, J.paths.estimates(pid))).sort((a, b) => a.revision - b.revision);
+}
+async function estimateOf(x, pid, eid) {
+  const e = await getDoc(x, J.paths.estimate(pid, eid));
+  if (!e) throw new C.PfmError("not_found", "estimate");
+  return e;
+}
+// The caller's role on a project. Someone who is not a member gets not_found, so the project's existence is not revealed.
+async function accessOf(x, pid, need = "viewer") {
+  const p = await getDoc(x, J.paths.project(pid));
+  const m = p ? await getDoc(x, J.paths.member(pid, x.uid)) : null;
+  if (!p || !m) throw new C.PfmError("not_found", "project");
+  J.assertRole(m.role, need);
+  return { p, role: m.role };
+}
+const projView = (p) => ({ currency: p.currency, targetBudget: p.targetBudget, alertThresholdsPct: p.alertThresholdsPct, lineTolerancePct: p.lineTolerancePct });
+const lineInput = (r) => ({ lineKey: r.id, category: r.category, estQty: r.estQty, estUnitPrice: r.estUnitPrice, estTotal: r.estTotal });
+// The health of a project for an estimate (default: the baseline). Without a baseline only the ledger counts.
+async function healthFor(x, p, eid, txs = null) {
+  const est = eid === undefined ? p.baselineEstimateId || null : eid;
+  const lines = est ? (await linesOf(x, p.id, est)).map(lineInput) : [];
+  const rows = txs || (await txsOf(x, p.id));
+  return { estimateId: est, health: J.projectHealth(projView(p), lines, rows) };
+}
+// Alert documents: create what is newly true, delete what no longer applies for this revision.
+function alertWrites(x, pid, eid, health, stored) {
+  const { create, clear } = J.alertsFor(health, eid, stored.map((a) => a.id));
+  return [
+    ...create.map((a) => createAt(x, `${J.paths.alerts(pid)}/${a.dedupeKey}`, { ...a, estimateId: eid, createdAt: now(), acknowledgedAt: null })),
+    ...clear.map((k) => deleteAt(x, `${J.paths.alerts(pid)}/${k}`)),
+  ];
+}
+const projFields = (v, description) => ({
+  name: v.name, template: v.template, description, currency: v.currency,
+  startDate: v.startDate, endDate: v.endDate, targetBudget: v.targetBudget,
+  alertThresholdsPct: v.alertThresholdsPct, lineTolerancePct: v.lineTolerancePct,
+});
+const projAudit = (r) => pick(r, ["name", "template", "currency", "startDate", "endDate", "targetBudget", "alertThresholdsPct", "lineTolerancePct", "status"]);
+async function presentProject(x, p) {
+  const o = strip(p);
+  o.description = await openP(x, p.id, p.description);
+  return o;
+}
+async function presentTx(x, pid, t) {
+  const o = strip(t);
+  for (const k of ["description", "counterparty", "voidReason"]) o[k] = await openP(x, pid, t[k]);
+  return o;
+}
+const ID_OF = (x, prefix) => { if (!ID_RE.test(x.p.idemKey || "")) throw new C.PfmError("bad_idem_key"); return prefix + x.p.idemKey; };
+const memberName = (x) => txt(x.p.displayName, 40, "displayName");
+
+// ---------- projects ----------
+
+async function opProjCreate(x) {
+  await projSchemaReady(x);
+  await settingsOf(x);
+  const pid = ID_OF(x, "p_");
+  let out = null;
+  await commitAudited(x, async () => {
+    const existing = await getDoc(x, J.paths.project(pid));
+    if (existing) { out = existing; return { result: null }; }
+    const v = J.validateProjectInput(x.p);
+    const row = { ...projFields(v, await sealP(x, pid, v.description)), ownerUid: x.uid, status: "planning", baselineEstimateId: null, rev: 1, createdAt: now(), updatedAt: now() };
+    out = { id: pid, ...row };
+    const at = now();
+    return {
+      writes: [
+        createAt(x, J.paths.project(pid), row),
+        createAt(x, J.paths.member(pid, x.uid), { role: "owner", displayName: memberName(x) ?? null, addedAt: at, addedBy: x.uid }),
+        createAt(x, J.paths.index(x.uid, pid), { role: "owner", createdAt: at }),
+      ],
+      audit: [{ action: "project.create", ref: `projects/${pid}`, after: projAudit(row) }],
+      result: null,
+    };
+  });
+  return { project: await presentProject(x, out) };
+}
+
+async function opProjList(x) {
+  await projSchemaReady(x);
+  const items = [];
+  const idx = (await listDocs(x, J.paths.indexes(x.uid))).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  for (const ix of idx) {
+    const p = await getDoc(x, J.paths.project(ix.id));
+    if (!p) continue;
+    const { health } = await healthFor(x, p, undefined);
+    items.push({ ...(await presentProject(x, p)), role: ix.role,
+      health: { status: health.status, utilizationBp: health.utilizationBp, actualSpend: health.actualSpend, forecastVsBudget: health.forecastVsBudget } });
+  }
+  return { items };
+}
+
+async function opProjGet(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  const { p, role } = await accessOf(x, pid, "viewer");
+  const estimates = (await estimatesOf(x, pid)).map((e) => ({ id: e.id, revision: e.revision, status: e.status, reason: e.reason ?? null, total: e.total ?? 0, lineCount: e.lineCount ?? 0, approvedAt: e.approvedAt ?? null }));
+  const { estimateId, health } = await healthFor(x, p, undefined);
+  const members = (await membersOf(x, pid)).length;
+  return { project: await presentProject(x, p), role, members, estimates, estimateId, health };
+}
+
+async function opProjUpdate(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  let out;
+  await commitAudited(x, async () => {
+    const { p: old } = await accessOf(x, pid, "editor");
+    if (x.p.rev !== old.rev) throw new C.PfmError("stale", "reload and try again");
+    if (x.p.currency !== undefined && x.p.currency !== old.currency) throw new C.PfmError("currency_locked");
+    const merged = {
+      name: old.name, template: old.template, currency: old.currency, startDate: old.startDate, endDate: old.endDate,
+      targetBudget: C.fromMinor(old.targetBudget, old.currency), alertThresholdsPct: old.alertThresholdsPct,
+      lineTolerancePct: old.lineTolerancePct,
+      description: x.p.description !== undefined ? x.p.description : await openP(x, pid, old.description),
+      ...pick(x.p, ["name", "template", "startDate", "endDate", "targetBudget", "alertThresholdsPct", "lineTolerancePct"]),
+    };
+    const v = J.validateProjectInput(merged);
+    const row = { ...projFields(v, await sealP(x, pid, v.description)), ownerUid: old.ownerUid, status: old.status, baselineEstimateId: old.baselineEstimateId ?? null, rev: old.rev + 1, createdAt: old.createdAt, updatedAt: now() };
+    const { before, after } = diffKeys(projAudit(old), projAudit(row));
+    if (!Object.keys(after).length) { out = { ...old, id: pid }; return { result: null }; }
+    out = { id: pid, ...row };
+    return {
+      writes: [updateAt(x, J.paths.project(pid), row, null, old._updateTime)],
+      audit: [{ action: "project.update", ref: `projects/${pid}`, before, after }],
+      result: null,
+    };
+  });
+  return { project: await presentProject(x, out) };
+}
+
+async function opProjStatus(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  let out;
+  await commitAudited(x, async () => {
+    const { p: old } = await accessOf(x, pid, "editor");
+    if (x.p.rev !== old.rev) throw new C.PfmError("stale", "reload and try again");
+    J.assertProjectTransition(old.status, x.p.to);
+    const row = { status: x.p.to, rev: old.rev + 1, updatedAt: now() };
+    out = { ...old, ...row, id: pid };
+    return {
+      writes: [updateAt(x, J.paths.project(pid), row, ["status", "rev", "updatedAt"], old._updateTime)],
+      audit: [{ action: "project.status", ref: `projects/${pid}`, before: { status: old.status }, after: { status: x.p.to } }],
+      result: null,
+    };
+  });
+  return { project: await presentProject(x, out) };
+}
+
+// Deletes a project and everything under it, in batches of 300 deletes per commit. false = budget ran out.
+async function drain(d, token, rel, spend) {
+  for (;;) {
+    const docs = await d.fsList(token, rel);
+    if (!docs.length) return true;
+    for (let i = 0; i < docs.length; i += 300) {
+      if (!spend()) return false;
+      await d.fsCommit(token, docs.slice(i, i + 300).map((doc) => ({ delete: doc.name })));
+    }
+  }
+}
+export async function dropProject(d, token, pid, spend) {
+  const full = (rel) => d.DOC_ROOT + "/" + rel;
+  for (const m of await d.fsList(token, J.paths.members(pid))) {        // members' index entries first
+    if (!spend()) return false;
+    await d.fsCommit(token, [{ delete: full(J.paths.index(m.name.split("/").pop(), pid)) }]);
+  }
+  for (const e of await d.fsList(token, J.paths.estimates(pid))) {
+    if (!(await drain(d, token, J.paths.lines(pid, e.name.split("/").pop()), spend))) return false;
+  }
+  for (const rel of [J.paths.estimates(pid), J.paths.tx(pid), J.paths.alerts(pid), J.paths.members(pid)]) {
+    if (!(await drain(d, token, rel, spend))) return false;
+  }
+  if (!spend()) return false;
+  await d.fsCommit(token, [{ delete: full(J.paths.project(pid)) }]);
+  return true;
+}
+
+async function opProjDelete(x) {
+  const pid = segId(x.p.pid);
+  await projSchemaReady(x);
+  await accessOf(x, pid, "owner");
+  if (x.p.confirm !== pid) throw new C.PfmError("confirm_required", "send the project id as confirm");
+  if (!(await dropProject(x.d, x.token, pid, () => true))) throw new C.PfmError("busy");
+  await commitAudited(x, async () => ({ writes: [], audit: [{ action: "project.delete", ref: `projects/${pid}` }], result: null }));
+  return { id: pid, deleted: true };
+}
+
+// ---------- estimates (BOQ) ----------
+
+async function lineRow(x, pid, v, sortOrder) {
+  return {
+    category: v.category, unit: v.unit, estQty: J.qtyText(v.estQty), estUnitPrice: v.estUnitPrice, estTotal: v.estTotal,
+    name: await sealP(x, pid, v.name), notes: await sealP(x, pid, txt(v.notes, 300, "notes")), sortOrder,
+  };
+}
+
+async function opEstCreate(x) {
+  await projSchemaReady(x);
+  await settingsOf(x);
+  const pid = segId(x.p.pid);
+  const eid = ID_OF(x, "e_");
+  let out;
+  await commitAudited(x, async () => {
+    const { p } = await accessOf(x, pid, "editor");
+    const existing = await getDoc(x, J.paths.estimate(pid, eid));
+    if (existing) { out = existing; return { result: null }; }
+    if (!["planning", "active"].includes(p.status)) throw new C.PfmError("bad_project_status", p.status);
+    const ests = await estimatesOf(x, pid);
+    if (ests.some((e) => e.status === "draft")) throw new C.PfmError("draft_exists", "finish or delete the open revision first");
+    const revision = J.nextRevision(ests);
+    const reason = txt(x.p.reason, 200, "reason");
+    if (revision > 1 && !reason) throw new C.PfmError("reason_required", "a change order needs a reason");
+    let rows = [];
+    if (x.p.fromBaseline) {
+      if (!p.baselineEstimateId) throw new C.PfmError("no_baseline");
+      rows = await linesOf(x, pid, p.baselineEstimateId);
+    }
+    if (rows.length > PROJ_MAX_LINES) throw new C.PfmError("too_many_lines", String(PROJ_MAX_LINES));
+    const est = { revision, status: "draft", reason: reason || (revision === 1 ? "Initial estimate" : null), rev: 1,
+      total: rows.reduce((s, r) => s + r.estTotal, 0), lineCount: rows.length, createdAt: now(), updatedAt: now() };
+    out = { id: eid, ...est };
+    return {
+      writes: [
+        createAt(x, J.paths.estimate(pid, eid), est),
+        ...rows.map((r) => createAt(x, `${J.paths.lines(pid, eid)}/${r.id}`, pick(r, ["category", "unit", "estQty", "estUnitPrice", "estTotal", "name", "notes", "sortOrder"]))),
+        updateAt(x, J.paths.project(pid), { rev: p.rev + 1, updatedAt: now() }, ["rev", "updatedAt"], p._updateTime),
+      ],
+      audit: [{ action: "estimate.create", ref: `projects/${pid}/estimates/${eid}`, after: { revision, lineCount: rows.length, total: est.total } }],
+      result: null,
+    };
+  });
+  return { estimate: strip(out) };
+}
+
+async function opEstLines(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid), eid = segId(x.p.eid);
+  if (!Array.isArray(x.p.lines)) throw new C.PfmError("bad_lines");
+  if (x.p.lines.length > PROJ_MAX_LINES) throw new C.PfmError("too_many_lines", String(PROJ_MAX_LINES));
+  let out, totals = null;
+  await commitAudited(x, async () => {
+    const { p } = await accessOf(x, pid, "editor");
+    const est = await estimateOf(x, pid, eid);
+    if (x.p.rev !== est.rev) throw new C.PfmError("stale", "reload and try again");
+    J.assertEstimateEditable(est);
+    const checked = x.p.lines.map((l) => ({ ...J.validateBoqLine(l, p.currency), notes: l.notes }));
+    J.assertUniqueLineKeys(checked);
+    const rows = [];
+    for (let i = 0; i < checked.length; i++) rows.push({ key: checked[i].lineKey, data: await lineRow(x, pid, checked[i], i) });
+    totals = J.estimateTotals(checked);
+    const keep = new Set(rows.map((r) => r.key));
+    const old = await linesOf(x, pid, eid);
+    const estRow = { rev: est.rev + 1, total: totals.total, lineCount: rows.length, updatedAt: now() };
+    out = { id: eid, ...est, ...estRow };
+    return {
+      writes: [
+        ...old.filter((r) => !keep.has(r.id)).map((r) => deleteAt(x, `${J.paths.lines(pid, eid)}/${r.id}`)),
+        ...rows.map((r) => ({ update: { name: P(x, `${J.paths.lines(pid, eid)}/${r.key}`), fields: fieldsOf(x, r.data) } })),
+        updateAt(x, J.paths.estimate(pid, eid), estRow, ["rev", "total", "lineCount", "updatedAt"], est._updateTime),
+      ],
+      audit: [{ action: "estimate.lines", ref: `projects/${pid}/estimates/${eid}`, after: { lineCount: rows.length, total: totals.total } }],
+      result: null,
+    };
+  });
+  return { estimate: strip(out), totals };
+}
+
+async function opEstApprove(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid), eid = segId(x.p.eid);
+  let out;
+  await commitAudited(x, async () => {
+    const { p } = await accessOf(x, pid, "editor");
+    const est = await estimateOf(x, pid, eid);
+    if (x.p.rev !== est.rev) throw new C.PfmError("stale", "reload and try again");
+    const lines = await linesOf(x, pid, eid);
+    J.assertCanApprove(est, lines.map(lineInput), p);
+    const prev = (await estimatesOf(x, pid)).find((e) => e.status === "baseline") || null;
+    const at = now();
+    const txs = await txsOf(x, pid);
+    const health = J.projectHealth(projView(p), lines.map(lineInput), txs);
+    const stored = await alertsOf(x, pid);
+    out = { id: eid, ...est, status: "baseline", approvedAt: at, rev: est.rev + 1 };
+    return {
+      writes: [
+        updateAt(x, J.paths.estimate(pid, eid), { status: "baseline", approvedAt: at, approvedBy: x.uid, rev: est.rev + 1 }, ["status", "approvedAt", "approvedBy", "rev"], est._updateTime),
+        ...(prev ? [updateAt(x, J.paths.estimate(pid, prev.id), { status: "superseded", rev: prev.rev + 1 }, ["status", "rev"], prev._updateTime)] : []),
+        updateAt(x, J.paths.project(pid), { baselineEstimateId: eid, status: p.status === "planning" ? "active" : p.status, rev: p.rev + 1, updatedAt: at }, ["baselineEstimateId", "status", "rev", "updatedAt"], p._updateTime),
+        ...alertWrites(x, pid, eid, health, stored),
+      ],
+      audit: [{ action: "estimate.approve", ref: `projects/${pid}/estimates/${eid}`, after: { revision: est.revision, supersedes: prev ? prev.revision : null } }],
+      result: null,
+    };
+  });
+  return { estimate: strip(out) };
+}
+
+// ---------- project ledger ----------
+
+// Adds an expense to the project. With copyToPersonal ({ categoryId }) it also books a linked row in the caller's own
+// personal ledger, in the same commit. Only the caller's own copy is changed when the entry is voided later.
+async function opPtxAdd(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  const id = ID_OF(x, "x_");
+  let out = null, copyId = null;
+  await commitAudited(x, async () => {
+    const existing = await getDoc(x, `${J.paths.tx(pid)}/${id}`);
+    if (existing) { out = existing; return { result: null }; }
+    const { p } = await accessOf(x, pid, "editor");
+    const t = J.validateProjectTx(x.p, p);
+    if (t.lineKey) {
+      const lines = p.baselineEstimateId ? await linesOf(x, pid, p.baselineEstimateId) : [];
+      if (!lines.some((l) => l.id === t.lineKey)) throw new C.PfmError("bad_line", "not on the baseline estimate");
+    }
+    const row = {
+      kind: x.p.kind, direction: t.direction, occurredOn: t.occurredOn, amount: t.amount,
+      originalAmount: t.originalAmount, originalCurrency: t.originalCurrency, fxRate: t.fxRate,
+      lineKey: t.lineKey, category: t.category, quantity: t.quantity != null ? J.qtyText(t.quantity) : null, unit: t.unit,
+      description: await sealP(x, pid, t.description), counterparty: await sealP(x, pid, t.counterparty),
+      status: "posted", voidReason: null, walletTxId: null, createdBy: x.uid, createdAt: now(), rev: 1, personalCopy: null,
+    };
+    const writes = [];
+    const audit = [];
+    const s = x.p.copyToPersonal ? await settingsOf(x) : null;
+    if (x.p.copyToPersonal) {
+      if (t.kind !== "expense") throw new C.PfmError("copy_expense_only");
+      const cats = await categoryMap(x);
+      const cur = t.originalCurrency;
+      if (cur !== s.baseCurrency && !x.p.personalFxRate) throw new C.PfmError("fx_rate_required", `personal ledger is in ${s.baseCurrency}`);
+      const tp = { ...(await buildTx(x, s, cats, { kind: "expense", amount: x.p.amount, currency: cur, fxRate: x.p.personalFxRate,
+        categoryId: x.p.copyToPersonal.categoryId, date: t.occurredOn, note: t.description, counterparty: t.counterparty }, null)),
+        autoCategorized: false, rev: 1, createdAt: now(), updatedAt: now(), projectRef: { pid, txId: id } };
+      copyId = "tp_" + id.slice(2);
+      row.personalCopy = { uid: x.uid, txId: copyId };
+      writes.push(createAt(x, `pfm/${x.uid}/tx/${copyId}`, tp), ...rollupWrites(x, C.rollupDiff(null, tp)));
+      if (!s.hasTx) writes.push({ update: { name: P(x, `pfm/${x.uid}`), fields: fieldsOf(x, { hasTx: true }) }, updateMask: { fieldPaths: ["hasTx"] } });
+      audit.push({ action: "tx.add", ref: `tx/${copyId}`, after: auditView(tp) });
+    }
+    out = { id, ...row };
+    const txs = await txsOf(x, pid);
+    const health = (await healthFor(x, p, undefined, [...txs, { id, ...row }])).health;
+    const stored = await alertsOf(x, pid);
+    return {
+      writes: [
+        createAt(x, `${J.paths.tx(pid)}/${id}`, row),
+        updateAt(x, J.paths.project(pid), { rev: p.rev + 1, updatedAt: now() }, ["rev", "updatedAt"], p._updateTime),
+        ...(p.baselineEstimateId ? alertWrites(x, pid, p.baselineEstimateId, health, stored) : []),
+        ...writes,
+      ],
+      audit: [{ action: "ptx.add", ref: `projects/${pid}/tx/${id}`, after: { kind: row.kind, amount: row.amount, originalCurrency: row.originalCurrency, lineKey: row.lineKey, category: row.category, quantity: row.quantity, occurredOn: row.occurredOn } }, ...audit],
+      result: null,
+    };
+  });
+  return { tx: await presentTx(x, pid, out), personalCopyId: copyId };
+}
+
+async function opPtxVoid(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid), txId = segId(x.p.txId);
+  const reason = txt(x.p.reason, 200, "reason");
+  if (!reason) throw new C.PfmError("reason_required");
+  let out, kept = false;
+  await commitAudited(x, async () => {
+    const { p } = await accessOf(x, pid, "editor");
+    const old = await getDoc(x, `${J.paths.tx(pid)}/${txId}`);
+    if (!old) throw new C.PfmError("not_found", "entry");
+    if (old.status === "voided") { out = old; return { result: null }; }
+    const row = { status: "voided", voidReason: await sealP(x, pid, reason), voidedAt: now(), rev: old.rev + 1 };
+    out = { ...old, ...row, id: txId };
+    const txs = (await txsOf(x, pid)).map((t) => (t.id === txId ? { ...t, status: "voided" } : t));
+    const stored = await alertsOf(x, pid);
+    const health = (await healthFor(x, p, undefined, txs)).health;
+    const writes = [
+      updateAt(x, `${J.paths.tx(pid)}/${txId}`, row, ["status", "voidReason", "voidedAt", "rev"], old._updateTime),
+      updateAt(x, J.paths.project(pid), { rev: p.rev + 1, updatedAt: now() }, ["rev", "updatedAt"], p._updateTime),
+      ...(p.baselineEstimateId ? alertWrites(x, pid, p.baselineEstimateId, health, stored) : []),
+    ];
+    const audit = [{ action: "ptx.void", ref: `projects/${pid}/tx/${txId}`, before: { status: old.status }, after: { status: "voided" } }];
+    const pc = old.personalCopy;
+    if (pc && pc.uid === x.uid) {
+      // The copy is in the caller's own ledger, so it is voided here too. Other members' copies are left alone.
+      const tp = await getDoc(x, `pfm/${x.uid}/tx/${pc.txId}`);
+      if (tp && !tp.deleted) {
+        const nx = { ...strip(tp), deleted: true, rev: tp.rev + 1, updatedAt: now() }; delete nx.id;
+        writes.push({ update: { name: P(x, `pfm/${x.uid}/tx/${pc.txId}`), fields: fieldsOf(x, nx) }, currentDocument: { updateTime: tp._updateTime } },
+          ...rollupWrites(x, C.rollupDiff(tp, nx)));
+        audit.push({ action: "tx.delete", ref: `tx/${pc.txId}`, before: auditView(tp) });
+      }
+    } else if (pc) kept = true;
+    return { writes, audit, result: null };
+  });
+  return { tx: await presentTx(x, pid, out), personalCopyKept: kept };
+}
+
+async function opPtxList(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  await accessOf(x, pid, "viewer");
+  let rows = await txsOf(x, pid);
+  if (x.p.kind) rows = rows.filter((t) => t.kind === x.p.kind);
+  if (x.p.lineKey) rows = rows.filter((t) => t.lineKey === x.p.lineKey);
+  rows.sort((a, b) => (a.occurredOn === b.occurredOn ? (a.createdAt < b.createdAt ? 1 : -1) : a.occurredOn < b.occurredOn ? 1 : -1));
+  return { items: await Promise.all(rows.map((t) => presentTx(x, pid, t))), truncated: rows.length >= PROJ_MAX_TX };
+}
+
+// ---------- analytics, charts, alerts ----------
+
+async function opProjHealth(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  const { p } = await accessOf(x, pid, "viewer");
+  const { estimateId, health } = await healthFor(x, p, x.p.estimateId ? segId(x.p.estimateId) : undefined);
+  return { estimateId, health };
+}
+
+async function opProjVariance(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  const { p } = await accessOf(x, pid, "viewer");
+  const eid = x.p.estimateId ? segId(x.p.estimateId) : p.baselineEstimateId || null;
+  const { health } = await healthFor(x, p, eid);
+  const rows = eid ? await linesOf(x, pid, eid) : [];
+  const byKey = new Map(rows.map((r) => [r.id, r]));
+  const lines = [];
+  for (const v of health.lines) {
+    const r = byKey.get(v.lineKey) || {};
+    lines.push({ ...v, name: await openP(x, pid, r.name), unit: r.unit ?? null, category: r.category ?? null, notes: await openP(x, pid, r.notes) });
+  }
+  return { estimateId: eid, currency: p.currency, lines };
+}
+
+async function opProjCharts(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  const { p } = await accessOf(x, pid, "viewer");
+  const eid = x.p.estimateId ? segId(x.p.estimateId) : p.baselineEstimateId || null;
+  const lines = eid ? await linesOf(x, pid, eid) : [];
+  const txs = await txsOf(x, pid);
+  const { health } = await healthFor(x, p, eid, txs);
+  const series = J.chartSeries(lines.map((r) => ({ lineKey: r.id, category: r.category, estTotal: r.estTotal })), txs);
+  return {
+    estimateId: eid, currency: p.currency,
+    budget: { target: health.targetBudget, spent: health.actualSpend, estimated: health.estimatedTotal, forecast: health.forecastAtCompletion,
+      utilizationBp: health.utilizationBp, thresholdsCrossed: health.thresholdsCrossed, status: health.status },
+    ...series,
+  };
+}
+
+async function opProjAlertsList(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  await accessOf(x, pid, "viewer");
+  let rows = await alertsOf(x, pid);
+  if (x.p.unacknowledged) rows = rows.filter((a) => !a.acknowledgedAt);
+  rows.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  return { items: rows };
+}
+
+async function opProjAlertAck(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  // Alert keys look like "budget:100:e_…": colons are allowed here, nowhere else
+  if (typeof x.p.key !== "string" || !/^[A-Za-z0-9_:-]{1,120}$/.test(x.p.key)) throw new C.PfmError("bad_id", "alert key");
+  const key = x.p.key;
+  let out;
+  await commitAudited(x, async () => {
+    await accessOf(x, pid, "editor");
+    const a = await getDoc(x, `${J.paths.alerts(pid)}/${key}`);
+    if (!a) throw new C.PfmError("not_found", "alert");
+    if (a.acknowledgedAt) { out = a; return { result: null }; }
+    const at = now();
+    out = { ...a, acknowledgedAt: at };
+    return {
+      writes: [updateAt(x, `${J.paths.alerts(pid)}/${key}`, { acknowledgedAt: at }, ["acknowledgedAt"], a._updateTime)],
+      audit: [{ action: "alert.ack", ref: `projects/${pid}/alerts/${key}`, after: { rule: a.rule } }],
+      result: null,
+    };
+  });
+  return { alert: strip(out) };
+}
+
+// ---------- members and invites ----------
+
+async function opMembersList(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  await accessOf(x, pid, "viewer");
+  const rows = (await membersOf(x, pid)).map((m) => ({ uid: m.id, role: m.role, displayName: m.displayName ?? null, addedAt: m.addedAt ?? null }));
+  return { items: rows.sort((a, b) => (a.role === "owner" ? -1 : b.role === "owner" ? 1 : a.addedAt < b.addedAt ? -1 : 1)) };
+}
+
+async function opMembersRole(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  const target = segId(x.p.uid);
+  const role = x.p.role;
+  if (!J.SHARE_ROLES.includes(role)) throw new C.PfmError("bad_role", String(role));
+  let out;
+  await commitAudited(x, async () => {
+    await accessOf(x, pid, "owner");
+    const m = await getDoc(x, J.paths.member(pid, target));
+    if (!m) throw new C.PfmError("not_found", "member");
+    if (m.role === "owner") throw new C.PfmError("owner_role_fixed");
+    const ix = await getDoc(x, J.paths.index(target, pid));
+    out = { uid: target, role };
+    return {
+      writes: [
+        updateAt(x, J.paths.member(pid, target), { role }, ["role"], m._updateTime),
+        ...(ix ? [updateAt(x, J.paths.index(target, pid), { role }, ["role"], ix._updateTime)] : []),
+      ],
+      audit: [{ action: "member.role", ref: `projects/${pid}/members/${target}`, before: { role: m.role }, after: { role } }],
+      result: null,
+    };
+  });
+  return { member: out };
+}
+
+// The owner removes anyone except themselves. Anyone else may remove only themselves (leave).
+async function opMembersRemove(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  const target = x.p.uid ? segId(x.p.uid) : x.uid;
+  await commitAudited(x, async () => {
+    const { role } = await accessOf(x, pid, "viewer");
+    const m = await getDoc(x, J.paths.member(pid, target));
+    if (!m) throw new C.PfmError("not_found", "member");
+    if (target !== x.uid) J.assertRole(role, "owner");
+    if (m.role === "owner") throw new C.PfmError("owner_cannot_leave", "delete the project instead");
+    return {
+      writes: [deleteAt(x, J.paths.member(pid, target)), deleteAt(x, J.paths.index(target, pid))],
+      audit: [{ action: target === x.uid ? "member.leave" : "member.remove", ref: `projects/${pid}/members/${target}`, before: { role: m.role } }],
+      result: null,
+    };
+  });
+  return { removed: target };
+}
+
+// An invite is a token. It grants editor or viewer, can be used up to maxUses times, and expires.
+async function opInviteCreate(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  const role = x.p.role ?? "viewer";
+  if (!J.SHARE_ROLES.includes(role)) throw new C.PfmError("bad_role", String(role));
+  const maxUses = x.p.maxUses ?? 1;
+  if (!Number.isInteger(maxUses) || maxUses < 1 || maxUses > J.INVITE_MAX_USES) throw new C.PfmError("bad_max_uses", `1 to ${J.INVITE_MAX_USES}`);
+  const days = x.p.days ?? J.INVITE_DAYS.default;
+  if (!Number.isInteger(days) || days < 1 || days > J.INVITE_DAYS.max) throw new C.PfmError("bad_days", `1 to ${J.INVITE_DAYS.max}`);
+  const token = rid(24);
+  const expiresAt = new Date(Date.now() + days * 86400000).toISOString();
+  let out;
+  await commitAudited(x, async () => {
+    await accessOf(x, pid, "owner");
+    const row = { pid, role, maxUses, uses: 0, createdBy: x.uid, createdAt: now(), expiresAt };
+    out = { token, role, maxUses, expiresAt };
+    return {
+      writes: [createAt(x, J.paths.invite(token), row)],
+      audit: [{ action: "invite.create", ref: `projects/${pid}`, after: { role, maxUses, expiresAt } }],   // the token is not logged
+      result: null,
+    };
+  });
+  return { invite: out };
+}
+
+// Anyone with a valid token joins. A repeat join changes nothing. Uses are counted atomically on the invite.
+async function opInviteAccept(x) {
+  await projSchemaReady(x);
+  const token = x.p.token;
+  if (typeof token !== "string" || !/^[a-z0-9]{24}$/.test(token)) throw new C.PfmError("bad_invite");
+  let out = null;
+  await commitAudited(x, async () => {
+    const inv = await getDoc(x, J.paths.invite(token));
+    if (!inv) throw new C.PfmError("bad_invite");
+    const p = await getDoc(x, J.paths.project(inv.pid));
+    if (!p) throw new C.PfmError("not_found", "project");
+    const mine = await getDoc(x, J.paths.member(inv.pid, x.uid));
+    if (mine) { out = { project: await presentProject(x, p), role: mine.role }; return { result: null }; }
+    if (Date.parse(inv.expiresAt) < Date.now()) throw new C.PfmError("invite_expired");
+    if (inv.uses >= inv.maxUses) throw new C.PfmError("invite_used");
+    const at = now();
+    out = { project: await presentProject(x, p), role: inv.role };
+    return {
+      writes: [
+        updateAt(x, J.paths.invite(token), { uses: inv.uses + 1 }, ["uses"], inv._updateTime),
+        createAt(x, J.paths.member(inv.pid, x.uid), { role: inv.role, displayName: memberName(x) ?? null, addedAt: at, addedBy: inv.createdBy }),
+        createAt(x, J.paths.index(x.uid, inv.pid), { role: inv.role, createdAt: at }),
+      ],
+      audit: [{ action: "member.join", ref: `projects/${inv.pid}`, after: { role: inv.role } }],
+      result: null,
+    };
+  });
+  return { project: out.project, role: out.role };
+}
+
+// ---------- account deletion for projects ----------
+
+// Called by the purge job. The user's index lists their projects. An owned project is deleted for everyone;
+// a shared project only loses this user's membership. false = budget ran out (the job retries).
+export async function purgeProjects(d, token, uid, spend) {
+  for (;;) {
+    if (!spend()) return false;
+    const ixs = await d.fsList(token, J.paths.indexes(uid));
+    if (!ixs.length) return true;
+    for (const ix of ixs) {
+      const pid = ix.name.split("/").pop();
+      if (!spend()) return false;
+      if (ix.fields?.role?.stringValue === "owner") {
+        if (!(await dropProject(d, token, pid, spend))) return false;
+      } else {
+        await d.fsCommit(token, [{ delete: d.DOC_ROOT + "/" + J.paths.member(pid, uid) }, { delete: ix.name }]);
+      }
+    }
+  }
 }
