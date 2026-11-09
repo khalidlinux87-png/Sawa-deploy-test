@@ -1,6 +1,6 @@
 # Sawa Wallet Engine: bulk receipt and payment-message import (P6) design
 
-Status: rev 4 · **Bankak import built end to end (§4.7, §4.8, C271)**; search, projects and other issuers not built · Date: 2026-11-09 (rev 2: Sawa's own reader instead of a paid AI service, decision I1) · Extends `DESIGN.md` (PFM rev 9, P1–P5 built)
+Status: rev 4 · **Bankak import built end to end (§4.7, §4.8, C273)**; search, projects and other issuers not built · Date: 2026-11-09 (rev 2: Sawa's own reader instead of a paid AI service, decision I1) · Extends `DESIGN.md` (PFM rev 9, P1–P5 built)
 
 **What it does.** The user hands the Personal Accountant a batch: photos of receipts, PDF invoices or statements, or
 pasted payment messages (SMS or email). Sawa reads every transaction in it, fills in the fields below, files each one
@@ -259,7 +259,7 @@ and English; two were scrolled so the top rows were cut off), ~3 s per image in 
 Before the two-read rule one read gave `55000.00` for `35000.00`; it is now caught by the second read. Comments are
 shown for the user to edit and are never used for money.
 
-### 4.8 In the app (C271)
+### 4.8 In the app (C273)
 
 Ledger → «استيراد». The app loads `/ocr/v1/sawa-reader.js` (built from this folder by `dev/bundle.mjs`) and the OCR
 files from its own origin, reads each picked image on the phone, and shows a review card per image: status (ready /
