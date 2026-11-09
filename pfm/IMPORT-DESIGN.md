@@ -1,6 +1,6 @@
 # Sawa Wallet Engine: bulk receipt and payment-message import (P6) design
 
-Status: rev 2 · **design only, not built** · Date: 2026-11-09 (rev 2: Sawa's own reader instead of a paid AI service, decision I1) · Extends `DESIGN.md` (PFM rev 9, P1–P5 built)
+Status: rev 3 · **reader prototype built for Bankak (§4.7); the rest not built** · Date: 2026-11-09 (rev 2: Sawa's own reader instead of a paid AI service, decision I1) · Extends `DESIGN.md` (PFM rev 9, P1–P5 built)
 
 **What it does.** The user hands the Personal Accountant a batch: photos of receipts, PDF invoices or statements, or
 pasted payment messages (SMS or email). Sawa reads every transaction in it, fills in the fields below, files each one
@@ -22,7 +22,7 @@ entry can then be searched by any of seven fields.
 | I3 | Consent | Images are read on the phone; the server gets the OCR text and the photo, sealed as the entry's receipt (as in P5). No extra consent screen is needed for that. Only «ساعدنا في التحسين» (sending an anonymised sample, §4.6) asks first, every time |
 | I4 | Projects vs tags | **Projects are a new field** (one per entry, default "General"); tags stay free-form and many per entry. A project is the "ledger context" from the brief: a shop, a building job, a family event |
 | I5 | Reading SMS automatically on Android | **No.** Google Play restricts the SMS permission to default SMS apps. The user pastes or *shares* messages to Sawa (Android share target, iOS share sheet) |
-| I6 | **Which issuers first?** (open) | The bank apps, mobile-money services and SMS senders Sawa must read on day one. Each needs ~20 real samples (§4.6). Without them the reader works only in its generic mode, where every row is flagged for checking |
+| I6 | **Which issuers first?** Started 2026-11-09: **Bankak** (template `bankak@1`, §4.7). Next: other bank apps and mobile-money services, as samples arrive | The bank apps, mobile-money services and SMS senders Sawa must read on day one. Each needs ~20 real samples (§4.6). Without them the reader works only in its generic mode, where every row is flagged for checking |
 
 ---
 
@@ -222,6 +222,39 @@ prints, per issuer and field, how many are right, flagged, or **wrong and unflag
 account numbers, so they must never be committed here. Real samples go in a **private** repository (or a private R2
 bucket); only synthetic or fully anonymised samples go in `pfm/samples/`. Samples users send through «ساعدنا في التحسين»
 are masked on the phone (names, phones, account numbers) before upload, and kept sealed for 90 days.
+
+### 4.7 First template: Bankak (2026-11-09)
+
+Built in `pfm/reader/`: `image.mjs` (ruled rows → cells → label and value halves, borders trimmed, crops prepared),
+`text.mjs` (Arabic normalisation, label matching, dates, strict money and account shapes), `extract.mjs` (cells → one
+receipt in the schema's shape, with `verify`), `templates/bankak.mjs`, `reader.test.mjs` (16 tests, invented data only),
+`reader-eval.mjs` + `dev/ocr-node.mjs` (Tesseract in Node, to measure on private samples).
+
+How it reads a screenshot: find the ruled rows; split each into two halves; OCR both (Arabic+English, then Arabic only,
+then English if no label is recognised); the half that matches a label is the label. Digit fields (reference, date,
+accounts, amount) are re-read with the English engine, because Arabic line direction reverses digit groups. **The amount
+is read twice with two engines and both reads must agree**, have the exact shape `1,234.00`, and clear the confidence bar.
+
+Template facts: currency SDG (the screens' transfer button reads SDG), Sudan time, 16-digit accounts, two decimals.
+A *Status* other than Success/نجاح is flagged. Income vs spending comes from the user's own account numbers.
+Names: a name already confirmed for that account number wins over OCR (`ctx.knownAccounts`); a new name read with low
+confidence is flagged.
+
+**Results on the first 7 real screenshots** (4 layouts: green success screen and white history screen, each in Arabic
+and English; two were scrolled so the top rows were cut off), ~3 s per image in Node:
+
+| Field | Right | Flagged | **Wrong, not flagged** | Not on screen |
+|---|---|---|---|---|
+| Reference | 5 | 0 | **0** | 2 |
+| Date and time | 5 | 1 (top row cut) | **0** | 1 |
+| Amount | 6 | 1 (low confidence) | **0** | 0 |
+| From / to account | 7 / 7 | 0 | **0** | 0 |
+| Recipient name | 4 | 2 | 1 (Arabic) | 0 |
+| Comment | 2 | 0 | 4 (Arabic letters) | 1 |
+
+Before the two-read rule one read gave `55000.00` for `35000.00`; it is now caught by the second read. Comments are
+shown for the user to edit and are never used for money. Next: more samples (target 20 per layout), Arabic comment and
+name accuracy (larger crops, fine-tuning §4.6), and the app side (Web Worker, progress, review table).
 
 ---
 
