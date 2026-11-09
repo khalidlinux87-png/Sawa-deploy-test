@@ -35,9 +35,10 @@ export async function makeOcr({ base = "/ocr/v1/", onProgress } = {}) {
     canvas.width = crop.width; canvas.height = crop.height;
     g.putImageData(new ImageData(crop.data, crop.width, crop.height), 0, 0);
     const { data } = await (await get(mode in langs ? mode : "mix")).recognize(canvas);
-    return { text: data.lines.map((l) => l.text.trim()).filter(Boolean).join(" "), conf: data.confidence };
+    const lines = data.lines.filter((l) => l.text.trim()).map((l) => ({ text: l.text.trim(), conf: l.confidence, y0: l.bbox.y0, y1: l.bbox.y1 }));
+    return { text: lines.map((l) => l.text).join(" "), conf: data.confidence, lines };
   };
-  ocr.warm = () => Promise.all(["mix", "num"].map(get));
+  ocr.warm = (modes = ["mix", "num"]) => Promise.all(modes.map(get));   // the two engines every image needs; "ara" starts only if a name needs it
   ocr.close = async () => { for (const k of Object.keys(made)) (await made[k]).terminate(); };
   return ocr;
 }

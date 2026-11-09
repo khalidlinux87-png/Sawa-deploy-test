@@ -121,6 +121,7 @@ await shot("i4-added");
 const list = await op("pfm.tx.list", { month: "2026-11" });
 const imp = list.items.filter((t) => t.source === "import");
 check(imp.length === 4, "4 imported entries expected, got " + imp.length);
+if (process.env.DEBUG) console.log(JSON.stringify(imp.map((t) => ({ c: t.categoryId, p: t.counterparty, a: t.amount, n: t.note }))));
 check(imp.some((t) => t.categoryId === "c_utilities" && t.counterparty === "ايصالي" && t.amount === 15000000 && /1111222233334444555566/.test(t.note || "")), "the bill: utilities, biller, one-decimal amount, bill id in the note");
 check(imp.every((t) => /^m_/.test(t.id) && t.hasReceipt), "ids from references and receipts attached");
 check(imp.filter((t) => t.kind === "income").length === 1 && imp.find((t) => t.kind === "income").amount === 200000000, "the incoming 2,000,000.00 is income");

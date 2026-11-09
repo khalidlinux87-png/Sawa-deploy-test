@@ -22,8 +22,8 @@ export async function makeOcr() {
   const ocr = async (crop, mode) => {
     const buf = jpeg.encode({ width: crop.width, height: crop.height, data: Buffer.from(crop.data.buffer) }, 95).data;
     const { data } = await (w[mode] || w.mix).recognize(buf);
-    const lines = data.lines.map((l) => l.text.trim()).filter(Boolean);
-    return { text: lines.join(" "), conf: data.confidence };
+    const lines = data.lines.filter((l) => l.text.trim()).map((l) => ({ text: l.text.trim(), conf: l.confidence, y0: l.bbox.y0, y1: l.bbox.y1 }));
+    return { text: lines.map((l) => l.text).join(" "), conf: data.confidence, lines };
   };
   ocr.close = async () => { for (const k in w) await w[k].terminate(); };
   return ocr;

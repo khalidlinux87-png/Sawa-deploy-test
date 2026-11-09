@@ -2,7 +2,7 @@
 // All names, accounts and numbers below are invented. Real samples live in the private samples repository only.
 import assert from "node:assert/strict";
 import * as T from "./text.mjs";
-import { findCells, findRules, prepCrop } from "./image.mjs";
+import { findCells, findRules, prepCrop, buildStrip, splitLines } from "./image.mjs";
 import { extractFromCells, readImage } from "./extract.mjs";
 import bankak from "./templates/bankak.mjs";
 
@@ -183,6 +183,11 @@ await t("extract: a bill payment — biller name in «إلى», always spending 
   assert.equal(r.note, "سداد فاتورة 1111222233334444555566");
   assert.equal(r.service_type, "utility");
   assert.equal(r.category_id, "c_utilities");
+  // a biller name missing letters is snapped to the known biller
+  const lossy = bill().map((c) => (c.a.text === "إلى" ? cell("إلى", "يصال") : c));
+  const l = extractFromCells(lossy, bankak, ctx);
+  assert.equal(l.recipient.name, "ايصالي");
+  assert.equal(l.category_id, "c_utilities");
   // paid from an account Sawa doesn't know yet: proposed as the user's own, asked once
   const n = extractFromCells(bill({ from: "4444 3333 2222 0001" }), bankak, ctx);
   assert.equal(n.kind, "expense");
@@ -222,23 +227,36 @@ await t("image: rules, cells and halves on a synthetic screen", () => {
   assert.ok(crop.data[0] > 128 && min < 30, "background light, text dark");
 });
 
-await t("readImage: wires cells, labels and the double amount read", async () => {
-  const img = synthetic(8);
-  const cells = findCells(img), seq = english();
-  let row = -1, side = 0;
-  // Stub engine: answers per call order — label half first, then value; amount gets a second "eng" read.
+await t("readImage: a whole screenshot in a few OCR calls (strips), digits re-read, amount read twice", async () => {
+  const img = synthetic(8), seq = english();
+  const NUM = new Set(["Trx. ID", "Date & Time", "From Account", "To Account", "Mobile Number", "Amount"]);
   const calls = [];
+  // Stub engine: answers a strip with one line per span. 1st call = the right column (labels here), then the values
+  // (mixed), then the digit fields only.
   const ocr = async (crop, mode) => {
     calls.push(mode);
-    if (mode === "num" || mode === "eng" && calls[calls.length - 2] === "num") return { text: seq[row].b.text, conf: 95 };
-    if (side === 0) { row++; side = 1; return { text: seq[row].a.text, conf: 95 }; }
-    side = 0; return { text: seq[row].b.text, conf: 95 };
+    const texts = calls.length === 1 ? seq.map((c) => c.a.text)
+      : mode === "num" ? seq.filter((c) => NUM.has(c.a.text)).map((c) => c.b.text)
+      : seq.map((c) => c.b.text);
+    assert.equal(texts.length, crop.spans.length, "one line per strip span");
+    return { text: texts.join(" "), conf: 95, lines: crop.spans.map(([a, b], k) => ({ text: texts[k], conf: 95, y0: a + 2, y1: b - 2 })) };
   };
   const r = await readImage(img, ocr, [bankak], ctx);
-  assert.equal(cells.length, 8);
   assert.equal(r.amount.value, "250000.00");
-  assert.equal(r.status, "verified");
-  assert.ok(calls.filter((m) => m === "num").length >= 5, "digit fields re-read in num mode");
+  assert.equal(r.recipient.name, "Test Supplier Ltd");
+  assert.equal(r.status, "verified", JSON.stringify(r.verify));
+  assert.deepEqual(calls, ["mix", "mix", "num"], "three OCR calls for a clean screenshot");
+});
+
+await t("image: strips give each OCR line back to its own crop", () => {
+  const img = synthetic(3), cells = findCells(img);
+  const st = buildStrip(img, cells.map((c) => ({ box: c.left, bg: c.bg })), 3);
+  assert.equal(st.spans.length, 3);
+  assert.ok(st.spans.every(([a, b], k) => b > a && (k === 0 || a > st.spans[k - 1][1])), "spans in order, apart");
+  const got = splitLines([{ text: "x", conf: 90, y0: st.spans[1][0] + 1, y1: st.spans[1][1] - 1 }, { text: "y", conf: 70, y0: st.spans[1][0], y1: st.spans[1][1] },
+    { text: "z", conf: 80, y0: st.spans[2][0], y1: st.spans[2][1] }], st.spans);
+  assert.deepEqual(got.map((g) => g.text), ["", "x y", "z"]);
+  assert.equal(got[1].conf, 80);
 });
 
 console.log(`reader: ${n} passed`);

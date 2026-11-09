@@ -41,6 +41,9 @@ export default {
   senderOnly: ["From Account", "من حساب"],
   // A bill payment always goes out of the user's own account; «إلى» then names the biller (e.g. ايصالي), not an account.
   billTypes: ["سداد فاتورة", "Bill Payment"],
+  // Billers seen on Bankak bill payments. A biller name read close to one of these is snapped to it (OCR drops letters
+  // from short Arabic words: «يصال» for «ايصالي»). Add new billers here as samples show them.
+  billers: ["ايصالي"],
   success: ["Success", "نجاح"],
   // Words that mean the money did not move: a Status reading like one of these flags the row. Unreadable junk does not
   // (the success word is short and OCR sometimes turns it into Latin noise).
