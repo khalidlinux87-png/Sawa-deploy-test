@@ -1368,3 +1368,11 @@ Business details, logo (Firestore data URI for now), receiving accounts, drafts,
 
 ## C269 — Personal Accountant P5: receipt photos and CSV export; KWD and JPY
 `pfm.tx.receipt.set/get/delete` (sealed photo per entry in `pfm/{uid}/files/r_{txId}`), `pfm.export` (CSV in the response). Currencies now twelve (KWD, JPY added). Fix: `sealField` base64 no longer overflows on large input. No new secret, no Firestore rules. Tests: core 29 · worker 42 · ui-check P1–P5. Details: `pfm/DESIGN.md` §7f, `Sawa-app/BUILD.md` § C269.
+
+## C271 — Personal Accountant P6a: Projects scaffold (no Worker, app or rules change)
+Spec `pfm/PROJECTS.md` (decisions P1–P10). Project ledger in its own subtree `pfm/{uid}/projects/{pid}/…`, separate from the personal ledger. Wallet link deferred (`DESIGN.md` decision 13). Firestore and the Worker, not PostgreSQL.
+- `pfm/projects-core.mjs`: validators, BOQ line totals, line variance (quantity and price effects sum exactly to the total), project health with EAC, margin and cash position, keyed alerts that re-arm, lifecycle guards.
+- `pfm/projects-migrations.mjs`: versioned, idempotent migrations tracked in `pfm/{uid}/meta/projects`; `projects_init` records the baseline (nothing to backfill: the fields are new).
+- Tests: `projects-core.test.mjs` 15 · `projects-migrations.test.mjs` 7 · `pfm-core.test.mjs` 29 (unchanged).
+- Not yet: Worker ops, Firestore adapter for the runner, app screens, PDF/Excel export. Next: P6b. Details: `pfm/PROJECTS.md` §9.
+- Upload: nothing to deploy yet (no Worker or app file imports these modules).

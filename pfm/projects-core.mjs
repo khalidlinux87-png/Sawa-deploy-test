@@ -1,0 +1,429 @@
+// Sawa Personal Accountant: Projects (pure logic, no I/O). Runs in the Worker and in Node tests.
+// Spec: pfm/PROJECTS.md. Same rules as pfm-core.mjs:
+//   - money is an integer in the project's currency's minor unit (SDG 1.00 = 100); floats never touch money;
+//   - quantities are BigInt scaled by 1000 (3 decimals, as toQty() returns); stored as decimal text ("2.5");
+//   - a user-typed FX rate converts an entry into the project currency (decision 8 and 11 of DESIGN.md).
+// Nothing here reads or writes Firestore. The Worker loads rows, calls these functions, then commits.
+
+import { currencyExp, toMinor, toQty, convert, PfmError } from "./pfm-core.mjs";
+
+export { PfmError };
+
+export const PROJECT_TEMPLATES = Object.freeze(["house_construction", "event", "small_business", "agri_season", "custom"]);
+export const PROJECT_STATUSES = Object.freeze(["planning", "active", "on_hold", "completed", "archived"]);
+export const ESTIMATE_STATUSES = Object.freeze(["draft", "baseline", "superseded"]);
+export const BOQ_CATEGORIES = Object.freeze(["raw_materials", "labor", "equipment_rental", "permits", "other"]);
+
+// Every project ledger kind and the direction it moves money.
+// Only `expense` is project cost. `loan_repayment` is cash out but not cost (principal), so it is left out of spend.
+export const TX_KINDS = Object.freeze({
+  capital_injection: "inflow",
+  loan_draw: "inflow",
+  partner_contribution: "inflow",
+  grant: "inflow",
+  revenue: "inflow",
+  expense: "outflow",
+  loan_repayment: "outflow",
+});
+export const FUNDING_KINDS = Object.freeze(["capital_injection", "loan_draw", "partner_contribution", "grant"]);
+
+export const DEFAULT_THRESHOLDS_PCT = Object.freeze([80, 100]);
+export const DEFAULT_LINE_TOLERANCE_PCT = 5;
+
+const QTY_SCALE = 1000n;
+const BP = 10000n;
+const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const PROJECT_STATUS_TRANSITIONS = Object.freeze({
+  planning: ["active", "archived"],
+  active: ["on_hold", "completed", "archived"],
+  on_hold: ["active", "archived"],
+  completed: ["active", "archived"],
+  archived: [],
+});
+
+// ---------- small helpers ----------
+
+const big = (x) => BigInt(x);
+const toNum = (x) => {
+  const v = Number(x);
+  if (!Number.isSafeInteger(v)) throw new PfmError("too_large");
+  return v;
+};
+// Rounds num/den half away from zero. BigInt in, BigInt out.
+function divRound(num, den) {
+  const neg = (num < 0n) !== (den < 0n);
+  const n = num < 0n ? -num : num, d = den < 0n ? -den : den;
+  const q = (n * 2n + d) / (d * 2n);
+  return neg ? -q : q;
+}
+
+// Canonical text of a scaled quantity: 2500n -> "2.5", 10000n -> "10", -500n -> "-0.5"
+export function qtyText(q) {
+  const v = big(q), neg = v < 0n, a = neg ? -v : v;
+  const w = a / QTY_SCALE, f = a % QTY_SCALE;
+  const body = f ? `${w}.${String(f).padStart(3, "0").replace(/0+$/, "")}` : `${w}`;
+  return (neg ? "-" : "") + body;
+}
+// Accepts a scaled BigInt or the stored text form.
+const qOf = (v) => (typeof v === "string" ? toQty(v) : big(v ?? 0));
+
+function assertDate(s, code = "bad_date") {
+  if (typeof s !== "string" || !DATE_RE.test(s)) throw new PfmError(code, String(s));
+  const [y, m, d] = s.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) throw new PfmError(code, s);
+  return s;
+}
+function text(v, max, code, required) {
+  const s = typeof v === "string" ? v.trim() : "";
+  if (required && !s) throw new PfmError(code, "required");
+  if (s.length > max) throw new PfmError(code, `longer than ${max}`);
+  return s;
+}
+
+// ---------- validation (user input → clean values) ----------
+
+export function validateProjectInput(input = {}) {
+  const currency = input.currency;
+  currencyExp(currency); // throws bad_currency for anything outside the twelve
+  const template = input.template ?? "custom";
+  if (!PROJECT_TEMPLATES.includes(template)) throw new PfmError("bad_template", String(template));
+  const startDate = input.startDate ? assertDate(input.startDate) : null;
+  const endDate = input.endDate ? assertDate(input.endDate) : null;
+  if (startDate && endDate && endDate < startDate) throw new PfmError("bad_dates", "end before start");
+
+  const targetBudget = toMinor(input.targetBudget ?? "", currency);
+  if (targetBudget <= 0) throw new PfmError("bad_budget", "budget must be above zero");
+
+  const thresholds = input.alertThresholdsPct ?? [...DEFAULT_THRESHOLDS_PCT];
+  if (!Array.isArray(thresholds) || thresholds.length < 1 || thresholds.length > 5 ||
+      thresholds.some((t, i) => !Number.isInteger(t) || t < 1 || t > 200 || (i > 0 && t <= thresholds[i - 1]))) {
+    throw new PfmError("bad_thresholds", "ascending whole percentages, 1 to 200");
+  }
+  const tolerance = input.lineTolerancePct ?? DEFAULT_LINE_TOLERANCE_PCT;
+  if (!Number.isInteger(tolerance) || tolerance < 0 || tolerance > 100) throw new PfmError("bad_tolerance", String(tolerance));
+
+  return {
+    name: text(input.name, 120, "bad_name", true),
+    template,
+    description: text(input.description, 500, "bad_description", false),
+    currency,
+    startDate,
+    endDate,
+    targetBudget,
+    alertThresholdsPct: [...thresholds],
+    lineTolerancePct: tolerance,
+    status: "planning",
+  };
+}
+
+// One BOQ line. estQty is text ("2.5") or BigInt; estUnitPrice is text or minor units.
+export function validateBoqLine(input = {}, currency) {
+  if (!ID_RE.test(input.lineKey ?? "")) throw new PfmError("bad_line_key", String(input.lineKey));
+  if (!BOQ_CATEGORIES.includes(input.category)) throw new PfmError("bad_category", String(input.category));
+  const estQty = qOf(input.estQty);
+  if (estQty <= 0n) throw new PfmError("bad_qty", "quantity must be above zero");
+  const estUnitPrice = toMinor(input.estUnitPrice ?? "0", currency);
+  if (estUnitPrice < 0) throw new PfmError("bad_amount", "unit price cannot be negative");
+  return {
+    lineKey: input.lineKey,
+    category: input.category,
+    name: text(input.name, 160, "bad_name", true),
+    unit: text(input.unit, 16, "bad_unit", true),
+    estQty,
+    estUnitPrice,
+    estTotal: lineTotal(estQty, estUnitPrice),
+  };
+}
+
+// A ledger entry. Returns values ready to store (amount in the project currency).
+export function validateProjectTx(input = {}, project) {
+  const kind = input.kind;
+  if (!Object.hasOwn(TX_KINDS, kind)) throw new PfmError("bad_kind", String(kind));
+  const currency = input.currency ?? project.currency;
+  currencyExp(currency);
+
+  let amount = toMinor(input.amount ?? "", currency);
+  if (amount <= 0) throw new PfmError("bad_amount", "amount must be above zero");
+  let fxRate = null;
+  if (currency !== project.currency) {
+    if (!input.fxRate) throw new PfmError("fx_rate_required", `${currency} needs a rate to ${project.currency}`);
+    fxRate = String(input.fxRate);
+    amount = convert(amount, currency, project.currency, fxRate); // throws bad_fx_rate
+    if (amount <= 0) throw new PfmError("bad_amount", "too small after conversion");
+  }
+
+  const tx = {
+    kind,
+    direction: TX_KINDS[kind],
+    description: text(input.description, 200, "bad_description", true),
+    counterparty: text(input.counterparty, 120, "bad_counterparty", false),
+    occurredOn: assertDate(input.occurredOn),
+    amount,
+    originalAmount: toMinor(input.amount, currency),
+    originalCurrency: currency,
+    fxRate,
+    lineKey: null,
+    category: null,
+    quantity: null,
+    unit: null,
+  };
+
+  if (kind === "expense") {
+    if (input.lineKey) {
+      if (!ID_RE.test(input.lineKey)) throw new PfmError("bad_line_key", String(input.lineKey));
+      tx.lineKey = input.lineKey;
+    } else {
+      if (!BOQ_CATEGORIES.includes(input.category)) throw new PfmError("bad_category", "an unbudgeted expense needs a category");
+      tx.category = input.category;
+    }
+    if (input.quantity != null && input.quantity !== "") {
+      tx.quantity = qOf(input.quantity);
+      if (tx.quantity <= 0n) throw new PfmError("bad_qty", "quantity must be above zero");
+      tx.unit = text(input.unit, 16, "bad_unit", true);
+    }
+  } else if (input.lineKey) {
+    throw new PfmError("line_on_non_expense", kind);
+  }
+  return tx;
+}
+
+// ---------- estimate arithmetic ----------
+
+// Line total = round(quantity × unit price). quantity is scaled by 1000, so divide by it once.
+export function lineTotal(estQty, unitPriceMinor) {
+  return toNum(divRound(qOf(estQty) * big(unitPriceMinor), QTY_SCALE));
+}
+
+export function estimateTotals(lines) {
+  let total = 0n;
+  const byCategory = {};
+  for (const l of lines) {
+    const t = big(l.estTotal);
+    total += t;
+    byCategory[l.category] = toNum(big(byCategory[l.category] ?? 0) + t);
+  }
+  return { total: toNum(total), byCategory };
+}
+
+export function assertUniqueLineKeys(lines) {
+  const seen = new Set();
+  for (const l of lines) {
+    if (seen.has(l.lineKey)) throw new PfmError("dup_line_key", l.lineKey);
+    seen.add(l.lineKey);
+  }
+}
+
+// ---------- ledger aggregation (posted entries only) ----------
+
+// Totals over a project's ledger. Voided entries are ignored.
+export function ledgerTotals(txs) {
+  const t = {
+    funding: 0n, revenue: 0n, inflows: 0n, outflows: 0n,
+    spend: 0n,            // all project cost: expenses on lines plus unbudgeted expenses
+    unbudgetedSpend: 0n,
+    byLine: new Map(),    // lineKey -> { qty, cost }
+  };
+  for (const x of txs) {
+    if (x.status === "voided") continue;
+    const amt = big(x.amount);
+    if (x.direction === "inflow") {
+      t.inflows += amt;
+      if (FUNDING_KINDS.includes(x.kind)) t.funding += amt;
+      if (x.kind === "revenue") t.revenue += amt;
+    } else {
+      t.outflows += amt;
+      if (x.kind === "expense") {
+        t.spend += amt;
+        if (x.lineKey) {
+          const a = t.byLine.get(x.lineKey) ?? { qty: 0n, cost: 0n };
+          a.cost += amt;
+          if (x.quantity != null) a.qty += qOf(x.quantity);
+          t.byLine.set(x.lineKey, a);
+        } else {
+          t.unbudgetedSpend += amt;
+        }
+      }
+    }
+  }
+  return t;
+}
+
+// ---------- variance ----------
+
+/**
+ * Variance for one BOQ line.
+ *   line: { lineKey, estQty, estUnitPrice (minor), estTotal (minor) }
+ *   act:  { qty, cost }  from ledgerTotals().byLine (qty may be 0 when expenses carry no quantity)
+ *
+ * Decomposition (exact, in minor units):
+ *   totalVariance  = actualCost − estTotal
+ *   quantityEffect = (actualQty − estQty) × estUnitPrice      "we used more or less than planned"
+ *   priceEffect    = totalVariance − quantityEffect           "we paid more or less per unit"
+ * Algebraically this equals (actualUnitPrice − estUnitPrice) × actualQty. Taking it as the remainder
+ * keeps the two effects summing exactly to the total despite rounding.
+ *
+ * Status: not_started (no cost) · on_budget (cost ≤ estimate) · warning (above estimate, within tolerance)
+ *         · over_budget (above estimate by more than tolerancePct).
+ */
+export function lineVariance(line, act = { qty: 0n, cost: 0n }, tolerancePct = DEFAULT_LINE_TOLERANCE_PCT) {
+  const EQ = qOf(line.estQty), EP = big(line.estUnitPrice), ET = big(line.estTotal);
+  const AQ = qOf(act.qty), AC = big(act.cost);
+  const AP = AQ > 0n ? divRound(AC * QTY_SCALE, AQ) : null;   // actual unit price, minor units
+
+  const totalVariance = AC - ET;
+  const quantityEffect = divRound((AQ - EQ) * EP, QTY_SCALE);
+  const priceEffect = totalVariance - quantityEffect;
+
+  let status;
+  if (AC === 0n) status = "not_started";
+  else if (AC * 100n > ET * BigInt(100 + tolerancePct)) status = "over_budget";
+  else if (AC > ET) status = "warning";
+  else status = "on_budget";
+
+  return {
+    lineKey: line.lineKey,
+    estQty: qtyText(EQ),
+    actualQty: qtyText(AQ),
+    qtyVariance: qtyText(AQ - EQ),
+    qtyVariancePct: EQ > 0n ? toNum(divRound((AQ - EQ) * 10000n, EQ)) / 100 : null,
+    estUnitPrice: toNum(EP),
+    actualUnitPrice: AP === null ? null : toNum(AP),
+    estTotal: toNum(ET),
+    actualCost: toNum(AC),
+    quantityEffect: toNum(quantityEffect),
+    priceEffect: toNum(priceEffect),
+    totalVariance: toNum(totalVariance),
+    status,
+  };
+}
+
+// ---------- project health ----------
+
+/**
+ * Health of one project against its approved estimate.
+ *   project: { targetBudget, alertThresholdsPct, lineTolerancePct, currency }
+ *   lines:   validated BOQ lines of the baseline (or of the current revision)
+ *   txs:     ledger rows (stored or validated form)
+ *
+ * Definitions:
+ *   utilization   = actualSpend ÷ targetBudget
+ *   EAC           = Σ max(actual line cost, line estimate) + unbudgeted spend + spend on lines no longer in the estimate
+ *   margin        = (revenue − actualSpend) ÷ revenue          (null without revenue)
+ *   cashPosition  = all inflows − all outflows (loan repayments included)
+ *   status        = red if utilization ≥ 100 % or EAC > budget · amber if utilization ≥ the first threshold · else green
+ * Basis points (1 bp = 0.01 %) keep percentages exact.
+ */
+export function projectHealth(project, lines, txs) {
+  const L = ledgerTotals(txs);
+  const target = big(project.targetBudget);
+  const tol = project.lineTolerancePct ?? DEFAULT_LINE_TOLERANCE_PCT;
+  const thresholds = project.alertThresholdsPct ?? DEFAULT_THRESHOLDS_PCT;
+
+  const known = new Set(lines.map((l) => l.lineKey));
+  const variances = lines.map((l) => lineVariance(l, L.byLine.get(l.lineKey), tol));
+
+  let eac = 0n, estimatedTotal = 0n;
+  for (const l of lines) {
+    const e = big(l.estTotal), a = L.byLine.get(l.lineKey)?.cost ?? 0n;
+    estimatedTotal += e;
+    eac += a > e ? a : e;
+  }
+  let orphanSpend = 0n;
+  for (const [k, v] of L.byLine) if (!known.has(k)) orphanSpend += v.cost;
+  eac += orphanSpend + L.unbudgetedSpend;
+
+  const utilBp = target > 0n ? divRound(L.spend * BP, target) : 0n;
+  const net = L.revenue - L.spend;
+  const crossed = thresholds.filter((p) => utilBp >= BigInt(p) * 100n);
+  const status = utilBp >= BP || eac > target ? "red"
+    : utilBp >= BigInt(thresholds[0]) * 100n ? "amber" : "green";
+
+  return {
+    currency: project.currency,
+    targetBudget: toNum(target),
+    estimatedTotal: toNum(estimatedTotal),
+    budgetGap: toNum(target - estimatedTotal),       // > 0: the estimate fits inside the budget
+    actualSpend: toNum(L.spend),
+    unbudgetedSpend: toNum(L.unbudgetedSpend),
+    orphanSpend: toNum(orphanSpend),
+    utilizationBp: toNum(utilBp),
+    thresholdsCrossed: crossed,
+    forecastAtCompletion: toNum(eac),
+    forecastVsBudget: toNum(eac - target),
+    funding: toNum(L.funding),
+    revenue: toNum(L.revenue),
+    net: toNum(net),
+    marginBp: L.revenue > 0n ? toNum(divRound(net * BP, L.revenue)) : null,
+    cashPosition: toNum(L.inflows - L.outflows),
+    status,
+    lines: variances,
+  };
+}
+
+// ---------- alerts ----------
+
+/**
+ * Which alerts should exist for the current health, and which stored ones no longer apply.
+ * Keys are stable, so one threshold fires once per estimate revision:
+ *   budget:<pct>:<estimateId>   forecast:<estimateId>   line:<lineKey>:<estimateId>
+ * Stored keys belonging to this revision that are no longer true are returned in `clear`, which re-arms them.
+ * Pure: the Worker writes `create` with a "document must not exist" precondition, so a race fires once.
+ */
+export function alertsFor(health, estimateId, storedKeys = []) {
+  const wanted = new Map();
+  for (const p of health.thresholdsCrossed) {
+    const key = `budget:${p}:${estimateId}`;
+    wanted.set(key, { rule: "budget_threshold", severity: p >= 100 ? "critical" : "warning", thresholdPct: p, dedupeKey: key });
+  }
+  if (health.forecastVsBudget > 0) {
+    const key = `forecast:${estimateId}`;
+    wanted.set(key, { rule: "forecast_overrun", severity: "critical", dedupeKey: key });
+  }
+  for (const v of health.lines) {
+    if (v.status !== "warning" && v.status !== "over_budget") continue;
+    const key = `line:${v.lineKey}:${estimateId}`;
+    wanted.set(key, { rule: "line_overrun", severity: v.status === "over_budget" ? "critical" : "warning", lineKey: v.lineKey, dedupeKey: key });
+  }
+
+  const stored = new Set(storedKeys);
+  const create = [...wanted.values()].filter((a) => !stored.has(a.dedupeKey));
+  const clear = storedKeys.filter((k) => k.endsWith(`:${estimateId}`) && !wanted.has(k));
+  return { create, clear };
+}
+
+// ---------- estimate and project lifecycle ----------
+
+// Only a draft revision accepts edits. The baseline is frozen; changes go into a new draft (a change order).
+export function assertEstimateEditable(estimate) {
+  if (estimate.status !== "draft") throw new PfmError("baseline_locked", `estimate is ${estimate.status}`);
+}
+
+export function assertCanApprove(estimate, lines, project) {
+  if (estimate.status !== "draft") throw new PfmError("not_draft", `estimate is ${estimate.status}`);
+  if (!lines.length) throw new PfmError("empty_estimate", "add at least one line");
+  if (!["planning", "active"].includes(project.status)) throw new PfmError("bad_project_status", project.status);
+  assertUniqueLineKeys(lines);
+  return true;
+}
+
+export function nextRevision(estimates) {
+  return estimates.reduce((m, e) => Math.max(m, e.revision), 0) + 1;
+}
+
+export function assertProjectTransition(from, to) {
+  if (!PROJECT_STATUS_TRANSITIONS[from]?.includes(to)) throw new PfmError("bad_transition", `${from} -> ${to}`);
+  return true;
+}
+
+// Firestore paths, relative to the DOC_ROOT, used by the Worker and the migrations.
+export const paths = Object.freeze({
+  meta: (uid) => `pfm/${uid}/meta/projects`,
+  project: (uid, pid) => `pfm/${uid}/projects/${pid}`,
+  estimates: (uid, pid) => `pfm/${uid}/projects/${pid}/estimates`,
+  estimate: (uid, pid, eid) => `pfm/${uid}/projects/${pid}/estimates/${eid}`,
+  lines: (uid, pid, eid) => `pfm/${uid}/projects/${pid}/estimates/${eid}/lines`,
+  tx: (uid, pid) => `pfm/${uid}/projects/${pid}/tx`,
+  alerts: (uid, pid) => `pfm/${uid}/projects/${pid}/alerts`,
+});
