@@ -1368,3 +1368,10 @@ Business details, logo (Firestore data URI for now), receiving accounts, drafts,
 
 ## C269 — Personal Accountant P5: receipt photos and CSV export; KWD and JPY
 `pfm.tx.receipt.set/get/delete` (sealed photo per entry in `pfm/{uid}/files/r_{txId}`), `pfm.export` (CSV in the response). Currencies now twelve (KWD, JPY added). Fix: `sealField` base64 no longer overflows on large input. No new secret, no Firestore rules. Tests: core 29 · worker 42 · ui-check P1–P5. Details: `pfm/DESIGN.md` §7f, `Sawa-app/BUILD.md` § C269.
+
+## 🔔 v126 — مواعيد صلة الرحم + «ملفّك لا يُسجَّل متوفّى» (C271 في Sawa-app/BUILD.md)
+- `kin.remind.set` ⇒ `kinrem/{uid}` (الاسم الأوّل · المدّة 1–365 · آخر تواصل · الساعة · المنطقة الزمنيّة؛ ≤ 300 قريب). خطّةٌ فارغة أو مطفأة ⇒ يُحذف المستند.
+- المجدوِل `kinReminders` (مع schedReminders/taskReminders، `LIM.rem` لكلّ تشغيل): ملخّصٌ واحد بكلّ من حان، في الساعة المختارة، ولا أكثر من إشعارٍ كلّ ١٢ ساعة · `rq` يُكتب أوّلاً (لا تكرار). `kinPlan` نقيّة.
+- `selfDeceasedRule` في `person.set`: «نفسي» المخزَّنة أو الشخص الذي ربط به المتّصلُ حسابه لا يُسجَّل `alive: false` ⇒ «not allowed: …». `bulk.import` يُبقي «نفسي» حيّاً بدل الرفض.
+- حذف الحساب يحذف `kinrem/{uid}`.
+- اختبار: `node kin.test.js` ✓ 17/17 · `node marriage.test.js` ✓ 9/9.
