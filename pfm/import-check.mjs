@@ -88,13 +88,23 @@ await H.getByText("لنبدأ").waitFor();
 await H.locator("select").first().selectOption("SDG");
 await H.getByRole("button", { name: "ابدأ" }).click();
 await H.getByRole("tab", { name: "السجلّ" }).click();
-await H.getByRole("button", { name: "استيراد" }).click();
+await H.getByRole("button", { name: "استيراد", exact: true }).click();
 const dlg = page.getByRole("dialog", { name: "استيراد إيصالات" });
 await dlg.getByRole("button", { name: "اختيار الصور" }).waitFor();
 await shot("i1-import-empty");
 
 const t0 = Date.now();
 await dlg.locator('input[type="file"]').setInputFiles([shots.a, shots.b, shots.c, shots.e]);
+await dlg.getByText(/4 صورة · /).waitFor();
+// C280: closing the sheet while it reads does not stop it; the accountant screen shows the batch and reopens it
+await dlg.getByRole("button", { name: "إغلاق" }).click();
+const bar = H.getByRole("button", { name: /استيراد الإيصالات/ });
+await bar.waitFor();
+check(/قراءة \d من 4|بانتظار/.test(await bar.innerText()), "the bar shows the reading: " + (await bar.innerText()));
+check(await H.getByRole("button", { name: /^استيراد\s*\(4\)$/ }).count() === 1, "the Import button counts the batch");
+await shot("i1b-closed-while-reading");
+await H.getByText(/4 بانتظار المراجعة والإضافة/).waitFor({ timeout: 180000 });
+await bar.click();
 await dlg.getByText(/4 صورة · /).waitFor();
 await page.waitForFunction(() => !/يُقرأ…|في الانتظار|قراءة \d/.test(document.querySelector('[role="dialog"][aria-label="استيراد إيصالات"]').innerText), null, { timeout: 180000 });
 const readMs = Date.now() - t0;
@@ -137,7 +147,8 @@ check(/مكرّرة في هذه الدفعة/.test(await dlg.innerText()), "a re
 check(!/هل هو حسابك/.test(await dlg.innerText()), "the account is not asked about again");
 // a fresh import later: the server knows the reference and books nothing twice
 await dlg.getByRole("button", { name: "إغلاق" }).click();
-await H.getByRole("button", { name: "استيراد" }).click();
+check(!(await bar.count()), "a batch with nothing left to add is cleared when the sheet closes");
+await H.getByRole("button", { name: "استيراد", exact: true }).click();
 await dlg.locator('input[type="file"]').setInputFiles([shots.a]);
 await page.waitForFunction(() => { const t = document.querySelector('[role="dialog"][aria-label="استيراد إيصالات"]').innerText; return /1 صورة/.test(t) && !/يُقرأ…|قراءة \d/.test(t); }, null, { timeout: 120000 });
 await dlg.getByRole("button", { name: "إضافة 1 إلى السجلّ" }).click();

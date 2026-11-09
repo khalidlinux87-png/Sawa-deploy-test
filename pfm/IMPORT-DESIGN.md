@@ -289,6 +289,15 @@ Arabic+English strip (one amount then read differently), BMP instead of PNG (sam
 Node, 10 real samples: 2.6 s → 1.9 s each, same results. The Node harness now hands the engine PNG like the app
 (it used JPEG, which hid a bill-ID digit misread the app really makes: 1346… read as 1546…, not flagged).
 
+### 4.7e The batch outlives the sheet (C280)
+
+Closing the import sheet used to throw the batch away, and a batch still being read stopped with it. The batch (rows,
+reads, edits, the reading loop and the save loop) now lives in the app session, outside the sheet: closing it or leaving
+the accountant screen goes on reading, the accountant screen shows a bar («استيراد الإيصالات: قراءة 2 من 5…» or «N بانتظار
+المراجعة والإضافة») that reopens it, and the Import button counts it. The engines stay up while a batch reads. A batch with
+nothing left to add is cleared when the sheet closes; «إنهاء الدفعة ومسح القائمة» clears it by hand. Not kept across an app
+restart (the picked images are in memory only).
+
 ### 4.8 In the app (C273)
 
 Ledger → «استيراد». The app loads `/ocr/v1/sawa-reader.js` (built from this folder by `dev/bundle.mjs`) and the OCR
