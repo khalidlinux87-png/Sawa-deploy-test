@@ -750,4 +750,6 @@ issuer's bank (decision 12).
 
 Answered 2026-11-06: no server-side wallet balance for now (decision 13).
 
+**P6 (designed, not built):** bulk import of receipts, PDFs and payment messages, projects, and search by seven fields — see `IMPORT-DESIGN.md`.
+
 P1–P5 are built. The *Later* row needs three decisions: building the wallet ledger, the card provider, and the FX source and margin.

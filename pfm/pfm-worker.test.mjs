@@ -713,5 +713,48 @@ await t("export: booked rows only, ordered, escaped, both languages", async () =
   assert.equal((await call("pfm.export", { from: "2025-01", to: "2025-01" })).rows, 0);
 });
 
+await t("import: a bank reference makes the row id, so the same transfer is booked once", async () => {
+  const { fs, call } = await ready({ baseCurrency: "SDG", tz: "Africa/Khartoum" });
+  const p = { ref: { issuer: "bankak", id: "20000000001" }, kind: "expense", amount: "250000.00", categoryId: "c_transport", date: "2026-11-02", note: "5 gallons", counterparty: "Test Supplier" };
+  const a = await call("pfm.tx.add", p);
+  assert.match(a.tx.id, /^m_[A-Za-z0-9_-]{32}$/);
+  assert.equal(a.duplicate, false);
+  assert.equal(a.tx.source, "import");
+  assert.ok(!a.tx.id.includes("20000000001"), "the id does not reveal the reference");
+  const b = await call("pfm.tx.add", { ...p, amount: "1.00" });
+  assert.equal(b.duplicate, true);
+  assert.equal(b.tx.id, a.tx.id);
+  assert.equal(b.tx.amount, 25000000);                                   // the first booking stands
+  assert.equal(month(fs, "u1", "2026-11").expense, 25000000);            // counted once
+  const other = await call("pfm.tx.add", { ...p, ref: { issuer: "bankak", id: "20000000002" } });
+  assert.notEqual(other.tx.id, a.tx.id);
+  const elsewhere = await call("pfm.tx.add", p, "u2").catch((e) => e);  // another user, same reference: a different id space
+  assert.ok(elsewhere instanceof Error);                                  // (u2 is not initialised: refused, nothing written)
+  assert.equal((await call("pfm.tx.add", { ...p, source: "wallet", idemKey: "key-0000009", ref: undefined })).tx.source, "manual");
+  await assert.rejects(call("pfm.tx.add", { ...p, ref: { issuer: "Bad Issuer!", id: "20000000003" } }), err("bad_ref"));
+  await assert.rejects(call("pfm.tx.add", { ...p, ref: { issuer: "bankak", id: "x" } }), err("bad_ref"));
+});
+
+await t("import: ids differ per user for the same reference", async () => {
+  const one = await C.importRefId("bankak", "20000000001", "u1", KEK), two = await C.importRefId("bankak", "20000000001", "u2", KEK);
+  assert.notEqual(one, two);
+  assert.equal(one, await C.importRefId("bankak", "20000000001", "u1", KEK));
+});
+
+await t("import prefs: own accounts and confirmed names, sealed at rest, validated, purged", async () => {
+  const { fs, d, call } = await ready();
+  assert.deepEqual(await call("pfm.import.prefs.get", {}), { accounts: [], names: {} });
+  await call("pfm.import.prefs.set", { accounts: ["1111 2222 3333 0001"], names: { "9999888877770001": "Test Supplier" } });
+  const got = await call("pfm.import.prefs.get", {});
+  assert.deepEqual(got, { accounts: ["1111 2222 3333 0001"], names: { "9999888877770001": "Test Supplier" } });
+  const raw = JSON.stringify(fs.docs.get(`${ROOT}/pfm/u1/import/prefs`).data);
+  assert.ok(!raw.includes("1111 2222") && !raw.includes("Test Supplier"), "sealed at rest");
+  await assert.rejects(call("pfm.import.prefs.set", { accounts: ["not-an-account"] }), err("bad_account"));
+  await assert.rejects(call("pfm.import.prefs.set", { accounts: [], names: { "12": "x" } }), err("bad_name"));
+  const purgeColl = async (_t, rel, spend) => { for (const x of await fs.fsList(null, rel)) { if (!spend()) return false; await fs.fsCommit(null, [{ delete: x.name }]); } return true; };
+  assert.equal(await purgePfm(d, "tok", "u1", () => true, purgeColl), true);
+  assert.ok(!fs.docs.has(`${ROOT}/pfm/u1/import/prefs`), "account deletion removes the import prefs");
+});
+
 assert.ok(PFM_OPS.includes("pfm.tx.add"));
 console.log(process.exitCode ? "FAILED" : `pfm-worker: ${n} passed`);
