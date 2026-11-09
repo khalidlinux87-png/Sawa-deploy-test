@@ -74,7 +74,7 @@ await t("extract: a clean English success screen is verified", () => {
   assert.equal(r.recipient.name, "Test Supplier Ltd");
   assert.equal(r.service_type, "fuel");
   assert.equal(r.category_id, "c_transport");
-  assert.equal(r.template, "bankak@2");
+  assert.equal(r.template, "bankak@3");
 });
 
 await t("extract: Arabic labels, incoming transfer, Arabic note hints", () => {
@@ -109,9 +109,15 @@ await t("extract: a scrolled screenshot flags what is missing and keeps the rest
   assert.equal(r.status, "requires_verification");
 });
 
-await t("extract: a failed transfer is flagged", () => {
-  const rows = [...english(), cell("Status", "Failed")];
-  assert.ok(extractFromCells(rows, bankak, ctx).verify.some((v) => v.field === "kind" && /Failed/.test(v.reason)));
+await t("extract: a failed transfer is flagged; unreadable status noise is not", () => {
+  const st = (w) => extractFromCells([...english(), cell("Status", w)], bankak, ctx).verify.some((v) => v.field === "kind");
+  assert.ok(st("Failed"));
+  assert.ok(st("Faild"));                  // slightly misread failure word
+  assert.ok(st("فشل"));
+  assert.ok(st("قيد التنفيذ"));
+  assert.ok(!st("Success"));
+  assert.ok(!st("نجاح"));
+  assert.ok(!st("gle"));                   // OCR noise for «نجاح»: no false alarm
 });
 
 await t("extract: on a history screen, without the user's accounts, income vs spending is flagged", () => {
@@ -153,6 +159,35 @@ await t("extract: a success screen proposes its sender account as the user's own
   const h = extractFromCells(hist, bankak, ctx);
   assert.equal(h.kind, "income");
   assert.equal(h.own_account_hint, null);
+});
+
+await t("text: one-decimal amounts only where the template allows them, padded to the currency", () => {
+  assert.equal(T.parseMoney("200000.0", { decimals: 2, minDecimals: 1 }), "200000.00");
+  assert.equal(T.parseMoney("200000.00", { decimals: 2, minDecimals: 1 }), "200000.00");
+  assert.equal(T.parseMoney("200000.0"), null);                       // default stays strict
+  assert.equal(T.parseMoney("200000.", { decimals: 2, minDecimals: 1 }), null);
+});
+
+await t("extract: a bill payment — biller name in «إلى», always spending from the user", () => {
+  const bill = (over = {}) => [
+    cell("رقم العملية", "20000000009"), cell("التاريخ والوقت", "09-Nov-2026 19:17:57"), cell("نوع العملية", "سداد فاتورة"),
+    cell("المبلغ", "200000.0", 95, "200000.0"), cell("من", over.from ?? ME), cell("إلى", "ايصالي"),
+    cell("مُعرف الفاتورة", "1111222233334444555566"), cell("الحالة", "نجاح"),
+  ];
+  const r = extractFromCells(bill(), bankak, ctx);
+  assert.equal(r.status, "verified", JSON.stringify(r.verify));
+  assert.equal(r.kind, "expense");
+  assert.deepEqual(r.amount, { value: "200000.00", minor: 20000000, currency: "SDG" });
+  assert.deepEqual(r.recipient, { name: "ايصالي", account_identifier: null, is_me: false });
+  assert.equal(r.bill_id, "1111222233334444555566");
+  assert.equal(r.note, "سداد فاتورة 1111222233334444555566");
+  assert.equal(r.service_type, "utility");
+  assert.equal(r.category_id, "c_utilities");
+  // paid from an account Sawa doesn't know yet: proposed as the user's own, asked once
+  const n = extractFromCells(bill({ from: "4444 3333 2222 0001" }), bankak, ctx);
+  assert.equal(n.kind, "expense");
+  assert.equal(n.own_account_hint, "4444 3333 2222 0001");
+  assert.match(n.verify.find((v) => v.field === "kind").reason, /payment: confirm it is yours/);
 });
 
 await t("extract: not a Bankak screen → null", () => {

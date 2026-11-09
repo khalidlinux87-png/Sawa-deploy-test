@@ -259,6 +259,14 @@ and English; two were scrolled so the top rows were cut off), ~3 s per image in 
 Before the two-read rule one read gave `55000.00` for `35000.00`; it is now caught by the second read. Comments are
 shown for the user to edit and are never used for money.
 
+### 4.7b Bill payments (C274, from the first phone test)
+
+Template v3 adds the green «نجاح» bill-payment screen: the amount may print one decimal (`200000.0`, still read twice),
+«إلى» names the biller (ايصالي) instead of an account, a bill (by its type or its «مُعرف الفاتورة» row) is always spending
+from the user, and the bill ID goes into the note. A Status row flags the entry only when it reads like a failure word;
+OCR noise is not a failure. The reader file is now versioned by name (`/ocr/sawa-reader-<VERSION>.js`) because phones
+keep `/ocr/` cached for good.
+
 ### 4.8 In the app (C273)
 
 Ledger → «استيراد». The app loads `/ocr/v1/sawa-reader.js` (built from this folder by `dev/bundle.mjs`) and the OCR

@@ -12,7 +12,7 @@ export const NAME_CONF = 75;             // below this a new recipient name is f
 export const HINTS = [
   { re: /بنزين|جازولين|جالون|وقود|ديزل|gasoline|petrol|fuel/i, serviceType: "fuel", categoryId: "c_transport" },
   { re: /ترحيل|نقل|شحن|توصيل|delivery|transport/i, serviceType: "logistics", categoryId: "c_transport" },
-  { re: /كهرباء|electricity/i, serviceType: "utility", categoryId: "c_utilities" },
+  { re: /كهرباء|ايصالي|electricity|مياه|water/i, serviceType: "utility", categoryId: "c_utilities" },
   { re: /رصيد|زين|سوداني|ام تي ان|mtn|zain|sudani/i, serviceType: "telecom", categoryId: "c_telecom" },
   { re: /مصنعي|صيانه|تكييف|تكيف|دهان|سباك|كهربجي|نجار/i, serviceType: "other", categoryId: "c_maintenance" },
   { re: /فطور|غداء|غدا|عشاء|مطعم|restaurant|cafe|كافتيريا/i, serviceType: "retail", categoryId: "c_food" },
@@ -85,14 +85,17 @@ export function extractFromCells(cells, tpl, ctx = {}) {
   };
   const fromAcc = acct("from_account"), toAcc = acct("to_account");
   if (got.from_account !== undefined && !fromAcc) flag("sender", `account unreadable: "${got.from_account}"`);
-  if (got.to_account !== undefined && !toAcc) flag("recipient", `account unreadable: "${got.to_account}"`);
+  // «إلى» holding words, not an account number, names the payee (a biller such as ايصالي).
+  const payee = got.to_account !== undefined && !toAcc && (got.to_account.match(/\d/g) || []).length < 6 && /\p{L}{2}/u.test(got.to_account)
+    ? got.to_account.replace(/\s+/g, " ").trim() : null;
+  if (got.to_account !== undefined && !toAcc && !payee) flag("recipient", `account unreadable: "${got.to_account}"`);
   const mine = (a) => !!a && own.has(a.replace(/\D/g, ""));
   const fromMe = mine(fromAcc), toMe = mine(toAcc);
   // Names: Arabic OCR misreads letters, but account numbers read reliably. A name the user already confirmed for this
   // account (ctx.knownAccounts, built from booked entries) wins over the OCR; a new, low-confidence name is flagged.
   const ocrName = got.to_name && !isNA(got.to_name) ? got.to_name.replace(/\s+/g, " ").trim() : null;
   const known = toAcc && ctx.knownAccounts ? ctx.knownAccounts[toAcc.replace(/\D/g, "")] : null;
-  const toName = known || ocrName;
+  const toName = known || ocrName || payee;
   if (!known && ocrName && conf.to_name < NAME_CONF) flag("recipient", `name unclear (OCR confidence ${Math.round(conf.to_name)})`);
   const sender = { name: fromMe ? ctx.myName || null : null, account_identifier: fromAcc, is_me: fromMe };
   const recipient = { name: toName, account_identifier: toAcc, is_me: toMe };
@@ -102,22 +105,28 @@ export function extractFromCells(cells, tpl, ctx = {}) {
   // Income or spending comes from who sent and who received. The green success screen is shown only to the person
   // who made the transfer, so its sender account is the user's own: if it is not known yet, it is proposed
   // (own_account_hint) and the row is flagged once, until the user confirms the account.
-  const successScreen = tpl.senderOnly && tpl.senderOnly.includes(variant.from_account);
+  // A bill payment: the type says so, or a bill-ID row is present (that row reads reliably; the type text may not).
+  const isBill = got.bill_id !== undefined || !!(got.trx_type && (tpl.billTypes || []).some((b) => normAr(got.trx_type).includes(normAr(b))));
+  const successScreen = isBill || (tpl.senderOnly && tpl.senderOnly.includes(variant.from_account));
   let kind = null, own_account_hint = null;
   if (successScreen && fromAcc && !fromMe) {
     own_account_hint = fromAcc;
     kind = toMe ? "transfer" : "expense";
-    flag("kind", `new account ${fromAcc} sent this transfer: confirm it is yours`);
+    flag("kind", `new account ${fromAcc} sent this ${isBill ? "payment" : "transfer"}: confirm it is yours`);
   } else if (fromMe && toMe) kind = "transfer";
   else if (fromMe) kind = "expense";
   else if (toMe) kind = "income";
   else flag("kind", (ctx.myAccounts || []).length ? "neither account is one of yours" : "add your account numbers to tell income from spending");
 
   // A failed or pending transfer must not be booked as money moved.
-  if (got.status !== undefined && !tpl.success.some((s) => normAr(s) === normAr(got.status))) flag("kind", `status is "${got.status}", not success`);
+  if (got.status !== undefined && !tpl.success.some((s) => normAr(s) === normAr(got.status))) {
+    const failed = matchLabel(got.status, { failure: tpl.failure || [] }, 0.6);
+    if (failed || !tpl.failure) flag("kind", `status is "${got.status}", not success`);
+  }
 
-  const note = got.note && !isNA(got.note) ? got.note.replace(/\s+/g, " ").trim() : null;
-  const hintText = `${note || ""} ${toName || ""}`;
+  const billId = got.bill_id ? got.bill_id.replace(/\s+/g, "") : null;
+  const note = got.note && !isNA(got.note) ? got.note.replace(/\s+/g, " ").trim() : billId ? `${(tpl.billTypes || ["Bill"])[0]} ${billId}` : null;
+  const hintText = `${note || ""} ${toName || ""} ${got.trx_type || ""}`;
   const hint = HINTS.find((h) => h.re.test(normAr(hintText)) || h.re.test(hintText));
 
   return {
@@ -126,6 +135,7 @@ export function extractFromCells(cells, tpl, ctx = {}) {
     sender, recipient, kind, amount, fee: null,
     service_type: hint ? hint.serviceType : tpl.serviceType,
     service_label: got.trx_type ? got.trx_type.trim() : null,
+    bill_id: billId,
     note,
     project_id: ctx.projectId || "p_general", project_name: ctx.projectName || "General",
     category_id: hint ? hint.categoryId : "c_uncategorized",
@@ -174,6 +184,17 @@ export async function readImage(img, ocr, templates, ctx = {}) {
       if (kind === "num") {
         val = await ocr(v.crop, "num");
         if (lab.m.field === "amount") val.alt = (await ocr(v.crop, "eng")).text;   // second, independent read (§4.4)
+        // an account field holding words (a biller name): read it again as text
+        if (/_account$/.test(lab.m.field) && (val.text.match(/\d/g) || []).length < 6) val = await readText(ocr, v.crop);
+      } else if (lab.m.field === "status") {
+        // a short word («نجاح») that the mixed engine can turn into Latin junk: accept the first read that is a known
+        // success word, else keep the first read (and the row is flagged as not successful)
+        const reads = [];
+        for (const mode of ["mix", "ara", "eng"]) {
+          const r = await ocr(v.crop, mode); reads.push(r);
+          if (tpl.success.some((w) => normAr(w) === normAr(r.text))) break;
+        }
+        val = reads.find((r) => tpl.success.some((w) => normAr(w) === normAr(r.text))) || reads[0];
       } else val = await readText(ocr, v.crop);
       rows.push({ a: { text: lab.m.variant, conf: lab.r.conf }, b: val });
     }

@@ -13,11 +13,12 @@ import { decode, makeOcr } from "./dev/ocr-node.mjs";
 const dir = process.argv[2]; if (!dir) { console.error("usage: reader-eval.mjs <samples dir>"); process.exit(2); }
 const ctx = JSON.parse(fs.readFileSync(path.join(dir, "context.json"), "utf8"));
 const ocr = await makeOcr();
-const FIELDS = ["transaction_id", "timestamp", "amount", "from_account", "to_account", "to_name", "note"];
+const FIELDS = ["transaction_id", "timestamp", "amount", "from_account", "to_account", "to_name", "note", "bill_id"];
 const pick = (r, f) => ({ transaction_id: r.transaction_id, timestamp: r.timestamp, amount: r.amount.value, from_account: r.sender.account_identifier,
-  to_account: r.recipient.account_identifier, to_name: r.recipient.name, note: r.note })[f];
-const flagOf = { transaction_id: "transaction_id", timestamp: "timestamp", amount: "amount", from_account: "sender", to_account: "recipient", to_name: "recipient", note: null };
+  to_account: r.recipient.account_identifier, to_name: r.recipient.name, note: r.note, bill_id: r.bill_id ?? null })[f];
+const flagOf = { transaction_id: "transaction_id", timestamp: "timestamp", amount: "amount", from_account: "sender", to_account: "recipient", to_name: "recipient", note: null, bill_id: null };
 const same = (f, a, b) => (f === "to_name" || f === "note" ? normAr(a) === normAr(b) : a === b);
+const skip = (f, truth) => f === "note" && truth.bill_id;   // a bill note is made from its bill id, scored as bill_id
 const tally = Object.fromEntries(FIELDS.map((f) => [f, { right: 0, flagged: 0, WRONG: 0, absent: 0 }]));
 let n = 0, ms = 0;
 for (const issuer of fs.readdirSync(dir).filter((d) => fs.statSync(path.join(dir, d)).isDirectory()))
@@ -26,6 +27,7 @@ for (const issuer of fs.readdirSync(dir).filter((d) => fs.statSync(path.join(dir
     const t0 = Date.now(); const r = await readImage(decode(path.join(dir, issuer, f)), ocr, [bankak], ctx); ms += Date.now() - t0; n++;
     const line = [];
     for (const fld of FIELDS) {
+      if (skip(fld, truth)) continue;
       const want = truth[fld] ?? null, got = r ? pick(r, fld) : null;
       const flagged = !r || got == null || (flagOf[fld] && r.verify.some((v) => v.field === flagOf[fld]));
       let k;

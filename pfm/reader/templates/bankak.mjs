@@ -10,7 +10,7 @@
 
 export default {
   id: "bankak",
-  version: 2,
+  version: 3,
   name: { ar: "بنكك (بنك الخرطوم)", en: "Bankak (Bank of Khartoum)" },
   currency: "SDG",
   tz: "Africa/Khartoum",
@@ -25,19 +25,25 @@ export default {
     note: ["Comment", "التعليق"],
     amount: ["Amount", "المبلغ"],
     trx_type: ["Trx. type", "Trx type", "نوع العملية"],
+    bill_id: ["مُعرف الفاتورة", "معرف الفاتورة", "Bill ID", "Bill Identifier"],
     status: ["Status", "الحالة"],
   },
   // How each value is read: "num" = digits (English OCR, no right-to-left reordering), "text" = Arabic and English.
   read: { transaction_id: "num", timestamp: "num", from_account: "num", to_account: "num", amount: "num", mobile: "num",
-          to_name: "text", note: "text", trx_type: "text", status: "text" },
+          to_name: "text", note: "text", trx_type: "text", status: "text", bill_id: "num" },
   parse: {
     transaction_id: { pattern: /^\d{8,16}$/ },
     account: { groups: [4, 4, 4, 4], suffix: "0001" },   // Bankak accounts always end in 0001 (confirmed by Khalid, 2026-11-09)
-    amount: { decimals: 2 },
+    amount: { decimals: 2, minDecimals: 1 },            // bill payments print one decimal: 200000.0
     timestamp: { format: "DD-Mon-YYYY HH:mm:ss" },
   },
   // Labels that appear only on the green success screen, which only the sender sees: its From account is the user's.
   senderOnly: ["From Account", "من حساب"],
-  success: ["Success", "نجاح"],     // a Status row with anything else is flagged: a failed transfer is not money spent
+  // A bill payment always goes out of the user's own account; «إلى» then names the biller (e.g. ايصالي), not an account.
+  billTypes: ["سداد فاتورة", "Bill Payment"],
+  success: ["Success", "نجاح"],
+  // Words that mean the money did not move: a Status reading like one of these flags the row. Unreadable junk does not
+  // (the success word is short and OCR sometimes turns it into Latin noise).
+  failure: ["فشل", "فاشلة", "مرفوضة", "مرفوض", "ملغاة", "معلقة", "قيد التنفيذ", "Failed", "Failure", "Rejected", "Pending", "Cancelled", "Reversed"],     // a Status row with anything else is flagged: a failed transfer is not money spent
   serviceType: "bank_transfer",
 };

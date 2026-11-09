@@ -42,6 +42,9 @@ const SCREENS = {
   incomingEn: { file: "incoming-en.jpg", green: false, rtl: false, title: "Transaction Details", rows: [
     ["Trx. ID", "21000000003"], ["Date & Time", "04-Nov-2026 20:12:03"], ["Trx. type", "Other Account Fund Transfer"], ["Amount", "2000000.00"],
     ["From", "4343 2121 1010 0001"], ["To", "5555 6666 7777 0001"], ["Status", "Success"], ["To Account Title", "Test User"], ["Comment", "N/A"]] },
+  billAr: { file: "bill-ar.jpg", green: true, rtl: true, title: "نجاح", rows: [
+    ["رقم العملية", "21000000004"], ["التاريخ والوقت", "05-Nov-2026 19:17:57"], ["نوع العملية", "سداد فاتورة"], ["المبلغ", "150000.0"],
+    ["من", "5555 6666 7777 0001"], ["إلى", "ايصالي"], ["مُعرف الفاتورة", "1111222233334444555566"], ["الحالة", "نجاح"]] },
 };
 async function draw(s) {
   const page = await browser.newPage({ viewport: { width: 576, height: 1280 }, deviceScaleFactor: 1 });
@@ -58,7 +61,7 @@ async function draw(s) {
   const buffer = await page.screenshot({ type: "jpeg", quality: 90 }); await page.close();
   return { name: s.file, mimeType: "image/jpeg", buffer };
 }
-const shots = { a: await draw(SCREENS.successEn), b: await draw(SCREENS.detailsAr), c: await draw(SCREENS.incomingEn) };
+const shots = { a: await draw(SCREENS.successEn), b: await draw(SCREENS.detailsAr), c: await draw(SCREENS.incomingEn), e: await draw(SCREENS.billAr) };
 if (process.env.SAVE_SHOTS) for (const k in shots) (await import("node:fs")).writeFileSync(path.join(OUT, shots[k].name), shots[k].buffer);
 
 const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, locale: "ar-SA", timezoneId: "Africa/Khartoum" });
@@ -91,8 +94,8 @@ await dlg.getByRole("button", { name: "اختيار الصور" }).waitFor();
 await shot("i1-import-empty");
 
 const t0 = Date.now();
-await dlg.locator('input[type="file"]').setInputFiles([shots.a, shots.b, shots.c]);
-await dlg.getByText(/3 صورة · /).waitFor();
+await dlg.locator('input[type="file"]').setInputFiles([shots.a, shots.b, shots.c, shots.e]);
+await dlg.getByText(/4 صورة · /).waitFor();
 await page.waitForFunction(() => !/يُقرأ…|في الانتظار|قراءة \d/.test(document.querySelector('[role="dialog"][aria-label="استيراد إيصالات"]').innerText), null, { timeout: 180000 });
 const readMs = Date.now() - t0;
 await shot("i2-read-before-account");
@@ -104,19 +107,21 @@ await dlg.getByRole("button", { name: "نعم، حسابي" }).click();
 await page.waitForTimeout(300);
 await shot("i3-after-account");
 const text = await dlg.innerText();
-check(/3 صورة · 3 جاهزة · 0 تحتاج مراجعة/.test(text), "after confirming the account, all three should be ready: " + text.match(/3 صورة[^\n]*/));
-check(/إضافة 3 إلى السجلّ/.test(text), "three rows should be selected");
+check(/4 صورة · 4 جاهزة · 0 تحتاج مراجعة/.test(text), "after confirming the account, all four should be ready: " + text.match(/4 صورة[^\n]*/));
+check(/إضافة 4 إلى السجلّ/.test(text), "four rows should be selected");
+if (process.env.DEBUG) console.log(text.split("\n").slice(-40).join("\n"));
 const amounts = await dlg.locator('input[inputmode="decimal"]').evaluateAll((els) => els.map((e) => e.value));
-check(JSON.stringify(amounts) === JSON.stringify(["250000.00", "35000.00", "2000000.00"]), "amounts read: " + amounts);
+check(JSON.stringify(amounts) === JSON.stringify(["250000.00", "35000.00", "2000000.00", "150000.00"]), "amounts read: " + amounts);
 
-await dlg.getByRole("button", { name: "إضافة 3 إلى السجلّ" }).click();
-await dlg.getByText(/أُضيفت 3/).waitFor({ timeout: 20000 }).catch(async (e) => { await shot("i4-failed"); console.error((await dlg.innerText()).split("\n").filter((l) => /أُضيفت|لم تُحفظ|مسجّلة|bad_|not_|[a-z]_[a-z]/.test(l)).join("\n")); throw e; });
+await dlg.getByRole("button", { name: "إضافة 4 إلى السجلّ" }).click();
+await dlg.getByText(/أُضيفت 4/).waitFor({ timeout: 20000 }).catch(async (e) => { await shot("i4-failed"); console.error((await dlg.innerText()).split("\n").filter((l) => /أُضيفت|لم تُحفظ|مسجّلة|bad_|not_|[a-z]_[a-z]/.test(l)).join("\n")); throw e; });
 await shot("i4-added");
 
 // server side: three entries from import, ids from the references, receipts attached, one income
 const list = await op("pfm.tx.list", { month: "2026-11" });
 const imp = list.items.filter((t) => t.source === "import");
-check(imp.length === 3, "3 imported entries expected, got " + imp.length);
+check(imp.length === 4, "4 imported entries expected, got " + imp.length);
+check(imp.some((t) => t.categoryId === "c_utilities" && t.counterparty === "ايصالي" && t.amount === 15000000 && /1111222233334444555566/.test(t.note || "")), "the bill: utilities, biller, one-decimal amount, bill id in the note");
 check(imp.every((t) => /^m_/.test(t.id) && t.hasReceipt), "ids from references and receipts attached");
 check(imp.filter((t) => t.kind === "income").length === 1 && imp.find((t) => t.kind === "income").amount === 200000000, "the incoming 2,000,000.00 is income");
 check(imp.some((t) => t.categoryId === "c_transport" && t.counterparty === "Test Fuel Station"), "petrol → transport, payee kept");
@@ -126,7 +131,7 @@ check(prefs.names["1212343456560001"] === "Test Fuel Station", "confirmed name r
 
 // the same screenshot again in this batch: marked as repeated and left out
 await dlg.locator('input[type="file"]').setInputFiles([shots.a]);
-await page.waitForFunction(() => { const t = document.querySelector('[role="dialog"][aria-label="استيراد إيصالات"]').innerText; return /4 صورة/.test(t) && !/يُقرأ…|قراءة \d/.test(t); }, null, { timeout: 120000 });
+await page.waitForFunction(() => { const t = document.querySelector('[role="dialog"][aria-label="استيراد إيصالات"]').innerText; return /5 صورة/.test(t) && !/يُقرأ…|قراءة \d/.test(t); }, null, { timeout: 120000 });
 check(/مكرّرة في هذه الدفعة/.test(await dlg.innerText()), "a repeat inside the batch is marked");
 check(!/هل هو حسابك/.test(await dlg.innerText()), "the account is not asked about again");
 // a fresh import later: the server knows the reference and books nothing twice
@@ -138,8 +143,8 @@ await dlg.getByRole("button", { name: "إضافة 1 إلى السجلّ" }).clic
 await dlg.getByText(/كانت مسجّلة من قبل فلم تُكرَّر/).waitFor({ timeout: 20000 });
 await shot("i5-duplicate");
 const after = (await op("pfm.tx.list", { month: "2026-11" })).items.filter((t) => t.source === "import");
-check(after.length === 3, "re-import must not add an entry, got " + after.length);
+check(after.length === 4, "re-import must not add an entry, got " + after.length);
 
 await browser.close(); server.close();
-console.log(`read 3 invented screenshots in ${readMs} ms (engine download included)`);
+console.log(`read 4 invented screenshots in ${readMs} ms (engine download included)`);
 if (errors.length) { console.error("FAIL\n" + errors.join("\n")); process.exitCode = 1; } else console.log("import-check: OK");

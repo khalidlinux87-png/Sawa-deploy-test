@@ -5,7 +5,7 @@ import bankak from "./templates/bankak.mjs";
 
 export const templates = [bankak];
 export { readImage, recomputeKind, extractFromCells };
-export const VERSION = "1";
+export const VERSION = "3";   // the app loads /ocr/sawa-reader-<VERSION>.js: a new reader = a new file name (phones cache /ocr/ for good)
 
 /** Load tesseract.min.js once. */
 function loadScript(src) {
