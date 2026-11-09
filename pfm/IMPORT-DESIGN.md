@@ -1,6 +1,6 @@
 # Sawa Wallet Engine: bulk receipt and payment-message import (P6) design
 
-Status: rev 1 · **design only, not built** · Date: 2026-11-08 · Extends `DESIGN.md` (PFM rev 9, P1–P5 built)
+Status: rev 2 · **design only, not built** · Date: 2026-11-09 (rev 2: Sawa's own reader instead of a paid AI service, decision I1) · Extends `DESIGN.md` (PFM rev 9, P1–P5 built)
 
 **What it does.** The user hands the Personal Accountant a batch: photos of receipts, PDF invoices or statements, or
 pasted payment messages (SMS or email). Sawa reads every transaction in it, fills in the fields below, files each one
@@ -17,11 +17,12 @@ entry can then be searched by any of seven fields.
 
 | # | Question | Proposal |
 |---|---|---|
-| I1 | Which service reads the images and text? | A Claude vision model through the Anthropic API, called **only from the Worker** (`ANTHROPIC_API_KEY` as a Worker secret, never in the app). The model name is a Worker variable (`IMPORT_MODEL`), so it can change without a release. Text messages first go through the local parsers (§4.2), which cost nothing |
-| I2 | Cost limit | 200 items per user per day, 50 per batch; admin can raise it. Kill switch `PFM_IMPORT=0` |
-| I3 | Consent | Receipts leave Sawa's own servers for the AI provider. A one-time consent screen before the first import, a line in `privacy.html`, and an account on the provider's no-training / short-retention terms. Without consent the import button stays off |
+| I1 | Which service reads the images and text? | **Answered 2026-11-09: Sawa's own reader, no paid service** (§4.3). Text goes through templates written for chosen issuers; images are read **on the phone** by an open-source OCR engine, then the same templates pick out the fields. No cost per receipt, and no third party sees the receipts. A paid AI service stays only as an optional fallback, designed and off (`PFM_IMPORT_AI=0`) |
+| I2 | Limits | No cost per item now, so limits only protect the server: 500 items per user per day, 50 per batch. Kill switch `PFM_IMPORT=0` |
+| I3 | Consent | Images are read on the phone; the server gets the OCR text and the photo, sealed as the entry's receipt (as in P5). No extra consent screen is needed for that. Only «ساعدنا في التحسين» (sending an anonymised sample, §4.6) asks first, every time |
 | I4 | Projects vs tags | **Projects are a new field** (one per entry, default "General"); tags stay free-form and many per entry. A project is the "ledger context" from the brief: a shop, a building job, a family event |
 | I5 | Reading SMS automatically on Android | **No.** Google Play restricts the SMS permission to default SMS apps. The user pastes or *shares* messages to Sawa (Android share target, iOS share sheet) |
+| I6 | **Which issuers first?** (open) | The bank apps, mobile-money services and SMS senders Sawa must read on day one. Each needs ~20 real samples (§4.6). Without them the reader works only in its generic mode, where every row is flagged for checking |
 
 ---
 
@@ -38,7 +39,7 @@ The brief's nine fields, and where each one lives. 🔒 = sealed (AES-256-GCM, p
 | `amount` | القيمة الماليّة | `amount` (minor units) + `currency` | Parsed with `toMinor()`. A currency outside the twelve ⇒ flagged `bad_currency`, never guessed |
 | `service_type` | نوع الخدمة | `serviceType` (enum, §1.1) | In clear, so it can be filtered and counted |
 | `project_name` | اسم المشروع | `projectId` → `pfm/{uid}/projects/{id}` | Default: the project picked for the batch, else `p_general` («عامّ») |
-| `category` | التصنيف العامّ | `categoryId` | The user's rules first, then the model's suggestion from the user's own category list, else `c_uncategorized` |
+| `category` | التصنيف العامّ | `categoryId` | The user's rules first, then the template's service type mapped to a category, else `c_uncategorized` |
 | `raw_source_type` | نوع المصدر | `importSource` | `image_ocr` · `pdf_document` · `sms_notification` · `email_forward` |
 
 Also on each imported row: `source: "import"`, `importId`, `status: "suggested"`, `verify: [field…]` (§4.4),
@@ -46,7 +47,7 @@ Also on each imported row: `source: "import"`, `importId`, `status: "suggested"`
 
 **Direction.** `kind` comes from who the user is: user = recipient ⇒ `income`; user = sender ⇒ `expense`; both are the
 user's own accounts ⇒ `transfer`. The user's names, phone numbers and masked account numbers (from the profile and
-`payoutAccounts`) are given to the matcher, not guessed by the model. Unknown ⇒ flagged `kind`.
+`payoutAccounts`) are given to the matcher, never guessed. Unknown ⇒ flagged `kind`.
 
 ### 1.1 `serviceType` values
 
@@ -73,9 +74,9 @@ Rollups gain `proj.{projectId}.e|i|n` in `months/{YYYY-MM}`, so a per-project to
  App (Accountant → «استيراد»)                       Worker
  ─────────────────────────────                      ─────────────────────────────────────────────
  pick photos / PDFs / paste text                    pfm.import.start   → importId, limits checked
- shrink photos (≤1600 px JPEG), split          ───► pfm.import.add     → one item at a time (≤ 4 MB)
-   pasted text into messages                          │ 1. text?  local parsers (§4.2)
-                                                      │ 2. else / not matched: AI extraction (§4.3)
+ photos: OCR on the phone (§4.3)               ───► pfm.import.add     → one item at a time
+   → words + boxes + confidence                       │ 1. find the issuer's template (§4.2)
+ text: split into messages                            │ 2. extract; no template → generic mode
  review table (polls pfm.import.get)           ◄───   │ 3. validate every field (§4.4)
    ✓ ready   ⚠ needs checking   ⧉ duplicate           │ 4. dedupe (§4.5), category, project
  edit · confirm selected · discard                    │ 5. write suggested rows + receipt, one commit
@@ -86,8 +87,11 @@ Rollups gain `proj.{projectId}.e|i|n` in `months/{YYYY-MM}`, so a per-project to
   The app keeps a queue and retries with the same `idemKey`; the server answers a repeat with the first result.
 - **Multi-transaction items.** One PDF page or one pasted block can hold several transactions (a statement, five SMS in one
   paste). The extractor returns a list; each becomes its own row, numbered `itemNo.k`.
-- **PDFs.** Text PDFs: the text layer is read in the Worker (no AI call when the local parsers match). Scanned PDFs: sent to
-  the model as a document, ≤ 20 pages per item.
+- **PDFs.** Text PDFs: the text layer is read in the Worker and goes through the templates. Scanned PDFs: each page is
+  rendered on the phone and read like a photo, ≤ 20 pages per item.
+- **The image is not needed to extract.** The phone sends the OCR result (words, boxes, confidence) for extraction and the
+  shrunk photo only to keep as the receipt. The templates run in the Worker, so a fix to a template reaches everyone at once,
+  and the Worker still validates every field (§4.4).
 
 ---
 
@@ -115,42 +119,61 @@ Suggested rows left unconfirmed for 30 days are deleted by the existing cron.
 ### 4.1 Rules the extractor follows
 
 1. **Never invent.** A field that cannot be read is `null` with a reason, not a likely value.
-2. **Amounts are copied, not computed.** The model returns the amount **exactly as printed** (`"45,200.00"`), plus the
-   currency as printed (`"ج.س"`, `"SDG"`, `"SAR"`). The Worker turns it into minor units; the model never does arithmetic.
+2. **Amounts are copied, not computed.** The reader returns the amount **exactly as printed** (`"45,200.00"`), plus the
+   currency as printed (`"ج.س"`, `"SDG"`, `"SAR"`). The Worker turns it into minor units; nothing is added or converted.
 3. **Totals, not lines.** On a shop receipt the transaction is the amount paid (grand total), not each item.
 4. **Every transaction in the item**, in the order they appear.
 5. **Arabic and English**, with Arabic-Indic digits (٠–٩) normalised to 0–9.
 6. **Fees are separate.** A transfer fee printed beside the amount goes in `fee`, not added to `amount`.
 
-### 4.2 Local parsers (text, no AI call)
+### 4.2 Templates (one per issuer)
 
-Small, tested patterns for the payment messages Sawa users receive most (one module per provider, e.g. bank-app transfer
-alerts and mobile-money confirmations). Each returns the same shape as the model. A message no parser recognises goes to
-the model. Parsers are added from real, anonymised samples that users choose to send in-app («ساعدنا نتعرّف على هذه الرسالة»).
+A template is a small file in `pfm/templates/` (one per bank app, mobile-money service or SMS sender) that says how to
+recognise the issuer and where each field is. The same template serves its SMS, its email and its screenshot receipt.
 
-### 4.3 AI extraction
-
-The Worker sends the item and these instructions, and requires the answer through a single tool, so the reply is always
-valid JSON matching the schema:
-
-```text
-You read receipts, invoices and payment messages for a personal ledger.
-Return every distinct transaction in the input by calling record_transactions once.
-For each transaction:
-- transaction_id: the reference / operation number exactly as printed, else null.
-- timestamp: date and time as printed, converted to YYYY-MM-DD HH:MM:SS; null if absent. Do not use today's date.
-- sender, recipient: names, phone numbers or entities as printed; null if absent.
-- amount_text: the amount exactly as printed, digits and separators only. Never add, subtract or convert.
-- currency_text: the currency as printed (symbol, code or word), else null.
-- fee_text: a separately printed fee, else null.
-- service_type: one of {list from §1.1}.
-- category_hint: one of the user's categories: {id: name list}; null if unsure.
-- unreadable: names of fields you could not read with confidence, with a short reason each.
-Never guess. A null with a reason is always better than a plausible value.
-The user's own names and numbers are: {names, phones, masked accounts}. Use them only to tell sender from recipient.
+```js
+// pfm/templates/example-bank.mjs — illustrative only; real templates are written from real samples (§4.6)
+export default {
+  id: "example-bank", version: 3,
+  detect: { anyOf: ["Example Bank", "بنك المثال"], smsSenders: ["EXBANK"] },
+  fields: {
+    transaction_id: { label: ["رقم العملية", "Transaction ID", "Ref"], value: /[A-Z0-9-]{6,30}/ },
+    amount:         { label: ["المبلغ", "Amount"], value: "money" },          // currency must be printed; never assumed
+    timestamp:      { label: ["التاريخ", "Date"], value: "datetime", formats: ["DD-MMM-YYYY HH:mm:ss", "DD/MM/YYYY hh:mm A"], tz: "Africa/Khartoum" },
+    sender:         { label: ["من", "From"], value: "party" },
+    recipient:      { label: ["إلى", "To"],  value: "party" },
+    fee:            { label: ["الرسوم", "Fee"], value: "money", optional: true },
+  },
+  serviceType: { default: "bank_transfer", byText: { "كهرباء": "utility", "رصيد": "telecom" } },
+  sms: [/تم تحويل (?<amount>[\d,.]+) (?<currency>\S+) إلى (?<recipient>.+?) رقم العملية (?<transaction_id>\S+)/],
+};
 ```
 
-The model sees the user's category names and own identifiers, nothing else from the account.
+- **On a photo:** the reader finds a label's words, then takes the value on the same line (on the side the layout puts
+  it, right-to-left aware) or on the line below, using the word boxes from the OCR.
+- **On text:** the `sms` patterns run first, then the label search on the plain text.
+- **Generic mode** (no template matches): money-like, date-like and reference-like values next to common Arabic and
+  English labels. Every field it finds is still flagged (`reason: "unknown layout"`), so the user checks each row.
+- Templates carry a `version`; each imported row records `template: "example-bank@3"`, so rows read by a faulty template
+  can be listed for re-checking.
+
+### 4.3 Sawa's reader (OCR on the phone)
+
+- **Engine:** Tesseract (open source, Apache 2.0) compiled to WebAssembly (`tesseract.js`), with the Arabic and English
+  models. It runs inside the app in a background thread, so it works the same in the browser, the Android app and the
+  iOS app. The engine and models (a few MB) are **served from sawaaap.com**, not a CDN, downloaded only when the user
+  first opens Import, then cached by `sw.js`.
+- **Why not the phone's built-in reader:** Google ML Kit's text recognition does not read Arabic. Apple's Vision can be
+  tried later as a faster path on iPhone, behind the same interface, if it reads these receipts well.
+- **Before OCR:** crop to the receipt, grey-scale, scale so text is ~30 px high; for photos of paper also straighten and
+  raise contrast. Screenshots from bank apps need almost nothing and read best.
+- **Output to the Worker:** `{words:[{text, box, conf}], lines, engine: "tesseract@ara+eng", ms}`.
+- **Speed (to be measured):** a few seconds per screenshot on a mid-range phone; a 50-item batch runs in the background
+  with a progress bar, and rows appear as each item finishes.
+- **Alternative to compare in P6c:** PaddleOCR's Arabic model with ONNX Runtime Web: a bigger download, maybe more
+  accurate on paper receipts. The test set (§4.6) decides; the interface stays the same.
+- **Optional paid fallback (off):** with `PFM_IMPORT_AI=1`, an item the reader cannot handle could go to an AI service,
+  after the user agrees for that item. Not planned now.
 
 ### 4.4 Validation and `[Requires Verification]`
 
@@ -158,7 +181,7 @@ Each row's `verify` lists the fields a person must check. The batch never stops 
 
 | Field | Flagged when |
 |---|---|
-| `amount` | null; `toMinor()` refuses it; more decimals than the currency allows; for text sources, `amount_text` does not appear in the original message (digit-for-digit check, so a model slip cannot pass); amount ≤ 0 |
+| `amount` | null; `toMinor()` refuses it; any digit's OCR confidence below the threshold; two places on the receipt that show the amount (e.g. amount and total) disagree; more decimals than the currency allows; for text sources, the amount does not appear in the original message (digit-for-digit check); amount ≤ 0 |
 | `currency` | missing, ambiguous (`$`, `ريال` with no country), or not one of the twelve |
 | `transaction_id` | null or reported unreadable |
 | `timestamp` | null, in the future, or more than 3 years back |
@@ -175,6 +198,30 @@ next to it. A flagged row cannot be confirmed until the user fixes or accepts ea
   shows as «مكرّر» with a link to the first.
 - Without a reference: same amount, currency, minute and counterparty as an existing entry ⇒ shown as a *possible*
   duplicate; the user decides.
+
+### 4.6 Training and measuring
+
+"Training" happens at three levels, cheapest first:
+
+1. **Templates (P6b–P6c).** For each issuer chosen in I6: collect ~20 samples covering its variants (transfer, bill
+   payment, airtime, failed transaction, old and new app versions), label them, write the template, and run the test
+   set. For fixed layouts, which bank receipts and notifications are, this is more precise than a learned model.
+2. **Fine-tuning the OCR (P6d, only if needed).** If the test set shows OCR misreads on a particular font, Tesseract's
+   Arabic model is fine-tuned on line images cropped from the samples, with their correct text (a few hundred lines),
+   using the official `tesstrain` tools. This runs on a computer or in a GitHub Actions job, never on the phone; the
+   result is a new model file, served like the first.
+3. **Learning from corrections (ongoing).** Each correction in the review table is counted per template and field
+   (`pfm/{uid}/importStats`, counts only, no text). A field that is corrected often marks its template for review. A
+   user's own corrections also become their rules (e.g. "this recipient → this category", as P2 rules do).
+
+**Labelled samples.** One folder per issuer: the image or text, plus a label file in the shape of
+`import-batch.schema.json` (only the fields printed on the sample). `reader-eval.mjs` runs the reader on every sample and
+prints, per issuer and field, how many are right, flagged, or **wrong and unflagged** (must be zero for amounts).
+
+**Where samples live.** ⚠️ This repository (Sawa-deploy-test) is **public**. Real receipts hold names, phone numbers and
+account numbers, so they must never be committed here. Real samples go in a **private** repository (or a private R2
+bucket); only synthetic or fully anonymised samples go in `pfm/samples/`. Samples users send through «ساعدنا في التحسين»
+are masked on the phone (names, phones, account numbers) before upload, and kept sealed for 90 days.
 
 ---
 
@@ -263,12 +310,12 @@ flagged cell. In JSON the same cell is `null` plus a `verify` entry.
 
 ## 8. Security and privacy
 
-- The AI key lives only in Worker secrets (HANDOFF §1). The app never calls the AI provider.
-- Consent first (I3). The consent screen says what is sent (the image or text of the receipt) and to whom.
+- Receipts are read on the phone and never go to a third party (I1). The server gets the OCR words and the photo, which is
+  sealed as the entry's receipt (P5).
+- Samples for improving the reader are sent only when the user taps «ساعدنا في التحسين», masked first (§4.6).
 - Images are checked by their bytes (`sniffLogo` rules; PDF by `%PDF-`), size-capped, and re-encoded on the phone before upload.
-- Prompt injection: a receipt can contain text such as "ignore the rules". The model's only output is the tool call;
-  the Worker validates every field (§4.4) and nothing from the model reaches another user or triggers any action
-  beyond creating *suggested* rows for the same user.
+- OCR text is untrusted input: templates only match patterns and copy values, every field is validated (§4.4), and
+  the only effect of an import is *suggested* rows for the same user.
 - Sender, recipient, reference and project names are sealed; search uses keyed hashes (§5), never clear text.
 - The source image/PDF is kept only as the entry's receipt (sealed, P5) and goes with the entry on delete; discarded
   rows delete their files. Account deletion already purges `pfm/{uid}`.
@@ -283,8 +330,8 @@ flagged cell. In JSON the same cell is `null` plus a `verify` entry.
 |---|---|---|
 | **P6a** | Projects (§1.2), new tx fields, `pfm.tx.search` with blind index, CSV columns | Search by each of the seven fields finds the row; a name typed with أ finds one stored with ا; rollup per project = sum of its rows |
 | **P6b** | Import for pasted text: local parsers, review table, confirm/discard, duplicates | 50 pasted messages ⇒ 50 rows in one batch; the same message twice ⇒ one entry; a message with no amount is flagged and the other 49 confirm |
-| **P6c** | Images and PDFs through the AI service (needs I1–I3), share targets on Android and iOS | A test set of 100 labelled receipts: **no amount wrong and unflagged** (wrong amounts must be flagged, never silent); ≥ 90 % of fields correct; cost per item recorded |
+| **P6c** | Sawa's reader: OCR on the phone, templates for the issuers chosen in I6, scanned PDFs, share targets on Android and iOS, `reader-eval.mjs` | On the labelled test set (≥ 20 samples per issuer): **no amount wrong and unflagged**; ≥ 95 % of fields right on screenshots, ≥ 85 % on photos of paper; time per item recorded on a mid-range Android phone |
+| **P6d** | Only if P6c shows OCR errors: fine-tuned Arabic OCR model, PaddleOCR comparison | The same test set improves, with no amount wrong and unflagged |
 
 Tests follow the P1–P5 pattern: `pfm-core.test.mjs` for parsers, normalisation and validation; `pfm-worker.test.mjs` with
-the in-memory Firestore and a fake AI service returning fixed answers (including a wrong amount, a missing reference and an
-injected instruction); `ui-check.mjs` for the review table in Arabic light and English dark.
+the in-memory Firestore and fixed OCR results (including a misread digit, a missing reference and an unknown layout); `ui-check.mjs` for the review table in Arabic light and English dark.
