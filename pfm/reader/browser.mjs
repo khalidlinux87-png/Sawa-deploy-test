@@ -34,7 +34,10 @@ export async function makeOcr({ base = "/ocr/v1/", onProgress } = {}) {
   const ocr = async (crop, mode) => {
     canvas.width = crop.width; canvas.height = crop.height;
     g.putImageData(new ImageData(crop.data, crop.width, crop.height), 0, 0);
-    const { data } = await (await get(mode in langs ? mode : "mix")).recognize(canvas);
+    // "araLine": the Arabic engine reading one raw line (PSM 13): catches short phrases block mode returns empty for
+    const line = mode === "araLine", w = await get(line ? "ara" : mode in langs ? mode : "mix");
+    if (line) await w.setParameters({ tessedit_pageseg_mode: "13" });
+    const { data } = await w.recognize(canvas).finally(() => (line ? w.setParameters({ tessedit_pageseg_mode: "6" }) : null));
     const lines = data.lines.filter((l) => l.text.trim()).map((l) => ({ text: l.text.trim(), conf: l.confidence, y0: l.bbox.y0, y1: l.bbox.y1 }));
     return { text: lines.map((l) => l.text).join(" "), conf: data.confidence, lines };
   };

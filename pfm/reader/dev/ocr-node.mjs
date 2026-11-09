@@ -21,7 +21,10 @@ export async function makeOcr() {
   // mode: "mix" (Arabic + English), "ara", "eng", or "num" (English, digits and month names only)
   const ocr = async (crop, mode) => {
     const buf = jpeg.encode({ width: crop.width, height: crop.height, data: Buffer.from(crop.data.buffer) }, 95).data;
-    const { data } = await (w[mode] || w.mix).recognize(buf);
+    // "araLine": the Arabic engine reading one raw line (PSM 13): catches short phrases block mode returns empty for
+    const wk = mode === "araLine" ? w.ara : w[mode] || w.mix;
+    if (mode === "araLine") await wk.setParameters({ tessedit_pageseg_mode: "13" });
+    const { data } = await wk.recognize(buf).finally(() => (mode === "araLine" ? wk.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK }) : null));
     const lines = data.lines.filter((l) => l.text.trim()).map((l) => ({ text: l.text.trim(), conf: l.confidence, y0: l.bbox.y0, y1: l.bbox.y1 }));
     return { text: lines.map((l) => l.text).join(" "), conf: data.confidence, lines };
   };

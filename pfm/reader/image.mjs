@@ -36,6 +36,11 @@ export function findCells(img, opts = {}) {
   for (let i = 1; i < rules.length; i++) bands.push([rules[i - 1], rules[i]]);
   const hs = bands.map(([a, b]) => b - a).filter((h) => h >= 30).sort((a, b) => a - b);
   const median = hs.length ? hs[hs.length >> 1] : 0, out = [];
+  // A screenshot scrolled down shows the top row cut off: no rule above it. Try the band just above the first rule,
+  // one (tallest) row high; if it holds a label the template knows, it is read like any row, and if not (a title or a
+  // header bar) nothing matches it and it is ignored.
+  const tallest = Math.max(0, ...hs.filter((h) => h <= median * 2.2));
+  if (rules.length && tallest && rules[0] - tallest >= 0) bands.unshift([rules[0] - tallest, rules[0]]);
   for (const [a, b] of bands) {
     const h = b - a;
     if (h < 30 || h > median * 2.2) continue;                       // gaps between cells, or big blocks (buttons, footers)

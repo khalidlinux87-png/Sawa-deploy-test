@@ -14,7 +14,7 @@ export const HINTS = [
   { re: /ترحيل|نقل|شحن|توصيل|delivery|transport/i, serviceType: "logistics", categoryId: "c_transport" },
   { re: /كهرباء|ايصالي|electricity|مياه|water/i, serviceType: "utility", categoryId: "c_utilities" },
   { re: /رصيد|زين|سوداني|ام تي ان|mtn|zain|sudani/i, serviceType: "telecom", categoryId: "c_telecom" },
-  { re: /مصنعي|صيانه|تكييف|تكيف|دهان|سباك|كهربجي|نجار/i, serviceType: "other", categoryId: "c_maintenance" },
+  { re: /مصنعي|صيانه|تكييف|تكيف|دهان|نقاش|سباك|كهربجي|نجار/i, serviceType: "other", categoryId: "c_maintenance" },
   { re: /فطور|غداء|غدا|عشاء|مطعم|restaurant|cafe|كافتيريا/i, serviceType: "retail", categoryId: "c_food" },
   { re: /ايجار|إيجار|rent/i, serviceType: "rent", categoryId: "c_rent" },
 ];
@@ -199,6 +199,12 @@ export async function readImage(img, ocr, templates, ctx = {}) {
     const words = (i) => /_account$/.test(fieldOf(i)) && (mix[i].text.match(/\d/g) || []).length < 6;   // a biller in «إلى»
     const textIdx = cells.map((_, i) => i).filter((i) => (["to_name", "note"].includes(fieldOf(i)) || words(i)) && (hasArabic(mix[i].text) || mix[i].conf < 80));
     const araR = textIdx.length ? await read(textIdx.map((i) => vals[i]), 3, "ara") : [];
+    // safety net: a name, comment or biller that came back empty is read alone as one raw line (block mode can return
+    // nothing for a short phrase that line mode reads cleanly: «سلفيه نقاشه»)
+    for (let k = 0; k < textIdx.length; k++) {
+      const i = textIdx[k];
+      if (!mix[i].text.trim() && !(araR[k] && araR[k].text.trim())) araR[k] = await ocr(prepCrop(img, vals[i].box, cells[i].bg, 3), "araLine");
+    }
     const rows = [];
     for (let i = 0; i < cells.length; i++) {
       const f = fieldOf(i); if (!f) continue;

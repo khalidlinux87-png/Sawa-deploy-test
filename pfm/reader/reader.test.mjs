@@ -248,6 +248,15 @@ await t("readImage: a whole screenshot in a few OCR calls (strips), digits re-re
   assert.deepEqual(calls, ["mix", "mix", "num"], "three OCR calls for a clean screenshot");
 });
 
+await t("image: a scrolled screenshot's cut-off top row is still found", () => {
+  const img = synthetic(4);
+  // erase the first rule (y = 100): the top row now has no border above it, as when the screen is scrolled
+  for (let x = 0; x < img.width; x++) { const i = (100 * img.width + x) * 4; img.data[i] = img.data[i + 2] = 40; img.data[i + 1] = 140; }
+  const cells = findCells(img);
+  assert.equal(cells.length, 4);
+  assert.ok(cells[0].y < 170 && cells[0].left && cells[0].right, "the top row, read from the band above the first rule");
+});
+
 await t("image: strips give each OCR line back to its own crop", () => {
   const img = synthetic(3), cells = findCells(img);
   const st = buildStrip(img, cells.map((c) => ({ box: c.left, bg: c.bg })), 3);
