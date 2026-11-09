@@ -605,6 +605,23 @@ async function userKey(masterB64, uid) {
   return crypto.subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new TextEncoder().encode("sawa-pfm"), info: new TextEncoder().encode("uid:" + uid) },
     ikm, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
 }
+/**
+ * Stable, private id for an imported bank transaction (IMPORT-DESIGN.md §4.5): "m_" + 32 chars of
+ * HMAC-SHA256(key derived from the v1 master secret and the uid, "<issuer>:<reference>").
+ * Always the v1 secret, so a key rotation does not change ids (and duplicates stay caught). Without the key,
+ * the id reveals nothing about the reference.
+ */
+export async function importRefId(issuer, ref, uid, masterB64v1) {
+  if (!/^[a-z0-9-]{2,20}$/.test(String(issuer || ""))) throw new PfmError("bad_ref");
+  const r = String(ref || "").trim();
+  if (!/^[A-Za-z0-9-]{4,40}$/.test(r)) throw new PfmError("bad_ref");
+  const ikm = await crypto.subtle.importKey("raw", unb64(masterB64v1), "HKDF", false, ["deriveKey"]);
+  const k = await crypto.subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new TextEncoder().encode("sawa-pfm"), info: new TextEncoder().encode("ref:" + uid) },
+    ikm, { name: "HMAC", hash: "SHA-256", length: 256 }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(issuer + ":" + r)));
+  return "m_" + b64(mac).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "").slice(0, 32);
+}
+
 export async function sealField(plain, uid, masterB64, keyVersion = 1) {
   if (plain == null || plain === "") return plain ?? null;
   const iv = crypto.getRandomValues(new Uint8Array(12));

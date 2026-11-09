@@ -1395,3 +1395,9 @@ Decisions (owner, 2026-11-09): no tax on estimate lines (P11) · copy an expense
 - Tests: `projects-worker.test.mjs` 18 · `projects-core` 16 · `pfm-worker` 42 · `projects-migrations` 7 · `pfm-core` 29, all passing.
 - Upload pack (not committed): `upload-pack/` with `README-upload.txt` and `CHECKSUMS.txt`. Required files: `worker-3.js` and the five `pfm/` modules listed there.
 - Details: `pfm/PROJECTS.md` §2 (P11–P14), §3, §5.
+## 🔔 v126 — مواعيد صلة الرحم + «ملفّك لا يُسجَّل متوفّى» (C271 في Sawa-app/BUILD.md)
+- `kin.remind.set` ⇒ `kinrem/{uid}` (الاسم الأوّل · المدّة 1–365 · آخر تواصل · الساعة · المنطقة الزمنيّة؛ ≤ 300 قريب). خطّةٌ فارغة أو مطفأة ⇒ يُحذف المستند.
+- المجدوِل `kinReminders` (مع schedReminders/taskReminders، `LIM.rem` لكلّ تشغيل): ملخّصٌ واحد بكلّ من حان، في الساعة المختارة، ولا أكثر من إشعارٍ كلّ ١٢ ساعة · `rq` يُكتب أوّلاً (لا تكرار). `kinPlan` نقيّة.
+- `selfDeceasedRule` في `person.set`: «نفسي» المخزَّنة أو الشخص الذي ربط به المتّصلُ حسابه لا يُسجَّل `alive: false` ⇒ «not allowed: …». `bulk.import` يُبقي «نفسي» حيّاً بدل الرفض.
+- حذف الحساب يحذف `kinrem/{uid}`.
+- اختبار: `node kin.test.js` ✓ 17/17 · `node marriage.test.js` ✓ 9/9.

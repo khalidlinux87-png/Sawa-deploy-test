@@ -32,6 +32,8 @@ const OPS = {
   "pfm.budget.list": opBudgetList,
   "pfm.alerts.list": opAlertsList,
   "pfm.alerts.read": opAlertsRead,
+  "pfm.import.prefs.get": opImportPrefsGet,
+  "pfm.import.prefs.set": opImportPrefsSet,
   "pfm.recurring.upsert": opRecurringUpsert,
   "pfm.recurring.pause": opRecurringPause,
   "pfm.recurring.delete": opRecurringDelete,
@@ -302,20 +304,24 @@ async function buildTx(x, s, cats, input, base) {
   const sealOr = async (k, max) => (input[k] !== undefined ? await seal(x, txt(input[k], max, k)) : base?.[k] ?? null);
   return { kind, amount, currency, baseAmount, fxRate, fxSource, categoryId, date, month,
     note: await sealOr("note", 300), counterparty: await sealOr("counterparty", 80),
-    source: base?.source || input.source || "manual", status: input.status || base?.status || "booked", deleted: false, hasReceipt: !!base?.hasReceipt };
+    source: base?.source || (input.source === "import" ? "import" : "manual"), status: input.status || base?.status || "booked", deleted: false, hasReceipt: !!base?.hasReceipt };
 }
 
 async function opTxAdd(x) {
   const p = x.p;
   let settingsForAlerts = null;
-  if (!ID_RE.test(p.idemKey || "")) throw new C.PfmError("bad_idem_key");
-  const id = "t_" + p.idemKey;            // the client's idempotency key IS the row id: a retry hits exists:false
-  let out;
+  // An imported bank transaction carries its reference: the row id comes from it, so the same transfer imported twice
+  // (the same screenshot again, or its SMS) is one entry, and the second add answers duplicate: true.
+  const fromImport = p.ref != null;
+  if (!fromImport && !ID_RE.test(p.idemKey || "")) throw new C.PfmError("bad_idem_key");
+  const id = fromImport ? await C.importRefId(p.ref.issuer, p.ref.id, x.uid, x.env.PFM_KEK_v1)
+    : "t_" + p.idemKey;                   // the client's idempotency key IS the row id: a retry hits exists:false
+  let out, dup = false;
   await commitAudited(x, async () => {
     const existing = js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/tx/${id}`));
-    if (existing) { out = existing; return { result: null }; }
+    if (existing) { out = existing; dup = fromImport; return { result: null }; }
     const s = await settingsOf(x), cats = await categoryMap(x);
-    let input = p, auto = false;
+    let input = fromImport ? { ...p, source: "import" } : p, auto = false;
     if (!p.categoryId && (p.counterparty || p.note)) {
       const m = C.matchCategoryRule(await rulesOf(x), { kind: p.kind, counterparty: p.counterparty, note: p.note });
       if (m && cats.get(m.categoryId)?.kind === p.kind) { input = { ...p, categoryId: m.categoryId }; auto = true; }
@@ -330,7 +336,7 @@ async function opTxAdd(x) {
     return { writes, audit: [{ action: "tx.add", ref: `tx/${id}`, after: auditView(tx) }], result: null };
   });
   const alerts = settingsForAlerts ? await checkAlerts(x, settingsForAlerts, [out]) : [];
-  return { tx: await present(x, out), alerts };
+  return { tx: await present(x, out), alerts, ...(fromImport ? { duplicate: dup } : {}) };
 }
 const fxLastWrite = (x, tx, base) => ({ update: { name: P(x, `pfm/${x.uid}/fxLast/${tx.currency}_${base}`), fields: fieldsOf(x, { rate: tx.fxRate, at: now() }) } });
 // Audit keeps amounts, category, dates and the sealed text (still encrypted).
@@ -467,7 +473,7 @@ async function opAuditList(x) {
 
 // Called by the Worker's purge job. Returns true when everything is gone (false = budget ran out; the job retries).
 export async function purgePfm(d, token, uid, spend, purgeColl) {
-  for (const c of ["tx", "categories", "months", "fxLast", "recurring", "budgets", "alerts", "rules", "idem", "payoutAccounts", "files", "invoiceNumbers", "meta"])
+  for (const c of ["tx", "categories", "months", "fxLast", "recurring", "budgets", "alerts", "rules", "idem", "payoutAccounts", "files", "invoiceNumbers", "import", "meta"])
     if (!(await purgeColl(token, `pfm/${uid}/${c}`, spend))) return false;
   if (!(await purgeProjects(d, token, uid, spend, purgeColl))) return false;   // P6b: subcollections first
   if (!(await purgeColl(token, `audit/${uid}/log`, spend))) return false;
@@ -643,6 +649,27 @@ async function opAlertsRead(x) {
   await x.d.fsCommit(x.token, ids.map((id) => ({ update: { name: P(x, `pfm/${x.uid}/alerts/${id}`), fields: fieldsOf(x, { read: true }) },
     updateMask: { fieldPaths: ["read"] }, currentDocument: { exists: true } }))).catch((e) => { if (!/NOT_FOUND/.test(String(e.message))) throw e; });
   return { read: ids.length };
+}
+
+// ---------- receipt import: the user's own accounts and confirmed names (IMPORT-DESIGN.md §4.7) ----------
+// One sealed document: { accounts: ["1111 2222 3333 0001", …], names: { "1111222233330001": "Name", … } }.
+// Account numbers and names are personal, so the whole thing is encrypted like notes.
+
+const ACCT_RE = /^[0-9 ]{6,40}$/;
+async function opImportPrefsGet(x) {
+  const d = js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/import/prefs`));
+  if (!d || !d.data) return { accounts: [], names: {} };
+  const v = JSON.parse(await C.openField(d.data, x.uid, keys(x)));
+  return { accounts: v.accounts || [], names: v.names || {} };
+}
+async function opImportPrefsSet(x) {
+  const { accounts = [], names = {} } = x.p;
+  if (!Array.isArray(accounts) || accounts.length > 20 || !accounts.every((a) => typeof a === "string" && ACCT_RE.test(a))) throw new C.PfmError("bad_account");
+  const ents = Object.entries(names && typeof names === "object" ? names : {});
+  if (ents.length > 1000 || !ents.every(([k, v]) => /^[0-9]{6,34}$/.test(k) && typeof v === "string" && v.trim() && v.length <= 80)) throw new C.PfmError("bad_name");
+  const data = await seal(x, JSON.stringify({ accounts: [...new Set(accounts.map((a) => a.trim()))], names: Object.fromEntries(ents.map(([k, v]) => [k, v.trim()])) }));
+  await x.d.fsCommit(x.token, [{ update: { name: P(x, `pfm/${x.uid}/import/prefs`), fields: fieldsOf(x, { data, updatedAt: now() }) } }]);
+  return { ok: true };
 }
 
 // ---------- categorisation rules ----------

@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v125-pfm4";      // C263 P1 + C264 P2 + C266 P3 + C267 P4 (pay page)
+const VER = "v126-kin";      // C263 P1 + C264 P2 + C266 P3 + C267 P4 (pay page)
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -559,6 +559,16 @@ function indexWrite(uid, gid, name, role, now) {
 }
 
 /* ---------- 7) \u0627\u0644\u0639\u0645\u0644\u064a\u0651\u0629: person.set (\u062d\u0642\u0644\u064a\u0651 \u2014 \u0627\u0644\u0623\u062d\u062f\u062b \u064a\u0641\u0648\u0632) ---------- */
+/* C271 (v126): \u0642\u0627\u0639\u062f\u0629 \u00ab\u0627\u0644\u062d\u064a\u0651\u00bb \u2014 \u0646\u0642\u064a\u0651\u0629 (\u062a\u064f\u062e\u062a\u0628\u064e\u0631 \u0641\u064a self-alive.test.js).
+   f = { kinship, alive, claimedByCaller } \u21d2 \u0633\u0628\u0628\u064c \u064a\u062d\u0648\u064a \u00abnot allowed\u00bb (\u0631\u0641\u0636\u064c \u0646\u0647\u0627\u0626\u064a\u0651 \u0641\u064a \u0637\u0627\u0628\u0648\u0631 sawa-sync) \u0623\u0648 null.
+   \u00ab\u0646\u0641\u0633\u064a\u00bb \u0627\u0644\u0645\u062e\u0632\u064e\u0651\u0646\u0629 = \u0635\u0627\u062d\u0628 \u0627\u0644\u0634\u062c\u0631\u0629 \u00b7 claimedByCaller = \u0627\u0644\u0634\u062e\u0635 \u0627\u0644\u0630\u064a \u0631\u0628\u0637 \u0628\u0647 \u0627\u0644\u0645\u062a\u0651\u0635\u0644\u064f \u062d\u0633\u0627\u0628\u0647 (members/{uid}.personId). */
+const SELF_KIN = "\u0646\u0641\u0633\u064a";
+function selfDeceasedRule(f) {
+  if (!f || f.alive !== false) return null;
+  if (f.kinship === SELF_KIN) return "not allowed: the tree owner's own profile cannot be marked deceased";
+  if (f.claimedByCaller) return "not allowed: you cannot mark your own profile as deceased";
+  return null;
+}
 async function opPersonSet(uid, payload, env) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
@@ -593,6 +603,18 @@ async function opPersonSet(uid, payload, env) {
       return { applied: false, queued: true, reviewId: rid, reason: "editing a deleted person" };
     }
   } else { pid = crypto.randomUUID(); creating = true; }
+
+  // C271 (v126): \u0645\u0644\u0641\u0651 \u0635\u0627\u062d\u0628 \u0627\u0644\u062d\u0633\u0627\u0628 \u0644\u0627 \u064a\u064f\u0633\u062c\u064e\u0651\u0644 \u0645\u062a\u0648\u0641\u0651\u0649 \u2014 \u0646\u0633\u062e\u0629 \u0627\u0644\u062e\u0627\u062f\u0645 \u0645\u0646 selfDeceasedBlock \u0641\u064a app.p2.js
+  if ((("alive" in fields) && fields.alive === false) || (("kinship" in fields) && fields.kinship === SELF_KIN)) {
+    const cur = creating ? null : await fsGet(token, "groups/" + groupId + "/persons/" + pid).catch(() => null);
+    const mem = creating ? null : await fsGet(token, "groups/" + groupId + "/members/" + uid).catch(() => null);
+    const why = selfDeceasedRule({
+      kinship: ("kinship" in fields) ? String(fields.kinship || "") : (fstr(cur, "kinship") || ""),
+      alive: ("alive" in fields) ? fields.alive : !(cur && cur.fields && cur.fields.alive && cur.fields.alive.booleanValue === false),
+      claimedByCaller: !!mem && fstr(mem, "personId") === pid,
+    });
+    if (why) throw new Error(why);
+  }
 
   // v39: \u00ab\u0627\u0644\u0623\u062d\u062f\u062b \u064a\u0641\u0648\u0632\u00bb \u0644\u0643\u0644\u0651 \u062d\u0642\u0644 \u2014 \u0627\u0644\u0639\u0645\u064a\u0644 \u064a\u0631\u0633\u0644 \u0648\u0642\u062a \u062a\u0639\u062f\u064a\u0644\u0647 (ts)\u061b \u062d\u0642\u0644\u064c \u0643\u064f\u062a\u0628 \u0641\u064a \u0627\u0644\u062e\u0627\u062f\u0645 \u0628\u0639\u062f\u0647 \u064a\u064f\u062a\u0631\u0643 \u0643\u0645\u0627 \u0647\u0648 (\u0643\u0627\u0646 \u0627\u0644\u0645\u062a\u0623\u062e\u0651\u0631 \u0648\u0635\u0648\u0644\u0627\u064b \u064a\u0645\u0633\u062d \u0627\u0644\u0623\u062d\u062f\u062b)
   const editTs = Number(payload && payload.ts) || 0, exFts = (!creating && (await fsGet(token, "groups/" + groupId + "/persons/" + pid).catch(() => null)) || null);
@@ -877,6 +899,7 @@ async function opBulkImport(uid, payload, env, claims) {
     const lid = (p.localId && segOk(String(p.localId))) ? String(p.localId) : crypto.randomUUID();
     const fid = lid; map[p.localId || lid] = fid;
     if (p.kinship === "\u0646\u0641\u0633\u064a") selfCount++;
+    if (selfDeceasedRule({ kinship: p.kinship, alive: p.alive })) { p.alive = true; delete p.death_date; delete p.deathYear; }   // C271: \u00ab\u0646\u0641\u0633\u064a\u00bb \u062d\u064a\u064c\u0651 \u062f\u0627\u0626\u0645\u0627\u064b (\u0627\u0644\u0631\u0641\u0639 \u0627\u0644\u0643\u0627\u0645\u0644 \u0644\u0627 \u064a\u0641\u0634\u0644 \u0628\u0633\u0628\u0628\u0647)
     const f = { deleted: { booleanValue: false }, createdTs: { timestampValue: now }, updatedTs: { timestampValue: now } };
     const ftsSub = {};
     for (const k of ALLOWED) if (k in p) { f[k] = toFsValue(capVal(k === "locations" ? cleanLocations(p[k]) : p[k])); ftsSub[k] = { timestampValue: now }; }
@@ -2863,6 +2886,91 @@ async function opChatMyTasks(uid, payload, env) {
   const lists = rows.filter(r => chats[r.cid]).map(r => ({ cid: r.cid, chat: chats[r.cid].name, admin: chats[r.cid].admin, day: r.day, id: r.id, by: r.by, title: r.title, ts: r.ts,
     tasks: (r.tasks || []).map(t => ({ id: t.id, text: t.text, assigneeId: t.a || null, dueAt: t.due || null, status: t.st, note: t.note || "", doneBy: t.db || null, doneAt: t.da || null })) }));
   return { lists };
+}
+
+/* ---------- C271 (v126): \u0645\u0648\u0627\u0639\u064a\u062f \u0635\u0644\u0629 \u0627\u0644\u0631\u062d\u0645 \u0627\u0644\u0645\u0631\u0646\u0629 \u2014 kin.remind.set + \u0627\u0644\u0645\u062c\u062f\u0648\u0650\u0644 ----------
+   kinrem/{uid} = { on, hour (0\u201323, \u0628\u062a\u0648\u0642\u064a\u062a \u0627\u0644\u0645\u0633\u062a\u062e\u062f\u0645), tz (getTimezoneOffset \u0628\u0627\u0644\u062f\u0642\u0627\u0626\u0642), lang, items: [{ id, n: \u0627\u0644\u0627\u0633\u0645 \u0627\u0644\u0623\u0648\u0651\u0644, e: \u0627\u0644\u0645\u062f\u0651\u0629 \u0628\u0627\u0644\u0623\u064a\u0651\u0627\u0645 1\u2013365, l: \u0645\u0631\u062c\u0639 \u0622\u062e\u0631 \u062a\u0648\u0627\u0635\u0644 (ms) }],
+                    sent: { id: \u0622\u062e\u0631 \u062a\u0630\u0643\u064a\u0631\u064d \u0644\u0647 }, last: \u0622\u062e\u0631 \u0625\u0634\u0639\u0627\u0631, rq: \u0645\u0648\u0639\u062f \u0627\u0644\u062a\u0634\u063a\u064a\u0644 \u0627\u0644\u0642\u0627\u062f\u0645 (ms\u060c 0 = \u0644\u0627 \u0634\u064a\u0621) }
+   \u0627\u0644\u0642\u0627\u0639\u062f\u0629: \u064a\u062d\u064a\u0646 \u0627\u0644\u0642\u0631\u064a\u0628 \u064a\u0648\u0645 (max(l, sent) + e) \u0641\u064a \u00ab\u0627\u0644\u0633\u0627\u0639\u0629\u00bb \u0627\u0644\u0645\u062e\u062a\u0627\u0631\u0629. \u0627\u0644\u0645\u062a\u0623\u062e\u0651\u0631 \u0623\u0635\u0644\u0627\u064b \u21d0 \u0623\u0648\u0651\u0644 \u00ab\u0633\u0627\u0639\u0629\u00bb \u0642\u0627\u062f\u0645\u0629.
+   \u0625\u0634\u0639\u0627\u0631\u064c \u0648\u0627\u062d\u062f \u064a\u062c\u0645\u0639 \u0643\u0644\u0651 \u0645\u0646 \u062d\u0627\u0646 (\u0644\u0627 \u0625\u0634\u0639\u0627\u0631 \u0644\u0643\u0644\u0651 \u0642\u0631\u064a\u0628)\u060c \u0648\u0644\u0627 \u0623\u0643\u062b\u0631 \u0645\u0646 \u0625\u0634\u0639\u0627\u0631\u064d \u0643\u0644\u0651 \u0661\u0662 \u0633\u0627\u0639\u0629. \u0648\u0627\u0644\u0645\u062f\u0651\u0629 \u0628\u0639\u062f \u0627\u0644\u062a\u0630\u0643\u064a\u0631 \u062a\u0628\u062f\u0623 \u0645\u0646 \u062c\u062f\u064a\u062f
+   (\u064a\u0648\u0645\u064a\u0651\u0627\u064b \u21d0 \u063a\u062f\u0627\u064b\u060c \u0623\u0633\u0628\u0648\u0639\u064a\u0651\u0627\u064b \u21d0 \u0628\u0639\u062f \u0623\u0633\u0628\u0648\u0639) \u0625\u0644\u0649 \u0623\u0646 \u064a\u0633\u062c\u0651\u0644 \u0627\u0644\u0645\u0633\u062a\u062e\u062f\u0645 \u062a\u0648\u0627\u0635\u0644\u0647 \u0641\u064a\u062a\u063a\u064a\u0651\u0631 l. */
+const KIN_DAY = 86400000, KIN_MIN_GAP = 12 * 3600000, KIN_MAX_ITEMS = 300;
+function kinHour(h) { const x = Math.round(Number(h)); return x >= 0 && x <= 23 ? x : 18; }
+function kinTz(z) { const x = Math.round(Number(z)); return x >= -840 && x <= 840 ? x : 0; }
+function kinDayStart(t, tz) { const off = -kinTz(tz) * 60000; return Math.floor((t + off) / KIN_DAY) * KIN_DAY - off; }
+// \u0623\u0648\u0651\u0644 \u00ab\u0633\u0627\u0639\u0629 \u062a\u0630\u0643\u064a\u0631\u00bb \u0628\u0639\u062f t
+function kinSlot(t, hour, tz) { let x = kinDayStart(t, tz) + kinHour(hour) * 3600000; if (x <= t) x += KIN_DAY; return x; }
+// \u0646\u0642\u064a\u0651\u0629: \u0645\u0646 \u062d\u0627\u0646 \u0627\u0644\u0622\u0646\u061f \u0648\u0645\u062a\u0649 \u0627\u0644\u062a\u0634\u063a\u064a\u0644 \u0627\u0644\u0642\u0627\u062f\u0645\u061f
+function kinPlan(doc, now) {
+  const due = [];
+  if (!doc || doc.on === false || !Array.isArray(doc.items) || !doc.items.length) return { due, rq: 0 };
+  const sent = doc.sent || {}, nowSlot = kinSlot(now, doc.hour, doc.tz);
+  let rq = 0;
+  for (const it of doc.items) {
+    const e = Math.round(Number(it.e));
+    if (!(e >= 1 && e <= 365)) continue;
+    const base = Math.max(Number(it.l) || 0, Number(sent[it.id]) || 0);
+    const fireAt = kinDayStart(base + e * KIN_DAY, doc.tz) + kinHour(doc.hour) * 3600000;
+    if (fireAt <= now) due.push(it);
+    const eff = fireAt > now ? fireAt : nowSlot;
+    if (!rq || eff < rq) rq = eff;
+  }
+  return { due, rq };
+}
+function kinItems(list, now) {
+  const seen = {}, out = [];
+  for (const x of (Array.isArray(list) ? list : []).slice(0, KIN_MAX_ITEMS)) {
+    const id = String((x && x.id) || "").slice(0, 80), e = Math.round(Number(x && x.e)), l = Math.round(Number(x && x.l));
+    if (!id || seen[id] || !(e >= 1 && e <= 365)) continue;
+    seen[id] = 1;
+    out.push({ id, n: String((x && x.n) || "").replace(/[\u0000-\u001f<>]/g, "").slice(0, 40), e, l: l > 0 && l <= now + KIN_DAY ? l : now });
+  }
+  return out;
+}
+function kinBody(due, lang) {
+  const en = lang === "en", names = due.map((x) => x.n).filter(Boolean);
+  if (!names.length) return en ? "It's time to check in with your relatives" : "\u062d\u0627\u0646 \u0645\u0648\u0639\u062f \u0627\u0644\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0623\u0642\u0627\u0631\u0628\u0643";
+  if (names.length === 1) return en ? "Time to reach out to " + names[0] : "\u062d\u0627\u0646 \u0645\u0648\u0639\u062f \u0627\u0644\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 " + names[0];
+  if (names.length === 2) return en ? "Time to reach out to " + names[0] + " and " + names[1] : "\u062d\u0627\u0646 \u0645\u0648\u0639\u062f \u0627\u0644\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 " + names[0] + " \u0648" + names[1];
+  return en ? "Time to reach out to " + names.slice(0, 2).join(", ") + " and " + (names.length - 2) + " more"
+            : "\u062d\u0627\u0646 \u0645\u0648\u0639\u062f \u0627\u0644\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 " + names.slice(0, 2).join("\u060c ") + " \u0648" + (names.length - 2) + " \u063a\u064a\u0631\u0647\u0645\u0627";
+}
+function kinDocJs(d) { return d ? fsToJs({ mapValue: { fields: d.fields || {} } }) || {} : {}; }
+async function opKinRemindSet(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const now = Date.now(), p = payload || {};
+  const on = p.on !== false, items = on ? kinItems(p.items, now) : [];
+  const name = DOC_ROOT + "/kinrem/" + uid;
+  if (!items.length) { await fsCommit(token, [{ delete: name }]); return { kin: 0, next: 0 }; }
+  const prev = kinDocJs(await fsGet(token, "kinrem/" + uid).catch(() => null));
+  const sent = {}, ps = (prev && prev.sent) || {};
+  for (const it of items) if (Number(ps[it.id]) > 0) sent[it.id] = Number(ps[it.id]);
+  const doc = { on: true, hour: kinHour(p.hour), tz: kinTz(p.tz), lang: p.lang === "en" ? "en" : "ar", items, sent, last: Number(prev && prev.last) || 0 };
+  const { rq } = kinPlan(doc, now);
+  await fsCommit(token, [{ update: { name, fields: toFsValue(Object.assign({}, doc, { rq, ts: now })).mapValue.fields } }]);
+  return { kin: items.length, next: rq };
+}
+async function kinReminders(env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const now = Date.now(), L = LIM(env);
+  const res = await gfetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "kinrem" }], where: { compositeFilter: { op: "AND", filters: [
+      { fieldFilter: { field: { fieldPath: "rq" }, op: "GREATER_THAN", value: { integerValue: "0" } } },
+      { fieldFilter: { field: { fieldPath: "rq" }, op: "LESS_THAN_OR_EQUAL", value: { integerValue: String(now) } } }] } }, limit: L.rem + 1 } }) });
+  const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+  let sent = 0;
+  for (const d of rows.slice(0, L.rem)) {
+    const uid = d.name.split("/").pop(), x = kinDocJs(d);
+    const doc = { on: x.on !== false, hour: kinHour(x.hour), tz: kinTz(x.tz), lang: x.lang === "en" ? "en" : "ar", items: Array.isArray(x.items) ? x.items : [], sent: Object.assign({}, x.sent || {}), last: Number(x.last) || 0 };
+    const { due } = kinPlan(doc, now);
+    const send = due.length > 0 && now - doc.last >= KIN_MIN_GAP;
+    if (send) { for (const it of due) doc.sent[it.id] = now; doc.last = now; }
+    const { rq } = kinPlan(doc, now);
+    // \u0623\u0648\u0651\u0644\u0627\u064b: \u0627\u0644\u0645\u0648\u0639\u062f \u0627\u0644\u0642\u0627\u062f\u0645 (\u0644\u0627 \u062a\u0643\u0631\u0627\u0631 \u0644\u0648 \u062a\u0639\u062b\u0651\u0631 \u0627\u0644\u0625\u0631\u0633\u0627\u0644)
+    await fsCommit(token, [{ update: { name: d.name, fields: { rq: { integerValue: String(rq) }, sent: toFsValue(doc.sent), last: { integerValue: String(doc.last) } } }, updateMask: { fieldPaths: ["rq", "sent", "last"] } }]).catch(e => slog("warn", "kinrem", { err: e && e.message }));
+    if (send) sent += await pushTo(token, [uid], strData({ t: "kin", title: doc.lang === "en" ? "\ud83e\udd32 Family ties" : "\ud83e\udd32 \u0635\u0644\u0629 \u0627\u0644\u0631\u062d\u0645", body: kinBody(due, doc.lang), n: due.length, ts: now }));
+  }
+  return { reminders: rows.length, sent };
 }
 
 // \u0627\u0644\u062a\u0630\u0643\u064a\u0631 (\u0645\u0646 \u0627\u0644\u0645\u062c\u062f\u0648\u0650\u0644): \u0642\u0627\u0626\u0645\u0629\u064c \u0648\u0627\u062d\u062f\u0629 \u0641\u064a \u0643\u0644\u0651 \u062a\u0634\u063a\u064a\u0644
@@ -5551,7 +5659,7 @@ async function opAccountDelete(uid, payload, env, claims) {
   const ph = fstr(acc, "phone"), eh = fstr(acc, "emailHash");
   if (ph && fstr(await fsGet(token, "phones/" + ph).catch(() => null), "uid") === uid) writes.push({ delete: P("phones/" + ph) });
   if (eh && fstr(await fsGet(token, "emails/" + eh).catch(() => null), "uid") === uid) writes.push({ delete: P("emails/" + eh) });
-  for (const k of ["mset", "quota", "turncred", "stories"]) writes.push({ delete: P(k + "/" + uid) });
+  for (const k of ["mset", "quota", "turncred", "stories", "kinrem"]) writes.push({ delete: P(k + "/" + uid) });
   for (const q of [{ uid: uid }, { by: uid }]) for (const d of await fsQueryEq(token, "famreq", q, 100).catch(() => [])) writes.push({ delete: d.name });
   purge.push({ id: "story_" + uid, kind: "story" }, { id: "moments_" + uid, kind: "moments" }, { id: "pfm_" + uid, kind: "pfm" });   // C263: + pfm
   // \u0644\u062d\u0638\u0627\u062a\u064a \u062a\u062e\u062a\u0641\u064a \u0641\u0648\u0631\u0627\u064b (\u062c\u0645\u0647\u0648\u0631\u064c \u0641\u0627\u0631\u063a) \u062b\u0645\u0651 \u062a\u064f\u062d\u0630\u0641 \u0643\u0627\u0645\u0644\u0629\u064b \u0645\u0639 \u0648\u0633\u0627\u0626\u0637\u0647\u0627 \u0648\u062a\u0639\u0644\u064a\u0642\u0627\u062a\u0647\u0627 \u0628\u0627\u0644\u0645\u062c\u062f\u0648\u0650\u0644
@@ -6195,6 +6303,7 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "gcall.start") { const r = await opGcallStart(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
     if (op === "gcall.room") { const r = await opGcallRoom(uid, body.payload, env); return json({ ok: true, ...r }); }   // C178
     if (op === "gcall.add") { const r = await opGcallAdd(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+    if (op === "kin.remind.set") { const r = await opKinRemindSet(uid, body.payload, env); return json({ ok: true, ...r }); }   // C271
     if (op === "sched.set") { const r = await opSchedSet(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
     if (op === "sched.join") { const r = await opSchedJoin(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "sched.list") { const r = await opSchedList(uid, body.payload, env); return json({ ok: true, ...r }); }
@@ -6296,6 +6405,7 @@ export default {
       let r = { reminders: 0 };
       try { r = await schedReminders(env); } catch (e) { slog("warn", "reminders", { err: e && e.message }); }
       try { await taskReminders(env); } catch (e) { slog("warn", "taskrem", { err: e && e.message }); }   // C173
+      try { await kinReminders(env); } catch (e) { slog("warn", "kinrem", { err: e && e.message }); }   // C271
       const job = (name, f) => f().catch(e => slog("warn", "job", { job: name, err: e && e.message }));
       if (L.free) {   // \u0627\u0644\u0645\u062c\u0651\u0627\u0646\u064a\u0651\u0629: \u0665\u0660 \u0637\u0644\u0628\u0627\u064b \u0641\u0631\u0639\u064a\u0651\u0627\u064b \u21d2 \u0645\u0647\u0645\u0651\u0629\u064c \u0648\u0627\u062d\u062f\u0629 \u0641\u064a \u0643\u0644\u0651 \u062a\u0634\u063a\u064a\u0644 (\u0643\u0645\u0627 \u0641\u064a C178)
         if (r.reminders) return;
