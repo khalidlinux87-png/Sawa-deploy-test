@@ -1,7 +1,7 @@
 # Personal Accountant: Projects, cost estimator and sharing (spec)
 
-Status: **P6a, P6b and P6-share built** (data model, calculation module, migrations, Worker ops with roles and sharing, charts data,
-copy to the personal ledger, tests). Not built yet: app screens (P6c), PDF/Excel export (P6e), the wallet link (P6d).
+Status: **P6a, P6b, P6-share, P6c and P6e (partly) built**. P6c: app screens in `Sawa-app` (`app.p9.js`, Projects tab).
+P6e: CSV export and a printable report (save as PDF from the browser). Native .xlsx is not built. Not built: the wallet link (P6d).
 No Firestore rules are needed: all access goes through the Worker.
 Extends `pfm/DESIGN.md`. Everything there still applies: integer minor units, decimal text for rates and quantities,
 server-side totals, sealed free text, the audit chain, and the twelve accepted currencies (decision 8).
@@ -219,9 +219,9 @@ in the PDF and as native workbook data (P6e). Charts show the same numbers as th
 | P6a ✅ | Data model, calculation module, migrations, tests | Worked examples match; effects sum to the total; a second migration run writes nothing |
 | P6b ✅ | Worker ops (single user) | A duplicate `idemKey` writes once; concurrent approvals leave one baseline; the audit chain stays whole |
 | P6-share ✅ | Roles, invites, members, copy to personal, charts data, deletion for members | An invite is used once per use slot; a viewer cannot write; a member's personal copy is not touched by the owner |
-| P6c | App: project list, wizard, estimator, dashboard with charts, ledger, members and invites | Phone-width layouts in both languages; `ui-check.mjs` run-through (needs `node_modules`) |
+| P6c ✅ | App: project list, create, join by invite, estimate editor (draft, approve), ledger with copy to personal, overview with charts and alerts, people and invites | `pfm/projects-ui-check.mjs` passes (create → draft → approve → entry → invite) in Chromium, Arabic light; screenshots checked |
 | P6d | Wallet link (blocked on `DESIGN.md` decision 13) | Tagging a wallet payment writes one entry; reversing it voids the entry |
-| P6e | PDF and Excel export from the same data | A workbook's totals match the API to the minor unit |
+| P6e ◐ | Export from the same data: CSV (opens in Excel and Sheets) and a printable report (print to PDF). Native .xlsx not built | Formula cells in CSV are defused; the report escapes all user text; the viewer can export, a stranger cannot |
 
 ---
 
@@ -231,3 +231,13 @@ in the PDF and as native workbook data (P6e). Charts show the same numbers as th
    series as the PDF. Choose when P6e starts.
 2. **Owner transfer.** The owner cannot hand a project over yet. Only deletion is possible. Add if needed.
 3. **Display names.** Members choose their own display name when they join. Changing it later is not built.
+
+---
+
+## 11. Export (P6e, as built)
+
+- `pfm.proj.export` → `{filename, csv, rows}`. A UTF-8 CSV with a byte-order mark, so Arabic opens correctly in Excel. Text cells
+  starting with `=`, `+`, `-`, `@` are defused. Amounts are numbers.
+- `pfm.proj.report` → `{filename, html}`. A self-contained HTML page: summary cards, category bars, estimate lines, entries.
+  All user text is escaped. The app saves it as a file; open it in the browser and print, or save as PDF.
+- Excel (.xlsx) is not built. Open the CSV in Excel or Google Sheets.
