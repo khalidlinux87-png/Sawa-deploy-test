@@ -172,12 +172,17 @@ export async function readImage(img, ocr, templates, ctx = {}) {
   const read = async (parts, scale, mode) => { const st = buildStrip(img, parts, scale); return splitLines((await ocr(st, mode)).lines, st.spans); };
   const side = (s) => cells.map((c) => ({ box: c[s], bg: c.bg }));
   for (const tpl of templates) {
-    // 1. Labels: one read of each half-column; the half where the template's labels are found is the label side.
-    let labSide = null, labs = null;
-    for (const s of ["right", "left"]) {
-      const r = await read(side(s), 2, "mix"), m = r.map((x) => matchLabel(x.text, tpl.labels));
-      if (m.filter(Boolean).length >= Math.min(tpl.minLabels, cells.length)) { labSide = s; labs = m.map((mm, i) => ({ m: mm, r: r[i] })); break; }
-    }
+    // 1. Labels. Arabic screens put the labels on the right, English ones on the left. Three engines at once (§4.7d):
+    //    the right half with the Arabic engine, the left half with the digits engine (English letters are in its list),
+    //    and, ahead of time, the left half as values with the Arabic+English engine (an Arabic screen's value column).
+    //    If neither half reads as labels, the old way: each half with the Arabic+English engine.
+    const pick = (r) => { const m = r.map((x) => matchLabel(x.text, tpl.labels)); return m.filter(Boolean).length >= Math.min(tpl.minLabels, cells.length) ? m.map((mm, i) => ({ m: mm, r: r[i] })) : null; };
+    const early = read(side("left"), 3, "mix");
+    early.catch(() => {});
+    const [rightL, leftL] = await Promise.all([read(side("right"), 2, "ara"), read(side("left"), 2, "num")]);
+    let labSide = null, labs = pick(rightL);
+    if (labs) labSide = "right"; else if ((labs = pick(leftL))) labSide = "left";
+    else for (const s of ["right", "left"]) if ((labs = pick(await read(side(s), 2, "mix")))) { labSide = s; break; }
     if (!labSide) continue;
     const valSide = labSide === "right" ? "left" : "right", vals = side(valSide);
     // a label that did not read in the strip: that one cell alone, Arabic only or English only (rare)
@@ -186,19 +191,26 @@ export async function readImage(img, ocr, templates, ctx = {}) {
       if (m) { labs[i] = { m, r }; break; }
     }
     const fieldOf = (i) => labs[i].m && labs[i].m.field;
-    // 2. Values: one Arabic+English read of all values, one digits read of the digit fields.
-    const mix = await read(vals, 3, "mix");
-    const numIdx = cells.map((_, i) => i).filter((i) => tpl.read[fieldOf(i)] === "num");
-    const numR = numIdx.length ? await read(numIdx.map((i) => vals[i]), 3, "num") : [];
+    // 2. Values, three engines at once (each is its own worker, so a phone reads them in parallel, §4.7d):
+    //    Arabic+English of all values (keep this strip whole: a shorter strip read one amount differently), digits of the
+    //    digit fields, Arabic-only of names and comments (used only when the first read looks Arabic or unsure).
+    const idx = (keep) => cells.map((_, i) => i).filter((i) => fieldOf(i) && keep(fieldOf(i)));
+    const numIdx = idx((f) => tpl.read[f] === "num");
+    const nameIdx = idx((f) => f === "to_name" || f === "note");
+    const strip = (ix, mode) => (ix.length ? read(ix.map((i) => vals[i]), 3, mode) : Promise.resolve([]));
+    const [mix, numR, nameR] = await Promise.all([valSide === "left" ? early : read(vals, 3, "mix"), strip(numIdx, "num"), strip(nameIdx, "ara")]);
     // safety net: a digit field the strip left empty is read again on its own (one extra call, only when needed)
     for (let k = 0; k < numIdx.length; k++) if (!numR[k].text.trim()) {
       const i = numIdx[k]; numR[k] = await ocr(prepCrop(img, vals[i].box, cells[i].bg, 3), "num");
       if (fieldOf(i) === "amount" && !mix[i].text.trim()) mix[i] = await ocr(prepCrop(img, vals[i].box, cells[i].bg, 3), "mix");
     }
-    // 3. Arabic-only re-read, in one strip, of the names and comments that came out as Arabic or unsure.
+    // 3. Arabic-only reads of the names and comments that came out as Arabic or unsure (already done above), and of a
+    //    biller name in «إلى» (bills only: one more strip).
     const words = (i) => /_account$/.test(fieldOf(i)) && (mix[i].text.match(/\d/g) || []).length < 6;   // a biller in «إلى»
     const textIdx = cells.map((_, i) => i).filter((i) => (["to_name", "note"].includes(fieldOf(i)) || words(i)) && (hasArabic(mix[i].text) || mix[i].conf < 80));
-    const araR = textIdx.length ? await read(textIdx.map((i) => vals[i]), 3, "ara") : [];
+    const billIdx = textIdx.filter((i) => !nameIdx.includes(i));
+    const billR = await strip(billIdx, "ara");
+    const araR = textIdx.map((i) => (nameIdx.includes(i) ? nameR[nameIdx.indexOf(i)] : billR[billIdx.indexOf(i)]));
     // safety net: a name, comment or biller that came back empty is read alone as one raw line (block mode can return
     // nothing for a short phrase that line mode reads cleanly: «سلفيه نقاشه»)
     for (let k = 0; k < textIdx.length; k++) {

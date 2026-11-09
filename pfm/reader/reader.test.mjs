@@ -231,12 +231,16 @@ await t("readImage: a whole screenshot in a few OCR calls (strips), digits re-re
   const img = synthetic(8), seq = english();
   const NUM = new Set(["Trx. ID", "Date & Time", "From Account", "To Account", "Mobile Number", "Amount"]);
   const calls = [];
-  // Stub engine: answers a strip with one line per span. 1st call = the right column (labels here), then the values
-  // (mixed), then the digit fields only.
+  // Stub engine: answers a strip with one line per span. The synthetic screen has its labels on the right: the Arabic
+  // engine reads them there; a strip of all 8 left halves (values) is read by the mixed engine (ahead of time) and by
+  // the digits engine (looking for English labels); then the digits engine reads the digit fields and the Arabic engine
+  // the name and comment.
+  const NAMES = new Set(["To Account Title", "Comment"]);
   const ocr = async (crop, mode) => {
     calls.push(mode);
-    const texts = calls.length === 1 ? seq.map((c) => c.a.text)
-      : mode === "num" ? seq.filter((c) => NUM.has(c.a.text)).map((c) => c.b.text)
+    const all = crop.spans.length === seq.length;
+    const texts = mode === "ara" ? (all ? seq.map((c) => c.a.text) : seq.filter((c) => NAMES.has(c.a.text)).map((c) => c.b.text))
+      : mode === "num" && !all ? seq.filter((c) => NUM.has(c.a.text)).map((c) => c.b.text)
       : seq.map((c) => c.b.text);
     assert.equal(texts.length, crop.spans.length, "one line per strip span");
     return { text: texts.join(" "), conf: 95, lines: crop.spans.map(([a, b], k) => ({ text: texts[k], conf: 95, y0: a + 2, y1: b - 2 })) };
@@ -245,7 +249,7 @@ await t("readImage: a whole screenshot in a few OCR calls (strips), digits re-re
   assert.equal(r.amount.value, "250000.00");
   assert.equal(r.recipient.name, "Test Supplier Ltd");
   assert.equal(r.status, "verified", JSON.stringify(r.verify));
-  assert.deepEqual(calls, ["mix", "mix", "num"], "three OCR calls for a clean screenshot");
+  assert.deepEqual(calls.slice().sort(), ["ara", "ara", "mix", "num", "num"], "five OCR calls for a clean screenshot, three engines at a time");
 });
 
 await t("image: a scrolled screenshot's cut-off top row is still found", () => {

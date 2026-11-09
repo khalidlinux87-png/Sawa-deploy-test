@@ -5,7 +5,7 @@ import bankak from "./templates/bankak.mjs";
 
 export const templates = [bankak];
 export { readImage, recomputeKind, extractFromCells };
-export const VERSION = "3";   // the app loads /ocr/sawa-reader-<VERSION>.js: a new reader = a new file name (phones cache /ocr/ for good)
+export const VERSION = "4";   // the app loads /ocr/sawa-reader-<VERSION>.js: a new reader = a new file name (phones cache /ocr/ for good)
 
 /** Load tesseract.min.js once. */
 function loadScript(src) {
@@ -30,10 +30,11 @@ export async function makeOcr({ base = "/ocr/v1/", onProgress } = {}) {
       : { tessedit_pageseg_mode: "6" });
     return w;
   })());
-  const canvas = document.createElement("canvas"), g = canvas.getContext("2d", { willReadFrequently: true });
   const ocr = async (crop, mode) => {
+    // a canvas per call: readImage runs several engines at once, and the engine reads the canvas later (toBlob)
+    const canvas = document.createElement("canvas");
     canvas.width = crop.width; canvas.height = crop.height;
-    g.putImageData(new ImageData(crop.data, crop.width, crop.height), 0, 0);
+    canvas.getContext("2d").putImageData(new ImageData(crop.data, crop.width, crop.height), 0, 0);
     // "araLine": the Arabic engine reading one raw line (PSM 13): catches short phrases block mode returns empty for
     const line = mode === "araLine", w = await get(line ? "ara" : mode in langs ? mode : "mix");
     if (line) await w.setParameters({ tessedit_pageseg_mode: "13" });
@@ -41,7 +42,7 @@ export async function makeOcr({ base = "/ocr/v1/", onProgress } = {}) {
     const lines = data.lines.filter((l) => l.text.trim()).map((l) => ({ text: l.text.trim(), conf: l.confidence, y0: l.bbox.y0, y1: l.bbox.y1 }));
     return { text: lines.map((l) => l.text).join(" "), conf: data.confidence, lines };
   };
-  ocr.warm = (modes = ["mix", "num"]) => Promise.all(modes.map(get));   // the two engines every image needs; "ara" starts only if a name needs it
+  ocr.warm = (modes = ["mix", "num", "ara"]) => Promise.all(modes.map(get));   // the three engines every image uses at once ("eng" only for a rare label)
   ocr.close = async () => { for (const k of Object.keys(made)) (await made[k]).terminate(); };
   return ocr;
 }

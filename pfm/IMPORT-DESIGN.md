@@ -276,6 +276,28 @@ digit fields, then Arabic-only for names and comments: 4–9 calls per screensho
 read on its own. The app starts the engines when the sheet opens and keeps them for 3 minutes after it closes, and shows
 the engine start time and each image's reading time. Known billers are snapped (`billers`).
 
+### 4.7d Speed: engines in parallel (C279, from the third phone test: 15 s for one receipt)
+
+Each mode is its own tesseract.js worker (its own thread on the phone), but the reader called them one after another.
+Now, per screenshot: (1) the right half is read for labels by the Arabic engine, the left half by the digits engine
+(English labels), and, ahead of time, the left half as values by the Arabic+English engine, all three at once; (2) the
+digit fields (digits engine) and the names and comments (Arabic engine) at once. On an Arabic screen the values are
+already read when the labels come back. If neither half reads as labels, the old way (Arabic+English, right then left).
+Each call draws its own canvas (the engine reads it later; one shared canvas would mix strips). All three engines start
+when the import sheet opens. Tried and dropped: smaller strips (scale 2: lost a date), leaving digit-only rows out of the
+Arabic+English strip (one amount then read differently), BMP instead of PNG (same reads, slower engine).
+Node, 10 real samples: 2.6 s → 1.9 s each, same results. The Node harness now hands the engine PNG like the app
+(it used JPEG, which hid a bill-ID digit misread the app really makes: 1346… read as 1546…, not flagged).
+
+### 4.7e The batch outlives the sheet (C280)
+
+Closing the import sheet used to throw the batch away, and a batch still being read stopped with it. The batch (rows,
+reads, edits, the reading loop and the save loop) now lives in the app session, outside the sheet: closing it or leaving
+the accountant screen goes on reading, the accountant screen shows a bar («استيراد الإيصالات: قراءة 2 من 5…» or «N بانتظار
+المراجعة والإضافة») that reopens it, and the Import button counts it. The engines stay up while a batch reads. A batch with
+nothing left to add is cleared when the sheet closes; «إنهاء الدفعة ومسح القائمة» clears it by hand. Not kept across an app
+restart (the picked images are in memory only).
+
 ### 4.8 In the app (C273)
 
 Ledger → «استيراد». The app loads `/ocr/v1/sawa-reader.js` (built from this folder by `dev/bundle.mjs`) and the OCR
