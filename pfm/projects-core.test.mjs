@@ -180,4 +180,19 @@ t("lifecycle: baseline is frozen, approval needs lines, transitions are whitelis
   assert.equal(J.nextRevision([]), 1);
 });
 
+t("chartSeries: categories, months and a running balance; voided rows and loan repayments handled", () => {
+  const lines = [{ lineKey: "a", category: "raw_materials", estTotal: 1000 }, { lineKey: "b", category: "labor", estTotal: 500 }];
+  const rows = [
+    { kind: "capital_injection", direction: "inflow", amount: 2000, occurredOn: "2026-10-30", status: "posted" },
+    { kind: "expense", direction: "outflow", amount: 1200, lineKey: "a", occurredOn: "2026-11-02", status: "posted" },
+    { kind: "expense", direction: "outflow", amount: 300, category: "other", occurredOn: "2026-11-02", status: "posted" },
+    { kind: "expense", direction: "outflow", amount: 999, lineKey: "b", occurredOn: "2026-11-03", status: "voided" },
+    { kind: "loan_repayment", direction: "outflow", amount: 400, occurredOn: "2026-11-03", status: "posted" },
+  ];
+  const c = J.chartSeries(lines, rows);
+  assert.deepEqual(c.byCategory.map((x) => [x.category, x.estimated, x.actual]), [["raw_materials", 1000, 1200], ["labor", 500, 0], ["equipment_rental", 0, 0], ["permits", 0, 0], ["other", 0, 300]]);
+  assert.deepEqual(c.byMonth.map((m) => [m.month, m.actual, m.inflow]), [["2026-10", 0, 2000], ["2026-11", 1500, 0]]);
+  assert.deepEqual(c.daily.map((d) => [d.date, d.balance]), [["2026-10-30", 2000], ["2026-11-02", 500], ["2026-11-03", 100]]);
+});
+
 console.log(process.exitCode ? "FAILED" : `projects-core: ${n} passed`);

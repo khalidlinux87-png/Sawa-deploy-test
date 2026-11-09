@@ -1383,3 +1383,15 @@ Adds the `pfm.proj.*` ops to `pfm/pfm-worker.mjs`: create, list, get, update, st
 - Tests: `projects-worker.test.mjs` 10 · `pfm-worker.test.mjs` 42 · `projects-core` 15 · `projects-migrations` 7 · `pfm-core` 29, all passing. `ui-check.mjs` cannot run here (no `node_modules/react`), the same before this change.
 - Not deployed. Upload when you deploy: `worker-3.js` is unchanged, but `pfm/` changed (`pfm-worker.mjs`, `projects-core.mjs`, `projects-migrations.mjs`), and the Worker imports them. Deploy through wrangler, not a paste.
 - Details: `pfm/PROJECTS.md` §5 and §9.
+
+## C273 — Personal Accountant P6-share: shared projects, copy to the personal ledger, charts (no deploy yet)
+Decisions (owner, 2026-11-09): no tax on estimate lines (P11) · copy an expense to the personal ledger, opt-in per entry (P12) · share projects with roles (P13).
+- Layout change (nothing deployed yet): project data is top-level `pfmProjects/{pid}`, with `members/{uid}`, `estimates`, `tx`, `alerts`. Each user keeps `pfm/{uid}/projectIndex/{pid}`. Invites are `pfmInvites/{token}`. Sealed text is bound to the project (`proj:{pid}`).
+- Roles on every op: owner (members, invites, deletion), editor (entries, estimates, alerts), viewer (reads). Non-members get `not_found`.
+- Invites: 1–30 days (default 7), 1–10 uses (default 1), counted atomically.
+- Copy to personal: `copyToPersonal: {categoryId}` books a linked row in the recorder's ledger in the same commit. Edits and deletes from the personal side are refused (`linked_project_entry`). Voiding the entry voids the copy when the recorder voids it; other members' copies are kept, and the reply says so.
+- Charts: `pfm.proj.charts` returns estimate vs actual by category, monthly totals and a daily running balance.
+- Deletion: owners delete the project for everyone; members only leave. Account deletion follows the same rule.
+- Tests: `projects-worker.test.mjs` 18 · `projects-core` 16 · `pfm-worker` 42 · `projects-migrations` 7 · `pfm-core` 29, all passing.
+- Upload pack (not committed): `upload-pack/` with `README-upload.txt` and `CHECKSUMS.txt`. Required files: `worker-3.js` and the five `pfm/` modules listed there.
+- Details: `pfm/PROJECTS.md` §2 (P11–P14), §3, §5.

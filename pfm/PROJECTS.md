@@ -1,23 +1,27 @@
-# Personal Accountant: Projects & cost estimator (spec)
+# Personal Accountant: Projects, cost estimator and sharing (spec)
 
-Status: **P6a and P6b built** (data model, calculation module, migrations, Worker ops, tests). App screens and exports are not built yet. No Firestore rules are needed.
+Status: **P6a, P6b and P6-share built** (data model, calculation module, migrations, Worker ops with roles and sharing, charts data,
+copy to the personal ledger, tests). Not built yet: app screens (P6c), PDF/Excel export (P6e), the wallet link (P6d).
+No Firestore rules are needed: all access goes through the Worker.
 Extends `pfm/DESIGN.md`. Everything there still applies: integer minor units, decimal text for rates and quantities,
-server-side totals, encrypted free text, the audit chain, and the twelve accepted currencies (decision 8).
+server-side totals, sealed free text, the audit chain, and the twelve accepted currencies (decision 8).
 
 ---
 
 ## 1. What it does
 
-A **project** is an isolated workspace (House construction, Event, Small business, Agricultural season, or Custom) with a name,
-dates, a target budget, and a description.
+A **project** is a workspace (House construction, Event, Small business, Agricultural season, or Custom) with a name, dates,
+a target budget and a description. It can be **shared** with other users as editors or viewers.
 
-1. **Estimate (BOQ).** Before launch the user lists the resources: category, item, unit, quantity and unit price. The total is
-   computed. Approving the estimate freezes it as the **baseline**.
-2. **Ledger.** After launch the user records money in and out: capital, loans, partner money, grants, sales (inflows), and
-   expenses (outflows, optionally tied to a BOQ line with a quantity).
-3. **Variance and health.** Per line: quantity variance, price variance, total variance and a status. Per project: spend against
-   budget, a forecast at completion, margin and cash position, and threshold alerts (80 % and 100 % by default).
-4. **Export.** An executive PDF and an Excel workbook (phase P6e, not built).
+1. **Estimate (BOQ).** Before launch the owner or an editor lists the resources: category, item, unit, quantity and unit price.
+   Approving the estimate freezes it as the **baseline**. Later changes are change orders (new revisions with a reason).
+2. **Ledger.** After launch: capital, loans, partner money, grants and sales (inflows), and expenses (outflows, optionally on a BOQ
+   line with a quantity). An expense can also be **copied to the personal ledger** (§2, P12).
+3. **Variance, health and forecast.** Per line: quantity and price variance and a status. Per project: spend against budget,
+   a forecast at completion, margin, cash position and threshold alerts (80 % and 100 % by default).
+4. **Charts.** One op returns the series: estimate vs actual by category, monthly totals, and a daily running balance. The app
+   draws them (P6c) and the export uses the same data (P6e).
+5. **Sharing.** The owner invites people with a link. Roles: owner, editor, viewer (§2, P13).
 
 ---
 
@@ -25,210 +29,186 @@ dates, a target budget, and a description.
 
 | # | Decision | Why |
 |---|---|---|
-| P1 | **Project money lives in its own subtree**, `pfm/{uid}/projects/{pid}/…`. It is **not** in `pfm/{uid}/tx`, and it does not touch the personal months rollups | "Isolated" is the requirement. A house build should not inflate personal "spending this month". Copying a project expense into the personal ledger is a later, opt-in choice |
-| P2 | **Firestore, not PostgreSQL.** "Migrations" here means versioned, idempotent steps run by the Worker (`projects-migrations.mjs`), tracked per user in `pfm/{uid}/meta/projects` | The whole Personal Accountant runs on Firestore and the Worker. A second database would split the audit chain and the encryption |
-| P3 | **Wallet link is deferred.** "Tag a Sawa Wallet payment to a project" depends on the wallet ledger, which is off (`DESIGN.md` decision 13, `PFM_WALLET`). Until then, entries are typed in by hand | The spec asked for it, but the wallet has no server ledger to link to yet. The `source` field and a unique `walletTxId` slot are reserved so it can be added later without a migration |
-| P4 | **Project currency is fixed at creation.** An entry in another accepted currency needs a user-typed rate (`fxRate`), exactly like personal entries. The original amount and rate are kept | Same rule as decisions 8 and 11. Changing the currency would rewrite history |
-| P5 | **Baseline is immutable.** Only a `draft` revision accepts edits. Approving makes it the `baseline`. Later changes are new revisions (change orders) with a reason | Variance is only meaningful against a fixed plan |
-| P6 | **Lines keep a stable `lineKey` across revisions.** Expenses point at the `lineKey`, not at a revision's document ID | A change order must not orphan last month's spending |
-| P7 | **Alerts are keyed.** `budget:<pct>:<estimateId>`, `forecast:<estimateId>`, `line:<lineKey>:<estimateId>`. Each fires once per revision; a stored alert clears when it no longer applies, which re-arms it | Same once-per-threshold rule as personal budgets (P2 in `DESIGN.md`) |
-| P8 | **Cost is expenses only.** `loan_repayment` is cash out but is principal, not project cost. The cash position includes it | Otherwise a loan repayment would look like an overrun |
-| P9 | **Quantities**: 3 decimals as BigInt scaled by 1000 (`toQty`), stored as text (`"2.5"`). Line total = round(qty × unit price) | Same as invoices |
-| P10 | **Calculation is on the server only.** The client sends inputs and shows the returned health. Totals are never trusted from the client | Same as invoices (`DESIGN.md` §1, decision 1) |
+| P1 | **Project data is isolated from the personal ledger.** It lives in its own collections, and the personal monthly totals do not include it unless the entry is copied (P12) | A house build should not inflate personal "spending this month" |
+| P2 | **Firestore, not PostgreSQL.** "Migrations" are versioned, idempotent steps run by the Worker (`projects-migrations.mjs`), tracked per user in `pfm/{uid}/meta/projects` | The accountant already runs on Firestore and the Worker |
+| P3 | **Wallet link is deferred** (`DESIGN.md` decision 13). Entries are typed in by hand until then | There is no server wallet ledger to link to |
+| P4 | **Project currency is fixed at creation.** An entry in another accepted currency takes a user-typed rate; the original amount and rate are kept | Same rule as decisions 8 and 11 |
+| P5 | **The baseline is immutable.** Only a draft revision accepts edits. Approval makes it the baseline; later changes are change orders with a reason | Variance is only meaningful against a fixed plan |
+| P6 | **Lines keep a stable `lineKey` across revisions** | A change order must not orphan earlier spending |
+| P7 | **Alerts are keyed** (`budget:<pct>:<estimateId>`, `forecast:<estimateId>`, `line:<lineKey>:<estimateId>`). Each fires once per revision and clears when no longer true | Same once-per-threshold rule as personal budgets |
+| P8 | **Cost is expenses only.** A loan repayment is cash out but not cost. The cash position includes it | Otherwise a repayment would look like an overrun |
+| P9 | **Quantities** have 3 decimals (BigInt scaled by 1000), stored as text. Line total = round(qty × unit price) | Same as invoices |
+| P10 | **The server does all calculation.** The client sends inputs and shows what comes back | Same as invoices |
+| P11 | **No tax on estimate lines.** Decided by the owner, 2026-11-09. Not in the schema, and not planned for now | Owner's decision |
+| P12 | **Copy an expense to the personal ledger (opt-in per entry).** `copyToPersonal: {categoryId}` books a linked row in the **recorder's own** personal ledger in the same commit. The copy is marked `projectRef` and cannot be edited or deleted from the personal side. Voiding the project entry voids the copy **if the recorder is the one voiding**; a copy in another member's ledger is left alone and the reply says so (`personalCopyKept`). A foreign currency needs `personalFxRate` | Personal budgets see real project spending, without the project's other rows moving into the personal ledger. A member's personal ledger is theirs to control |
+| P13 | **Sharing with three roles.** Owner: everything, including members, invites and deletion. Editor: entries, estimates, alerts, edits to the project. Viewer: reads only. Invites are tokens: they grant editor or viewer (never owner), expire after 1–30 days (default 7), and can be used 1–10 times (default 1). A non-member gets `not_found`, so the project's existence is not revealed | Several people manage one project; the owner stays in charge of who is in it |
+| P14 | **Shared data is top-level.** Project data lives in `pfmProjects/{pid}`, not under one user. Each user keeps `pfm/{uid}/projectIndex/{pid}` for their list. Sealed text is bound to the project (`proj:{pid}`), so every member can open it through the Worker | Members must reach the same data. Binding to the project lets members open it without holding the owner's key |
 
 ---
 
 ## 3. Data model (Firestore)
 
-Paths are relative to the document root. 🔒 = sealed with the user's key (`sealField`, AAD = uid, §6 of `DESIGN.md`).
-⚙ = written only by the Worker.
+Paths are relative to the document root. 🔒 = sealed (`sealField`, bound to the project as `proj:{pid}`). ⚙ = written by the Worker only.
 
 ### 3.1 `pfm/{uid}/meta/projects` ⚙ — schema version
-```ts
-{ schemaVersion: 1, appliedAt: "2026-11-09T…Z", lastMigration: "projects_init" }
-```
+`{ schemaVersion: 1, appliedAt, lastMigration }`
 
-### 3.2 `pfm/{uid}/projects/{pid}` — project
+### 3.2 `pfm/{uid}/projectIndex/{pid}` — the user's list
+`{ role: "owner" | "editor" | "viewer", createdAt }`. Written with the membership and removed with it.
+
+### 3.3 `pfmProjects/{pid}` — project
 ```ts
-{ name: "House", nameSealed?: …,                 // name is clear text; description and counterparty fields are 🔒
-  template: "house_construction" | "event" | "small_business" | "agri_season" | "custom",
-  description: 🔒 string,
-  currency: "SDG",                                // fixed at creation (P4); pfm.proj.update refuses a change
-  startDate: "2026-11-01" | null, endDate: "2026-12-31" | null,
-  targetBudget: 300000,                           // minor units, > 0
+{ ownerUid, name, template: "house_construction" | "event" | "small_business" | "agri_season" | "custom",
+  description: 🔒, currency: "SDG" (fixed, P4),
+  startDate, endDate, targetBudget: 300000 (minor units, > 0),
   status: "planning" | "active" | "on_hold" | "completed" | "archived",
-  baselineEstimateId: "e_1" | null ⚙,
-  alertThresholdsPct: [80, 100],                  // ascending, 1–200
-  lineTolerancePct: 5,                            // 0–100: overrun allowed before a line turns over_budget
-  createdAt ⚙, updatedAt ⚙, rev ⚙ }
+  baselineEstimateId, alertThresholdsPct: [80, 100], lineTolerancePct: 5,
+  rev ⚙, createdAt ⚙, updatedAt ⚙ }
 ```
-Transitions (`assertProjectTransition`): planning → active · active → on_hold | completed · on_hold → active · any open state → archived.
+Transitions: planning → active · active → on_hold | completed · on_hold → active · any open state → archived.
 
-### 3.3 `pfm/{uid}/projects/{pid}/estimates/{eid}` — revision
+### 3.4 `pfmProjects/{pid}/members/{uid}`
+`{ role, displayName (≤ 40, optional), addedAt, addedBy }`. The owner's row is created with the project.
+
+### 3.5 `pfmProjects/{pid}/estimates/{eid}` — revision
+`{ revision, status: "draft" | "baseline" | "superseded", reason, approvedAt, approvedBy, total, lineCount, rev, createdAt, updatedAt }`.
+Only one draft and one baseline at a time.
+
+### 3.6 `pfmProjects/{pid}/estimates/{eid}/lines/{lineKey}` — BOQ line
+Document ID = `lineKey` (`[A-Za-z0-9_-]`, ≤ 64). `{ category, name: 🔒, unit, estQty: "100", estUnitPrice, estTotal, notes: 🔒, sortOrder }`.
+Written once with the revision; read-only after approval. A commit holds at most 500 writes, so a revision has at most 400 lines.
+
+### 3.7 `pfmProjects/{pid}/tx/{txId}` — project ledger
 ```ts
-{ revision: 1, status: "draft" | "baseline" | "superseded" ⚙, reason: "Initial estimate" | "Change order #2",
-  approvedAt: ⚙ | null, createdAt ⚙ }
+{ kind: "capital_injection" | "loan_draw" | "partner_contribution" | "grant" | "revenue"   // inflows
+        | "expense" | "loan_repayment",                                                     // outflows
+  direction ⚙, amount (project currency minor units), originalAmount, originalCurrency, fxRate,
+  lineKey | null, category | null, quantity: "110" | null, unit | null,
+  description: 🔒, counterparty: 🔒, occurredOn: "2026-11-03",
+  status: "posted" | "voided", voidReason: 🔒, voidedAt ⚙,
+  createdBy, rev ⚙, createdAt ⚙,
+  personalCopy: { uid, txId } | null }          // P12: where the linked personal row is
 ```
-Only one `baseline` per project. Approving a new revision makes the old baseline `superseded` in the same commit.
+Voiding keeps the row. Totals ignore voided rows.
 
-### 3.4 `…/estimates/{eid}/lines/{lineKey}` — BOQ line
-The document ID is the `lineKey` (`[A-Za-z0-9_-]`, ≤ 64 characters), so a line is unique within its revision.
-```ts
-{ category: "raw_materials" | "labor" | "equipment_rental" | "permits" | "other",
-  name: 🔒 string (≤ 160), unit: "bag" (≤ 16),
-  estQty: "100",                                  // decimal text, > 0, ≤ 3 places
-  estUnitPrice: 1000,                             // minor units, ≥ 0
-  estTotal: 100000 ⚙,                            // round(estQty × estUnitPrice)
-  sortOrder: 0, notes: 🔒 string }
-```
-A revision's lines are written once, in the same commit as the revision (or while it is `draft`). After approval they are read-only.
+### 3.8 `pfmProjects/{pid}/alerts/{key}` ⚙
+`{ rule, severity, thresholdPct?, lineKey?, estimateId, createdAt, acknowledgedAt }`. Creation uses "must not exist",
+so two writers produce one alert.
 
-### 3.5 `pfm/{uid}/projects/{pid}/tx/{txId}` — project ledger
-```ts
-{ kind: "capital_injection" | "loan_draw" | "partner_contribution" | "grant" | "revenue"    // inflows
-        | "expense" | "loan_repayment",                                                      // outflows
-  direction: "inflow" | "outflow" ⚙,              // derived from kind
-  amount: 125000,                                 // minor units of the project currency, > 0
-  originalAmount: 10000, originalCurrency: "USD", fxRate: "600" | null,   // when the entry is in another currency
-  lineKey: "cement" | null,                       // expense on a BOQ line
-  category: "other" | null,                       // expense not on a line (unbudgeted)
-  quantity: "110" | null, unit: "bag" | null,     // expense only, optional
-  description: 🔒 string (≤ 200), counterparty: 🔒 string (≤ 120),
-  occurredOn: "2026-11-03",
-  status: "posted" | "voided",
-  voidReason: 🔒 string | null, voidedAt ⚙,
-  walletTxId: null,                               // reserved for P3 (deferred)
-  createdAt ⚙, rev ⚙ }
-```
-Voiding keeps the row. Totals ignore voided rows. Nothing is deleted, so the audit chain stays whole.
+### 3.9 `pfmInvites/{token}` ⚙
+`{ pid, role, maxUses, uses, createdBy, createdAt, expiresAt }`. The token is 24 random characters. Uses are counted with a
+precondition, so two people accepting at once cannot both use the last one.
 
-### 3.6 `pfm/{uid}/projects/{pid}/alerts/{dedupeKey}` ⚙
-```ts
-{ rule: "budget_threshold" | "forecast_overrun" | "line_overrun", severity: "warning" | "critical",
-  thresholdPct?: 80, lineKey?: "cement", estimateId: "e_1",
-  createdAt ⚙, acknowledgedAt: null }
-```
-Creation uses a "document must not exist" precondition. Two concurrent writers therefore produce one alert.
+### 3.10 Personal ledger copy (P12)
+A copy is an ordinary row in `pfm/{uid}/tx/tp_{txId}` with `projectRef: { pid, txId }`, `source: "manual"`, and the usual
+rollup. `pfm.tx.update` and `pfm.tx.delete` refuse it with `linked_project_entry`.
 
-### 3.7 Indexes
-- `tx`: `(occurredOn desc)` for the ledger list, `(lineKey, status)` for line drill-down. Both are small enough to scan per project in v1.
-- `alerts`: `(acknowledgedAt, createdAt desc)`.
-
-### 3.8 Size limits (v1)
-Up to **2,000 ledger rows per project** and **400 lines per revision** (a commit holds at most 500 writes, and each line is one write). Health is recomputed from the rows on each read. Above that
-limit a rollup document (`pfm/{uid}/projects/{pid}/rollup` ⚙, updated with increments like `months/`) is needed. Not built yet.
+### 3.11 Limits (v1)
+2,000 ledger rows read per project (the Worker reads up to 3,000) and 400 lines per revision. Health and charts are
+recomputed from the rows on each read. A rollup document is needed above that.
 
 ---
 
 ## 4. Calculations
 
-All in `projects-core.mjs`. BigInt throughout, rounding half away from zero, basis points for percentages.
+All in `projects-core.mjs`. BigInt, rounding half away from zero, basis points for percentages.
 
-**Line total**
-`estTotal = round(estQty × estUnitPrice / 1000)` (quantities carry a 1000 scale)
+**Line total:** `estTotal = round(estQty × estUnitPrice / 1000)`
 
-**Line variance** (actual cost `AC`, actual quantity `AQ`, estimate `ET`, `EQ`, `EP`)
+**Line variance** (AC actual cost, AQ actual quantity, ET estimate total, EQ estimate quantity, EP estimate unit price)
 
 | Field | Formula |
 |---|---|
 | `totalVariance` | AC − ET |
 | `quantityEffect` | round((AQ − EQ) × EP) |
-| `priceEffect` | totalVariance − quantityEffect (equals (AP − EP) × AQ, taken as the remainder so the two always sum exactly) |
-| `actualUnitPrice` | round(AC ÷ AQ), null when AQ = 0 |
-| `qtyVariancePct` | (AQ − EQ) ÷ EQ × 100 |
+| `priceEffect` | totalVariance − quantityEffect (equals (AP − EP) × AQ; taken as the remainder so the two always sum exactly) |
 | `status` | `not_started` if AC = 0 · `on_budget` if AC ≤ ET · `warning` if above ET within tolerance · `over_budget` if AC > ET × (1 + tolerance) |
 
-Worked example: 100 bags estimated at 10.00 (1,000.00 total). 110 bags actually cost 1,210.00.
-Quantity effect = 10 × 10.00 = **100.00**. Price effect = 1.00 × 110 = **110.00**. Total = **210.00** = 1,210.00 − 1,000.00. Status: over budget (above the 5 % tolerance).
+Worked example: 100 bags estimated at 10.00 (1,000.00). 110 bags actually cost 1,210.00. Quantity effect 100.00, price effect 110.00,
+total 210.00. Status: over budget (above the 5 % tolerance).
 
-**Project health**
+**Project health:** utilization = spend ÷ target · EAC (forecast at completion) = Σ max(actual, estimate) per line + unbudgeted
+spend + spend on lines no longer in the revision · margin = (revenue − spend) ÷ revenue · cash position = all inflows − all
+outflows · status red if utilization ≥ 100 % or EAC > target, amber if utilization ≥ the first threshold (80 %), otherwise green.
 
-| Field | Formula |
-|---|---|
-| `actualSpend` | Σ expense (lines and unbudgeted) |
-| `utilization` | actualSpend ÷ targetBudget (basis points) |
-| `forecastAtCompletion` (EAC) | Σ over lines of max(actual cost, estimate) + unbudgeted spend + spend on lines no longer in the revision |
-| `forecastVsBudget` | EAC − target. Positive means the project is forecast to overrun |
-| `budgetGap` | target − Σ estimate. Shows whether the plan fits the budget before any spending |
-| `net` / `margin` | revenue − actualSpend · net ÷ revenue (null without revenue) |
-| `cashPosition` | all inflows − all outflows (includes loan repayments) |
-| `status` | **red** if utilization ≥ 100 % or EAC > target · **amber** if utilization ≥ the first threshold (80 %) · **green** otherwise |
+**Charts** (`chartSeries`): estimate vs actual per BOQ category (an unbudgeted expense counts under its own category) · monthly
+actual spend and inflows · daily inflows, outflows and running balance.
 
-EAC counts untouched estimates in full. A project can therefore be forecast over budget while it is still well under budget
-in cash. That is the point of the forecast.
-
-**Alerts** (`alertsFor`): one per crossed threshold, one for a forecast overrun, one per line that is `warning` or `over_budget`.
-Critical at 100 %, forecast overrun, and `over_budget` lines. Stored keys from the same revision that no longer apply are returned
-in `clear`.
+**Alerts** (`alertsFor`): one per crossed threshold, one for a forecast over budget, one per line that is `warning` or `over_budget`.
 
 ---
 
-## 5. Operations (built in P6b)
+## 5. Operations (`pfm.proj.*`)
 
-Same house convention as `DESIGN.md` §3: `POST /api`, `{ op, ...payload }`. The prefix is `pfm.proj.` because the personal
-ledger already uses `pfm.alerts.*`. `worker-3.js` needs no change: it routes every `pfm.*` op to `handlePfmOp`.
-Every op first brings the schema up to date (`migrateProjects`). Every write carries a precondition on the project row, so
-writes to one project run one at a time: a racing writer re-reads and retries (`busy` after four tries).
-Creates use the client's `idemKey` as the document ID, so a retry returns the first result.
+Same house convention: `POST /api`, `{ op, ...payload }`, Bearer ID token. `worker-3.js` routes every `pfm.*` op to
+`handlePfmOp` and needs no change. Each op first brings the schema up to date. Each op checks the caller's role
+(`accessOf`): a non-member gets `not_found`; a role that is too low gets `forbidden`. Creates use the client's `idemKey` as
+the document ID, so a retry returns the first result. Every write has a precondition on the project row.
 
-| op | Payload → result | Rules enforced |
+| op | Payload → result | Role |
 |---|---|---|
-| `pfm.proj.create` | `idemKey` + project fields → `{project}` | Needs `pfm.init`. `validateProjectInput`. Description is sealed. Audit `project.create` |
-| `pfm.proj.list` | → `{items}`, each with a health summary | |
-| `pfm.proj.get` | `{pid}` → `{project, estimates, estimateId, health}` | |
-| `pfm.proj.update` | `{pid, rev, …changed}` → `{project}` | `stale` if `rev` differs · `currency_locked` · an edit that changes nothing writes nothing · audit diff |
-| `pfm.proj.status` | `{pid, rev, to}` → `{project}` | `assertProjectTransition` (§3.2) |
-| `pfm.proj.estimate.create` | `idemKey`, optional `reason`, `fromBaseline` → `{estimate}` | One open draft at a time (`draft_exists`) · revision > 1 needs `reason` · `fromBaseline` copies the baseline's lines (sealed text copied as-is) · at most 400 lines |
-| `pfm.proj.estimate.lines` | `{pid, eid, rev, lines}` → `{estimate, totals}` | Draft only (`baseline_locked`) · `stale` · every line through `validateBoqLine` · unique `lineKey`s · lines not in the new set are deleted in the same commit |
-| `pfm.proj.estimate.approve` | `{pid, eid, rev}` → `{estimate}` | `assertCanApprove` · supersedes the old baseline in the same commit · project → `active` · alerts computed once |
-| `pfm.proj.tx.add` | `idemKey` + entry fields → `{tx}` | An expense `lineKey` must exist on the baseline (`bad_line`) · idempotent on `idemKey` · alerts written in the same commit |
-| `pfm.proj.tx.void` | `{pid, txId, reason}` → `{tx}` | Status change only, never a delete · reason required · alerts recomputed without the entry |
-| `pfm.proj.tx.list` | `{pid, kind?, lineKey?}` → `{items, truncated}` | Decrypts description, counterparty and void reason for the owner |
-| `pfm.proj.health` | `{pid, estimateId?}` → `{estimateId, health}` | Default estimate is the baseline; with no baseline only the ledger counts |
-| `pfm.proj.variance` | `{pid, estimateId?}` → `{estimateId, currency, lines}` | Adds name, unit, category and notes to each line's variance |
-| `pfm.proj.alerts.list` | `{pid, unacknowledged?}` → `{items}` | |
-| `pfm.proj.alerts.ack` | `{pid, key}` → `{alert}` | The key may contain `:` (for example `budget:100:e_…`); nothing else may |
-| `pfm.export` *(P6e)* | `{pid, format: "pdf" or "xlsx"}` | Not built |
+| `pfm.proj.create` | `idemKey`, project fields, `displayName?` → `{project}` | any (needs `pfm.init`) |
+| `pfm.proj.list` | → `{items}`: each project with `role` and a health summary | any |
+| `pfm.proj.get` | `{pid}` → `{project, role, members, estimates, estimateId, health}` | viewer |
+| `pfm.proj.update` | `{pid, rev, …changed}` → `{project}` | editor |
+| `pfm.proj.status` | `{pid, rev, to}` → `{project}` | editor |
+| `pfm.proj.delete` | `{pid, confirm: pid}` → `{deleted}` | owner |
+| `pfm.proj.estimate.create` | `idemKey`, `reason?`, `fromBaseline?` → `{estimate}` | editor |
+| `pfm.proj.estimate.lines` | `{pid, eid, rev, lines}` → `{estimate, totals}` | editor |
+| `pfm.proj.estimate.approve` | `{pid, eid, rev}` → `{estimate}` | editor |
+| `pfm.proj.tx.add` | `idemKey`, entry fields, `copyToPersonal?: {categoryId}`, `personalFxRate?` → `{tx, personalCopyId}` | editor |
+| `pfm.proj.tx.void` | `{pid, txId, reason}` → `{tx, personalCopyKept}` | editor |
+| `pfm.proj.tx.list` | `{pid, kind?, lineKey?}` → `{items, truncated}` | viewer |
+| `pfm.proj.health` | `{pid, estimateId?}` → `{estimateId, health}` | viewer |
+| `pfm.proj.variance` | `{pid, estimateId?}` → `{estimateId, currency, lines}` (with names) | viewer |
+| `pfm.proj.charts` | `{pid, estimateId?}` → `{budget, byCategory, byMonth, daily}` | viewer |
+| `pfm.proj.alerts.list` | `{pid, unacknowledged?}` → `{items}` | viewer |
+| `pfm.proj.alerts.ack` | `{pid, key}` → `{alert}` | editor |
+| `pfm.proj.members.list` | `{pid}` → `{items}` | viewer |
+| `pfm.proj.members.role` | `{pid, uid, role: editor\|viewer}` → `{member}` | owner |
+| `pfm.proj.members.remove` | `{pid, uid?}` (no `uid` = leave) → `{removed}` | owner, or the member themselves |
+| `pfm.proj.invite.create` | `{pid, role, maxUses?, days?}` → `{invite: {token, expiresAt}}` | owner |
+| `pfm.proj.invite.accept` | `{token, displayName?}` → `{project, role}` | any signed-in user |
+| `pfm.export` *(P6e)* | | not built |
 
-Account deletion: `purgePfm` now removes `pfm/{uid}/meta` and calls `purgeProjects`, which deletes each project's
-lines, revisions, ledger and alerts before the project row. Covered by the purge test.
+**Account deletion (`purgePfm`):** for each project in the user's index — if they own it, the project is deleted for everyone
+(its estimates, lines, ledger, alerts, members and everyone's index entries); if they are a member, only their membership and
+index entry are removed. The personal ledger and `pfm/{uid}/meta` are removed as before.
+
+---
 
 ## 6. Security and audit
 
-- **Rules:** none added. Like `pfm/`, every client read and write is denied and the app goes through `pfm.*` ops.
-- **Sealed fields:** project description, line notes and names, entry descriptions, counterparties and void reasons. Amounts, dates, quantities and statuses stay clear, because the server aggregates them.
-- **Audit actions** (added to the `DESIGN.md` §2.10 list): `project.create`, `project.update`, `project.status`, `estimate.create`, `estimate.lines`, `estimate.approve`, `ptx.add`, `ptx.void`.
-- **Account deletion:** the existing purge job removes `pfm/{uid}`, which covers the new subtree. Check that the job recurses into subcollections before shipping (it must, for `tx/`).
-- **Rate limits:** the existing `rl*` limits for `pfm.*` apply. No new public endpoint.
+- **No Firestore rules added.** Every client read and write is denied; the app uses `pfm.proj.*`.
+- **Roles on every op** (`accessOf`). Non-members see `not_found`. The owner's role is fixed; an invite never grants it.
+- **Sealed fields:** names, descriptions, line notes, entry descriptions, counterparties and void reasons. Bound to the
+  project, not to one user. Amounts, dates, quantities and statuses stay clear, because the server aggregates them.
+- **Invites:** 24-character random tokens, expiry (1–30 days), a use limit (1–10), and atomic use counting. The token itself is
+  never written to the audit log.
+- **Audit:** `project.create`, `project.update`, `project.status`, `project.delete`, `estimate.create`, `estimate.lines`,
+  `estimate.approve`, `ptx.add`, `ptx.void`, `alert.ack`, `member.join`, `member.role`, `member.remove`, `member.leave`,
+  `invite.create`. Each entry is in the chain of the user who acted. A personal copy is audited in the recorder's chain.
+- **Rate limits:** the existing `pfm.*` limits apply. No new public endpoint.
 
 ---
 
-## 7. Code in this folder
+## 7. Code
 
 | File | What it is | Status |
 |---|---|---|
-| `projects-core.mjs` | Validators (`validateProjectInput`, `validateBoqLine`, `validateProjectTx`), `lineTotal`, `estimateTotals`, `lineVariance`, `ledgerTotals`, `projectHealth`, `alertsFor`, lifecycle guards, `paths` | Built, tested |
-| `projects-core.test.mjs` | Worked examples, rounding invariants, statuses, alert once/re-arm, lifecycle | `node pfm/projects-core.test.mjs` · 15 passed |
-| `projects-migrations.mjs` | `MIGRATIONS` (v1 `projects_init`), `migrateProjects(db, uid)`, ordering check at import | Built, tested |
-| `projects-migrations.test.mjs` | Fresh user, idempotent re-run, `schema_ahead`, failed step retried, ordering | `node pfm/projects-migrations.test.mjs` · 7 passed |
-| `pfm-worker.mjs` (P6b section) | The ops in §5 and the purge of the projects subtree | Covered by `projects-worker.test.mjs`; `pfm-worker.test.mjs` (42) still passes |
-| `projects-worker.test.mjs` | Create and idempotency, sealing, update and status rules, estimate lifecycle and change orders, ledger line checks, alerts once and cleared on void, concurrent entries with an intact audit chain, purge | `node pfm/projects-worker.test.mjs` · 10 passed |
-
-Not built: app screens (`app.p9.js`), export (P6e), and the wallet link (P6d, blocked on `DESIGN.md` decision 13).
+| `projects-core.mjs` | Validators, line totals, variance, project health, alerts, lifecycle guards, roles, `chartSeries`, `paths` | Built, tested |
+| `projects-core.test.mjs` | Worked examples, rounding, statuses, alerts, lifecycle, chart series | `node pfm/projects-core.test.mjs` · 16 |
+| `projects-migrations.mjs` | `MIGRATIONS` (v1 `projects_init`), `migrateProjects` | Built, tested |
+| `projects-migrations.test.mjs` | Fresh user, re-run, `schema_ahead`, failed step retried, ordering | `node pfm/projects-migrations.test.mjs` · 7 |
+| `pfm-worker.mjs` (Projects section) | The ops in §5, roles, invites, copy to personal, charts, deletion | Built |
+| `projects-worker.test.mjs` | Create, update, status, estimates and change orders, ledger rules, alerts, concurrency; invites (use limit, expiry, not-a-member), roles, leave and remove, delete, copy to personal (incl. another member's copy), charts, account deletion | `node pfm/projects-worker.test.mjs` · 18 |
 
 ---
 
-## 8. UI flow (for later, summary)
+## 8. Charts
 
-1. **Projects list:** cards with status and a budget bar (80 % and 100 % ticks).
-2. **New project:** basics (name, template, dates, currency) → target budget → estimator.
-3. **Estimator:** lines grouped by category, quantity × price, sticky totals, *Approve baseline & launch*. After launch the button becomes *Propose change order*.
-4. **Dashboard:** budget gauge, alerts, estimate vs. actual by category, funding cards, margin pill (green / amber / red).
-5. **Variance:** per-line chips (quantity and cost), tap to drill into the entries.
-6. **Ledger:** Income / Expense / Funding, add-entry sheet with optional line and quantity, void with a reason.
-7. **Export:** format, range, include BOQ and ledger, then download or share.
-
-Colours follow the app's `colors` tokens, not fixed hex values, as in C270. Status is never colour alone.
+`pfm.proj.charts` returns series only. The app draws the bars and the balance line (P6c). The export draws the same series
+in the PDF and as native workbook data (P6e). Charts show the same numbers as the health output, to the minor unit.
 
 ---
 
@@ -236,17 +216,18 @@ Colours follow the app's `colors` tokens, not fixed hex values, as in C270. Stat
 
 | Phase | Scope | Exit check |
 |---|---|---|
-| **P6a** ✅ (this change) | Data model, calculation module, migrations, tests | Worked examples match the spec; rounding never breaks `quantityEffect + priceEffect = totalVariance`; a second migration run writes nothing |
-| P6b ✅ | Worker ops §5; purge of the projects subtree | Concurrent approvals produce one baseline (the second supersedes the first); a duplicate `idemKey` writes once; a voided entry leaves totals unchanged; concurrent entries keep the audit chain intact |
-| P6c | App: projects list, wizard, estimator, dashboard, ledger, variance | Phone-width layouts in both languages; `ui-check.mjs` extended with a project run-through |
-| P6d | Wallet link (**blocked** on `DESIGN.md` decision 13) | Tagging a wallet payment writes one entry; reversing the payment voids it |
-| P6e | PDF and Excel export from the same health model | A worksheet's totals match the API response to the minor unit |
+| P6a ✅ | Data model, calculation module, migrations, tests | Worked examples match; effects sum to the total; a second migration run writes nothing |
+| P6b ✅ | Worker ops (single user) | A duplicate `idemKey` writes once; concurrent approvals leave one baseline; the audit chain stays whole |
+| P6-share ✅ | Roles, invites, members, copy to personal, charts data, deletion for members | An invite is used once per use slot; a viewer cannot write; a member's personal copy is not touched by the owner |
+| P6c | App: project list, wizard, estimator, dashboard with charts, ledger, members and invites | Phone-width layouts in both languages; `ui-check.mjs` run-through (needs `node_modules`) |
+| P6d | Wallet link (blocked on `DESIGN.md` decision 13) | Tagging a wallet payment writes one entry; reversing it voids the entry |
+| P6e | PDF and Excel export from the same data | A workbook's totals match the API to the minor unit |
 
 ---
 
 ## 10. Open questions
 
-1. **Tax on BOQ lines.** Not modelled. If needed, add a `taxRate` (ppm, typed) to lines and reuse `computeInvoice`'s per-line rule.
-2. **Personal copy.** Should a project expense optionally also post to the personal ledger (P1)? Default off.
-3. **Partners.** Single owner for now. Shared projects need `pfm/{uid}/projects/{pid}/members` and role rules, and they change the audit model.
-4. **Excel charts.** `exceljs` can't write native charts. Options: a Python step with openpyxl, or an embedded PNG rendered from the same SVG as the PDF. Choose when P6e starts.
+1. **Excel charts.** `exceljs` cannot write native charts. Options: a Python step with openpyxl, or a picture drawn from the same
+   series as the PDF. Choose when P6e starts.
+2. **Owner transfer.** The owner cannot hand a project over yet. Only deletion is possible. Add if needed.
+3. **Display names.** Members choose their own display name when they join. Changing it later is not built.

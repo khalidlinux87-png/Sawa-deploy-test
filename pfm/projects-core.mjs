@@ -417,13 +417,73 @@ export function assertProjectTransition(from, to) {
   return true;
 }
 
-// Firestore paths, relative to the DOC_ROOT, used by the Worker and the migrations.
+// ---------- sharing ----------
+
+// viewer reads; editor changes entries, estimates and alerts; owner also manages members, invites and deletion.
+export const ROLE_RANK = Object.freeze({ viewer: 1, editor: 2, owner: 3 });
+export const SHARE_ROLES = Object.freeze(["viewer", "editor"]);   // what an invite can grant (owner is never granted)
+export const INVITE_MAX_USES = 10;
+export const INVITE_DAYS = { default: 7, max: 30 };
+export function assertRole(role, need) {
+  if (!(role in ROLE_RANK) || ROLE_RANK[role] < ROLE_RANK[need]) throw new PfmError("forbidden", `${need} role needed`);
+  return true;
+}
+
+// ---------- charts (data only; the app and the export draw them) ----------
+
+/**
+ * lines: [{ lineKey, category, estTotal }]   txs: stored or validated ledger rows
+ * Returns the series for the charts. Money is in minor units, dates are YYYY-MM-DD.
+ *   byCategory: estimate vs actual for each BOQ category (an expense without a line counts under its own category)
+ *   byMonth:    actual spend and inflows per month
+ *   daily:      inflows, outflows and the running balance per day (loan repayments count as outflows)
+ */
+export function chartSeries(lines, txs) {
+  const catOf = new Map(lines.map((l) => [l.lineKey, BOQ_CATEGORIES.includes(l.category) ? l.category : "other"]));
+  const byCat = Object.fromEntries(BOQ_CATEGORIES.map((c) => [c, { category: c, estimated: 0, actual: 0 }]));
+  for (const l of lines) byCat[catOf.get(l.lineKey)].estimated += Number(l.estTotal);
+
+  const months = new Map(), days = new Map();
+  for (const x of txs) {
+    if (x.status === "voided") continue;
+    const amt = Number(x.amount), d = x.occurredOn, m = d.slice(0, 7);
+    if (x.kind === "expense") {
+      const cat = x.lineKey ? catOf.get(x.lineKey) ?? "other" : (BOQ_CATEGORIES.includes(x.category) ? x.category : "other");
+      byCat[cat].actual += amt;
+    }
+    const mo = months.get(m) ?? { month: m, actual: 0, inflow: 0 };
+    if (x.kind === "expense") mo.actual += amt;
+    if (x.direction === "inflow") mo.inflow += amt;
+    months.set(m, mo);
+    const dy = days.get(d) ?? { date: d, inflow: 0, outflow: 0 };
+    if (x.direction === "inflow") dy.inflow += amt; else dy.outflow += amt;
+    days.set(d, dy);
+  }
+  let balance = 0;
+  const daily = [...days.values()].sort((a, b) => (a.date < b.date ? -1 : 1)).map((dy) => {
+    balance += dy.inflow - dy.outflow;
+    return { ...dy, balance };
+  });
+  return {
+    byCategory: BOQ_CATEGORIES.map((c) => byCat[c]),
+    byMonth: [...months.values()].sort((a, b) => (a.month < b.month ? -1 : 1)),
+    daily,
+  };
+}
+
+// Firestore paths, relative to the document root (the Worker adds the root when it writes).
+// Projects are shared, so they live at the top level; each user keeps an index of the projects they belong to.
 export const paths = Object.freeze({
   meta: (uid) => `pfm/${uid}/meta/projects`,
-  project: (uid, pid) => `pfm/${uid}/projects/${pid}`,
-  estimates: (uid, pid) => `pfm/${uid}/projects/${pid}/estimates`,
-  estimate: (uid, pid, eid) => `pfm/${uid}/projects/${pid}/estimates/${eid}`,
-  lines: (uid, pid, eid) => `pfm/${uid}/projects/${pid}/estimates/${eid}/lines`,
-  tx: (uid, pid) => `pfm/${uid}/projects/${pid}/tx`,
-  alerts: (uid, pid) => `pfm/${uid}/projects/${pid}/alerts`,
+  indexes: (uid) => `pfm/${uid}/projectIndex`,
+  index: (uid, pid) => `pfm/${uid}/projectIndex/${pid}`,
+  project: (pid) => `pfmProjects/${pid}`,
+  members: (pid) => `pfmProjects/${pid}/members`,
+  member: (pid, uid) => `pfmProjects/${pid}/members/${uid}`,
+  estimates: (pid) => `pfmProjects/${pid}/estimates`,
+  estimate: (pid, eid) => `pfmProjects/${pid}/estimates/${eid}`,
+  lines: (pid, eid) => `pfmProjects/${pid}/estimates/${eid}/lines`,
+  tx: (pid) => `pfmProjects/${pid}/tx`,
+  alerts: (pid) => `pfmProjects/${pid}/alerts`,
+  invite: (token) => `pfmInvites/${token}`,
 });
