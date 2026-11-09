@@ -57,12 +57,15 @@ export function parseDmyMon(text, tz) {
   return `${y}-${p2(mo)}-${p2(d)}T${p2(h)}:${mi}:${ss}${offsetOf(tz, y, mo, d, h, +mi)}`;
 }
 
-/** Money as printed → canonical decimal string ("50,000.00" → "50000.00"), or null if the shape is not trusted. */
-export function parseMoney(text, { decimals = 2 } = {}) {
+/**
+ * Money as printed → canonical decimal string with `decimals` places ("50,000.00" → "50000.00", "200000.0" → "200000.00"),
+ * or null if the shape is not trusted. `minDecimals` allows screens that print fewer places (Bankak bill payments: one).
+ */
+export function parseMoney(text, { decimals = 2, minDecimals = decimals } = {}) {
   const s = westernDigits(text).replace(/[٬]/g, ",").replace(/٫/g, ".").replace(/\s+/g, "");
-  const re = new RegExp(`^(\\d{1,3}(?:,\\d{3})+|\\d+)\\.(\\d{${decimals}})$`);
+  const re = new RegExp(`^(\\d{1,3}(?:,\\d{3})+|\\d+)\\.(\\d{${minDecimals},${decimals}})$`);
   const m = s.match(re);
-  return m ? `${m[1].replace(/,/g, "")}.${m[2]}` : null;
+  return m ? `${m[1].replace(/,/g, "")}.${m[2].padEnd(decimals, "0")}` : null;
 }
 
 /** Digits only, in groups as printed; `groups` = expected group sizes, e.g. [4,4,4,4]. */

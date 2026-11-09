@@ -1,7 +1,7 @@
 // Sawa reader — from OCR'd table cells to one receipt in the shape of import-batch.schema.json (IMPORT-DESIGN.md §4).
 // Rule: never invent. A field that does not parse cleanly is null and listed in `verify` with the reason.
 
-import { findCells, prepCrop } from "./image.mjs";
+import { findCells, prepCrop, buildStrip, splitLines } from "./image.mjs";
 import { matchLabel, normAr, parseDmyMon, parseMoney, parseGrouped, isNA, cleanEdges } from "./text.mjs";
 import { toMinor } from "../pfm-core.mjs";
 
@@ -12,12 +12,18 @@ export const NAME_CONF = 75;             // below this a new recipient name is f
 export const HINTS = [
   { re: /بنزين|جازولين|جالون|وقود|ديزل|gasoline|petrol|fuel/i, serviceType: "fuel", categoryId: "c_transport" },
   { re: /ترحيل|نقل|شحن|توصيل|delivery|transport/i, serviceType: "logistics", categoryId: "c_transport" },
-  { re: /كهرباء|electricity/i, serviceType: "utility", categoryId: "c_utilities" },
+  { re: /كهرباء|ايصالي|electricity|مياه|water/i, serviceType: "utility", categoryId: "c_utilities" },
   { re: /رصيد|زين|سوداني|ام تي ان|mtn|zain|sudani/i, serviceType: "telecom", categoryId: "c_telecom" },
-  { re: /مصنعي|صيانه|تكييف|تكيف|دهان|سباك|كهربجي|نجار/i, serviceType: "other", categoryId: "c_maintenance" },
+  { re: /مصنعي|صيانه|تكييف|تكيف|دهان|نقاش|سباك|كهربجي|نجار/i, serviceType: "other", categoryId: "c_maintenance" },
   { re: /فطور|غداء|غدا|عشاء|مطعم|restaurant|cafe|كافتيريا/i, serviceType: "retail", categoryId: "c_food" },
   { re: /ايجار|إيجار|rent/i, serviceType: "rent", categoryId: "c_rent" },
 ];
+
+/** A biller name read close to a known one becomes that one; anything else stays as read. */
+function snapBiller(name, tpl) {
+  const m = (tpl.billers || []).length ? matchLabel(name, { b: tpl.billers }, 0.6) : null;
+  return m ? m.variant : name;
+}
 
 /**
  * cells: [{ a: {text, conf}, b: {text, conf} }] — the two halves of each table row, either order.
@@ -85,14 +91,17 @@ export function extractFromCells(cells, tpl, ctx = {}) {
   };
   const fromAcc = acct("from_account"), toAcc = acct("to_account");
   if (got.from_account !== undefined && !fromAcc) flag("sender", `account unreadable: "${got.from_account}"`);
-  if (got.to_account !== undefined && !toAcc) flag("recipient", `account unreadable: "${got.to_account}"`);
+  // «إلى» holding words, not an account number, names the payee (a biller such as ايصالي).
+  const payee = got.to_account !== undefined && !toAcc && (got.to_account.match(/\d/g) || []).length < 6 && /\p{L}{2}/u.test(got.to_account)
+    ? snapBiller(got.to_account.replace(/\s+/g, " ").trim(), tpl) : null;
+  if (got.to_account !== undefined && !toAcc && !payee) flag("recipient", `account unreadable: "${got.to_account}"`);
   const mine = (a) => !!a && own.has(a.replace(/\D/g, ""));
   const fromMe = mine(fromAcc), toMe = mine(toAcc);
   // Names: Arabic OCR misreads letters, but account numbers read reliably. A name the user already confirmed for this
   // account (ctx.knownAccounts, built from booked entries) wins over the OCR; a new, low-confidence name is flagged.
   const ocrName = got.to_name && !isNA(got.to_name) ? got.to_name.replace(/\s+/g, " ").trim() : null;
   const known = toAcc && ctx.knownAccounts ? ctx.knownAccounts[toAcc.replace(/\D/g, "")] : null;
-  const toName = known || ocrName;
+  const toName = known || ocrName || payee;
   if (!known && ocrName && conf.to_name < NAME_CONF) flag("recipient", `name unclear (OCR confidence ${Math.round(conf.to_name)})`);
   const sender = { name: fromMe ? ctx.myName || null : null, account_identifier: fromAcc, is_me: fromMe };
   const recipient = { name: toName, account_identifier: toAcc, is_me: toMe };
@@ -102,22 +111,28 @@ export function extractFromCells(cells, tpl, ctx = {}) {
   // Income or spending comes from who sent and who received. The green success screen is shown only to the person
   // who made the transfer, so its sender account is the user's own: if it is not known yet, it is proposed
   // (own_account_hint) and the row is flagged once, until the user confirms the account.
-  const successScreen = tpl.senderOnly && tpl.senderOnly.includes(variant.from_account);
+  // A bill payment: the type says so, or a bill-ID row is present (that row reads reliably; the type text may not).
+  const isBill = got.bill_id !== undefined || !!(got.trx_type && (tpl.billTypes || []).some((b) => normAr(got.trx_type).includes(normAr(b))));
+  const successScreen = isBill || (tpl.senderOnly && tpl.senderOnly.includes(variant.from_account));
   let kind = null, own_account_hint = null;
   if (successScreen && fromAcc && !fromMe) {
     own_account_hint = fromAcc;
     kind = toMe ? "transfer" : "expense";
-    flag("kind", `new account ${fromAcc} sent this transfer: confirm it is yours`);
+    flag("kind", `new account ${fromAcc} sent this ${isBill ? "payment" : "transfer"}: confirm it is yours`);
   } else if (fromMe && toMe) kind = "transfer";
   else if (fromMe) kind = "expense";
   else if (toMe) kind = "income";
   else flag("kind", (ctx.myAccounts || []).length ? "neither account is one of yours" : "add your account numbers to tell income from spending");
 
   // A failed or pending transfer must not be booked as money moved.
-  if (got.status !== undefined && !tpl.success.some((s) => normAr(s) === normAr(got.status))) flag("kind", `status is "${got.status}", not success`);
+  if (got.status !== undefined && !tpl.success.some((s) => normAr(s) === normAr(got.status))) {
+    const failed = matchLabel(got.status, { failure: tpl.failure || [] }, 0.6);
+    if (failed || !tpl.failure) flag("kind", `status is "${got.status}", not success`);
+  }
 
-  const note = got.note && !isNA(got.note) ? got.note.replace(/\s+/g, " ").trim() : null;
-  const hintText = `${note || ""} ${toName || ""}`;
+  const billId = got.bill_id ? got.bill_id.replace(/\s+/g, "") : null;
+  const note = got.note && !isNA(got.note) ? got.note.replace(/\s+/g, " ").trim() : billId ? `${(tpl.billTypes || ["Bill"])[0]} ${billId}` : null;
+  const hintText = `${note || ""} ${toName || ""} ${got.trx_type || ""}`;
   const hint = HINTS.find((h) => h.re.test(normAr(hintText)) || h.re.test(hintText));
 
   return {
@@ -126,6 +141,7 @@ export function extractFromCells(cells, tpl, ctx = {}) {
     sender, recipient, kind, amount, fee: null,
     service_type: hint ? hint.serviceType : tpl.serviceType,
     service_label: got.trx_type ? got.trx_type.trim() : null,
+    bill_id: billId,
     note,
     project_id: ctx.projectId || "p_general", project_name: ctx.projectName || "General",
     category_id: hint ? hint.categoryId : "c_uncategorized",
@@ -151,31 +167,61 @@ async function readText(ocr, crop) {
 }
 
 export async function readImage(img, ocr, templates, ctx = {}) {
-  const cells = findCells(img);
+  const cells = findCells(img).filter((c) => !c.whole);
+  if (!cells.length) return null;
+  const read = async (parts, scale, mode) => { const st = buildStrip(img, parts, scale); return splitLines((await ocr(st, mode)).lines, st.spans); };
+  const side = (s) => cells.map((c) => ({ box: c[s], bg: c.bg }));
   for (const tpl of templates) {
+    // 1. Labels: one read of each half-column; the half where the template's labels are found is the label side.
+    let labSide = null, labs = null;
+    for (const s of ["right", "left"]) {
+      const r = await read(side(s), 2, "mix"), m = r.map((x) => matchLabel(x.text, tpl.labels));
+      if (m.filter(Boolean).length >= Math.min(tpl.minLabels, cells.length)) { labSide = s; labs = m.map((mm, i) => ({ m: mm, r: r[i] })); break; }
+    }
+    if (!labSide) continue;
+    const valSide = labSide === "right" ? "left" : "right", vals = side(valSide);
+    // a label that did not read in the strip: that one cell alone, Arabic only or English only (rare)
+    for (let i = 0; i < cells.length; i++) if (!labs[i].m) for (const [mode, sc] of [["ara", 3], ["eng", 2]]) {
+      const r = await ocr(prepCrop(img, cells[i][labSide], cells[i].bg, sc), mode), m = matchLabel(r.text, tpl.labels);
+      if (m) { labs[i] = { m, r }; break; }
+    }
+    const fieldOf = (i) => labs[i].m && labs[i].m.field;
+    // 2. Values: one Arabic+English read of all values, one digits read of the digit fields.
+    const mix = await read(vals, 3, "mix");
+    const numIdx = cells.map((_, i) => i).filter((i) => tpl.read[fieldOf(i)] === "num");
+    const numR = numIdx.length ? await read(numIdx.map((i) => vals[i]), 3, "num") : [];
+    // safety net: a digit field the strip left empty is read again on its own (one extra call, only when needed)
+    for (let k = 0; k < numIdx.length; k++) if (!numR[k].text.trim()) {
+      const i = numIdx[k]; numR[k] = await ocr(prepCrop(img, vals[i].box, cells[i].bg, 3), "num");
+      if (fieldOf(i) === "amount" && !mix[i].text.trim()) mix[i] = await ocr(prepCrop(img, vals[i].box, cells[i].bg, 3), "mix");
+    }
+    // 3. Arabic-only re-read, in one strip, of the names and comments that came out as Arabic or unsure.
+    const words = (i) => /_account$/.test(fieldOf(i)) && (mix[i].text.match(/\d/g) || []).length < 6;   // a biller in «إلى»
+    const textIdx = cells.map((_, i) => i).filter((i) => (["to_name", "note"].includes(fieldOf(i)) || words(i)) && (hasArabic(mix[i].text) || mix[i].conf < 80));
+    const araR = textIdx.length ? await read(textIdx.map((i) => vals[i]), 3, "ara") : [];
+    // safety net: a name, comment or biller that came back empty is read alone as one raw line (block mode can return
+    // nothing for a short phrase that line mode reads cleanly: «سلفيه نقاشه»)
+    for (let k = 0; k < textIdx.length; k++) {
+      const i = textIdx[k];
+      if (!mix[i].text.trim() && !(araR[k] && araR[k].text.trim())) araR[k] = await ocr(prepCrop(img, vals[i].box, cells[i].bg, 3), "araLine");
+    }
     const rows = [];
-    for (const c of cells) {
-      if (c.whole) continue;
-      const parts = [c.right, c.left].map((box) => ({ box, crop: prepCrop(img, box, c.bg, 3) }));
-      // Which half is the label? Try both, with fallbacks: labels are short, OCR sometimes reads Arabic as Latin, and a
-      // short Latin label can turn to noise at 3× ("Trx. ID") while it reads cleanly at 2×.
-      let lab = null;
-      for (const [mode, scale] of [["mix", 3], ["ara", 3], ["eng", 3], ["mix", 2], ["eng", 2]]) {
-        for (let i = 0; i < 2 && !lab; i++) {
-          const crop = scale === 3 ? parts[i].crop : prepCrop(img, parts[i].box, c.bg, scale);
-          const r = await ocr(crop, mode), m = matchLabel(r.text, tpl.labels);
-          if (m) lab = { i, m, r };
+    for (let i = 0; i < cells.length; i++) {
+      const f = fieldOf(i); if (!f) continue;
+      let val = mix[i];
+      if (tpl.read[f] === "num") {
+        val = { ...numR[numIdx.indexOf(i)] };
+        if (f === "amount") val.alt = mix[i].text;                                // second, independent read (§4.4)
+        if (/_account$/.test(f) && (val.text.match(/\d/g) || []).length < 6) {   // words, not a number: a biller
+          val = mix[i];
+          if (textIdx.includes(i)) { const b = araR[textIdx.indexOf(i)]; if (b.text && b.conf > val.conf) val = b; }
         }
-        if (lab) break;
+      } else if (textIdx.includes(i)) {
+        const b = araR[textIdx.indexOf(i)]; if (b.text && b.conf > val.conf) val = b;
+      } else if (f === "status" && !tpl.success.some((w) => normAr(w) === normAr(val.text))) {
+        const b = await ocr(prepCrop(img, vals[i].box, cells[i].bg, 3), "ara"); if (tpl.success.some((w) => normAr(w) === normAr(b.text))) val = b;
       }
-      if (!lab) continue;
-      const v = parts[1 - lab.i], kind = tpl.read[lab.m.field];
-      let val;
-      if (kind === "num") {
-        val = await ocr(v.crop, "num");
-        if (lab.m.field === "amount") val.alt = (await ocr(v.crop, "eng")).text;   // second, independent read (§4.4)
-      } else val = await readText(ocr, v.crop);
-      rows.push({ a: { text: lab.m.variant, conf: lab.r.conf }, b: val });
+      rows.push({ a: { text: labs[i].m.variant, conf: labs[i].r.conf }, b: val });
     }
     const r = extractFromCells(rows, tpl, ctx);
     if (r) return { ...r, cells: cells.length };

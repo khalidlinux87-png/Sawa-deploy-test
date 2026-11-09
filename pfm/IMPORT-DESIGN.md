@@ -259,6 +259,23 @@ and English; two were scrolled so the top rows were cut off), ~3 s per image in 
 Before the two-read rule one read gave `55000.00` for `35000.00`; it is now caught by the second read. Comments are
 shown for the user to edit and are never used for money.
 
+### 4.7b Bill payments (C276, from the first phone test)
+
+Template v3 adds the green «نجاح» bill-payment screen: the amount may print one decimal (`200000.0`, still read twice),
+«إلى» names the biller (ايصالي) instead of an account, a bill (by its type or its «مُعرف الفاتورة» row) is always spending
+from the user, and the bill ID goes into the note. A Status row flags the entry only when it reads like a failure word;
+OCR noise is not a failure. The reader file is now versioned by name (`/ocr/sawa-reader-<VERSION>.js`) because phones
+keep `/ocr/` cached for good.
+
+### 4.7c Speed: strips (C276, from the second phone test)
+
+Reading each cell on its own cost 30–42 OCR calls per screenshot, and a phone pays a fixed cost per call: over two
+minutes per receipt. Now the crops are stacked into strips (`buildStrip`) and each line is given back to its crop by
+position (`splitLines`): the label column, then all values (Arabic+English, also the amount's second read), then the
+digit fields, then Arabic-only for names and comments: 4–9 calls per screenshot. A digit field a strip leaves empty is
+read on its own. The app starts the engines when the sheet opens and keeps them for 3 minutes after it closes, and shows
+the engine start time and each image's reading time. Known billers are snapped (`billers`).
+
 ### 4.8 In the app (C273)
 
 Ledger → «استيراد». The app loads `/ocr/v1/sawa-reader.js` (built from this folder by `dev/bundle.mjs`) and the OCR

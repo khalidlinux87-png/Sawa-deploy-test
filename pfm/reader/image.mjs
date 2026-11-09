@@ -36,6 +36,11 @@ export function findCells(img, opts = {}) {
   for (let i = 1; i < rules.length; i++) bands.push([rules[i - 1], rules[i]]);
   const hs = bands.map(([a, b]) => b - a).filter((h) => h >= 30).sort((a, b) => a - b);
   const median = hs.length ? hs[hs.length >> 1] : 0, out = [];
+  // A screenshot scrolled down shows the top row cut off: no rule above it. Try the band just above the first rule,
+  // one (tallest) row high; if it holds a label the template knows, it is read like any row, and if not (a title or a
+  // header bar) nothing matches it and it is ignored.
+  const tallest = Math.max(0, ...hs.filter((h) => h <= median * 2.2));
+  if (rules.length && tallest && rules[0] - tallest >= 0) bands.unshift([rules[0] - tallest, rules[0]]);
   for (const [a, b] of bands) {
     const h = b - a;
     if (h < 30 || h > median * 2.2) continue;                       // gaps between cells, or big blocks (buttons, footers)
@@ -76,4 +81,38 @@ export function prepCrop(img, { x, y, w, h }, bg, scale = 2) {
     const i = (yy * W + xx) * 4; data[i] = data[i + 1] = data[i + 2] = l; data[i + 3] = 255;
   }
   return { width: W, height: H, data };
+}
+
+/**
+ * Several crops stacked into one image, so one OCR call reads them all (a phone pays a fixed cost per call: reading
+ * 30 crops one by one took minutes). Each crop is stretched so its own background is white, with white gaps between.
+ * Returns the pixels and, per crop, the y range it occupies, to give each OCR line back to its crop.
+ */
+export function buildStrip(img, parts, scale = 3, gap = 28) {
+  const crops = parts.map((p) => {
+    const c = prepCrop(img, p.box, p.bg, scale), d = c.data, hist = new Uint32Array(256);
+    for (let i = 0; i < d.length; i += 16) hist[d[i]]++;
+    let bgL = 255; for (let v = 255, best = -1; v >= 0; v--) if (hist[v] > best) { best = hist[v]; bgL = v; }
+    if (bgL > 0 && bgL < 255) for (let i = 0; i < d.length; i += 4) d[i] = d[i + 1] = d[i + 2] = Math.min(255, Math.round((d[i] * 255) / bgL));
+    return c;
+  });
+  const top = gap * 2;                                     // a wider top margin: text too near the edge can be dropped
+  const W = Math.max(1, ...crops.map((c) => c.width)) + gap * 2, H = top + crops.reduce((a, c) => a + c.height + gap, 0) + gap;
+  const data = new Uint8ClampedArray(W * H * 4).fill(255), spans = [];
+  let y = top;
+  for (const c of crops) {
+    for (let r = 0; r < c.height; r++) data.set(c.data.subarray(r * c.width * 4, (r + 1) * c.width * 4), ((y + r) * W + gap) * 4);
+    spans.push([y, y + c.height]); y += c.height + gap;
+  }
+  return { width: W, height: H, data, spans };
+}
+
+/** OCR lines ({text, conf, y0, y1}) → one {text, conf} per strip span, by where each line's middle falls. */
+export function splitLines(lines, spans) {
+  const out = spans.map(() => ({ parts: [], confs: [] }));
+  for (const l of lines || []) {
+    const mid = (l.y0 + l.y1) / 2, k = spans.findIndex(([a, b]) => mid >= a - 6 && mid <= b + 6);
+    if (k >= 0 && l.text.trim()) { out[k].parts.push(l.text.trim()); out[k].confs.push(l.conf); }
+  }
+  return out.map((o) => ({ text: o.parts.join(" "), conf: o.confs.length ? o.confs.reduce((a, b) => a + b, 0) / o.confs.length : 0 }));
 }
