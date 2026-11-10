@@ -13,7 +13,7 @@
 
 import { PfmError, paths } from "./projects-core.mjs";
 
-export const PROJECTS_SCHEMA_VERSION = 1;
+export const PROJECTS_SCHEMA_VERSION = 2;
 
 export const MIGRATIONS = Object.freeze([
   {
@@ -21,6 +21,15 @@ export const MIGRATIONS = Object.freeze([
     name: "projects_init",
     // The Projects collections are new, so there is nothing to backfill. This step only records the baseline,
     // so that later migrations know which shape a user's documents have.
+    async up() {},
+    async down() {},
+  },
+  {
+    version: 2,
+    name: "dated_prices_and_files",
+    // C284: BOQ lines gain priceDate, supplier, pricedAt and priceLog; projects gain files/{fid} and files/{fid}/parts.
+    // Nothing is rewritten: a line without priceDate/pricedAt reads as priced when its revision was created
+    // (priceDateOfRow / pricedAtOfRow in pfm-worker.mjs), and a missing priceLog reads as that single price.
     async up() {},
     async down() {},
   },

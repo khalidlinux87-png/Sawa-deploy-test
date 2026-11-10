@@ -241,3 +241,10 @@ in the PDF and as native workbook data (P6e). Charts show the same numbers as th
 - `pfm.proj.report` → `{filename, html}`. A self-contained HTML page: summary cards, category bars, estimate lines, entries.
   All user text is escaped. The app saves it as a file; open it in the browser and print, or save as PDF.
 - Excel (.xlsx) is not built. Open the CSV in Excel or Google Sheets.
+
+---
+
+## 12. Dated prices, price history and attachments (C284, schema v2)
+- **Line fields:** `priceDate` (date on the quote; default the user's today; not before 2000, not after today), `supplier` 🔒, `pricedAt` ⚙ (server time the price was entered), `priceLog` ⚙ `[{ unitPrice, priceDate, pricedAt, by, revision, supplier🔒 }]`. Saving a draft with the same price, date and supplier keeps the stamp; any change appends an entry (≤ 60, the first is always kept). A revision started from the baseline copies the log, so history follows the `lineKey`. Lines saved before v2 read as priced when their revision was created.
+- **`pfmProjects/{pid}/files/{fid}`** `{ target: {type: project|estimate|line|tx, estimateId?, lineKey?, txId?}, kind: photo|quote|supplier_invoice|receipt|other, name🔒, note🔒, type, size, sha256, parts, docDate, quotedUnitPrice, uploadedAt ⚙, uploadedBy ⚙, removedAt ⚙, removedBy ⚙, removeReason🔒 }`; bytes in `files/{fid}/parts/{000…}` (sealed base64, 384 KB raw each). JPEG/PNG/WebP/PDF by their bytes, ≤ 4 MB, ≤ 20 per target, ≤ 300 per project. Never edited; removal keeps the record and deletes the parts. Editors add/remove, viewers list/open.
+- **`pfm.proj.prices`** `{ pid, lineKey? }` → per line: `estimates` (all revisions, de-duplicated, by `pricedAt`), `quotes` (from quote files with a price), `actual` (posted expenses on the line with a quantity: amount ÷ quantity), `changeBp` (latest vs first estimate), `actualVsEstimateBp` (paid vs the estimate whose `priceDate` was in force on each purchase day).

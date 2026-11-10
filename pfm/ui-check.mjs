@@ -3,7 +3,7 @@
 // Needs Playwright with Chromium. The CDNs are replaced by local React and an empty Firebase, so it runs offline.
 import { createRequire } from "module";
 import http from "node:http";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -34,6 +34,7 @@ async function session(lang, dark) {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, locale: lang === "ar" ? "ar-SA" : "en-US", timezoneId: "Europe/Berlin" });
   await ctx.route("https://unpkg.com/react@18.3.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/react/umd/react.production.min.js"), contentType: "text/javascript" }));
   await ctx.route("https://unpkg.com/react-dom@18.3.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/react-dom/umd/react-dom.production.min.js"), contentType: "text/javascript" }));
+  await ctx.route("https://unpkg.com/html2canvas@1.4.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/html2canvas/dist/html2canvas.min.js"), contentType: "text/javascript", headers: { "Access-Control-Allow-Origin": "*" } }));   // C284
   await ctx.route(/gstatic\.com|googleapis\.com|fonts\./, (r) => r.fulfill({ body: "", contentType: "text/javascript" }));
   await ctx.addInitScript((l) => { try { localStorage.setItem("sawaLang", l); } catch (e) {} }, lang);
   const page = await ctx.newPage();
@@ -251,8 +252,19 @@ if (!alertsFired.some((x) => x === "c_food:10000")) errors.push("expected the fo
   await H.getByRole("button", { name: "سجّل الدفعة" }).click();
   await H.getByText(/متبقٍّ من/).waitFor();
   await shot(page, "p3-3-detail-ar");
-  // print: the server renders the page into a hidden frame
-  await H.getByRole("button", { name: "طباعة أو PDF" }).click();
+  // C284: "Download PDF" makes a real file (the server's, or here on the device); "Print" stays for browsers
+  {
+    const dl = page.waitForEvent("download", { timeout: 60000 });
+    await H.getByRole("button", { name: "تنزيل PDF" }).click();
+    const file = await dl;
+    const bytes = readFileSync(await file.path());
+    if (bytes.subarray(0, 5).toString() !== "%PDF-") errors.push("invoice PDF is not a PDF");
+    if (!/^invoice-INV-\d{4}-0001\.pdf$/.test(file.suggestedFilename())) errors.push("invoice PDF name: " + file.suggestedFilename());
+    await file.saveAs(`${OUT}/p3-invoice-device-ar.pdf`);
+    await H.getByText(/نُزّل ملفّ PDF/).waitFor();
+  }
+  // print: the server renders the page into a frame
+  await H.getByRole("button", { name: "طباعة", exact: true }).click();
   await page.waitForFunction(() => [...document.querySelectorAll("iframe")].some((f) => /INV-\d{4}-0001/.test(f.srcdoc || "")));
   const printed = await page.evaluate(() => [...document.querySelectorAll("iframe")].map((f) => f.srcdoc).find((x) => /INV-/.test(x)));
   const pp = await ctx.newPage(); await pp.setViewportSize({ width: 794, height: 1100 }); await pp.setContent(printed);
@@ -275,6 +287,7 @@ if (invs.items.length !== 1 || invs.items[0].status !== "sent" || invs.items[0].
   const payPage = async (scheme, locale) => {
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, locale, colorScheme: scheme });
     await ctx.route(/fonts\./, (r) => r.fulfill({ body: "" }));
+  await ctx.route("https://unpkg.com/html2canvas@1.4.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/html2canvas/dist/html2canvas.min.js"), contentType: "text/javascript", headers: { "Access-Control-Allow-Origin": "*" } }));   // C284
     await ctx.route("https://sawa-deploy-test.khalidlinux87.workers.dev/pfm/pay", async (r) => {
       const b = JSON.parse(r.request().postData() || "{}");
       let out; try { out = { ok: true, ...(await handlePfmPublic(b.op, b.payload, env, d, "203.0.113.7")) }; } catch (e) { out = { ok: false, error: e.message }; }
@@ -295,28 +308,59 @@ if (invs.items.length !== 1 || invs.items[0].status !== "sent" || invs.items[0].
     await page.getByRole("button", { name: /عرض الفاتورة كاملةً/ }).click();
     await page.waitForFunction(() => /INV-/.test(document.getElementById("frame").srcdoc || ""));
     await page.getByRole("button", { name: "إغلاق" }).click();
+    // C284: the full invoice as a PDF from the pay page
+    await page.getByRole("button", { name: /عرض الفاتورة كاملةً/ }).click();
+    {
+      const dl = page.waitForEvent("download", { timeout: 60000 });
+      await page.getByRole("button", { name: "تنزيل PDF" }).click();
+      const f = await dl; if (readFileSync(await f.path()).subarray(0, 5).toString() !== "%PDF-") errors.push("pay page PDF is not a PDF");
+    }
+    await page.getByRole("button", { name: "إغلاق" }).click();
+    // C284: a part payment with a PDF receipt
+    await page.getByRole("radio", { name: /دفعة جزئيّة/ }).check();
+    await page.getByLabel("المبلغ الذي دفعته الآن").fill("1000");
     await page.getByLabel("اسمك").fill("سارة أحمد");
     await page.getByLabel(/رقم العمليّة/).fill("FT2611-7781");
-    await page.getByLabel(/صورة الإيصال/).setInputFiles(`${OUT}/logo.png`);
+    writeFileSync(`${OUT}/receipt.pdf`, "%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n");
+    await page.getByLabel(/إيصال الدفع/).setInputFiles(`${OUT}/receipt.pdf`);
+    await page.screenshot({ path: `${OUT}/p4-2a-pay-partial-form-ar.png`, fullPage: true });
     await page.getByRole("button", { name: "أبلغ عن الدفع" }).click();
     await page.getByText(/وصل بلاغك/).waitFor();
-    await page.screenshot({ path: `${OUT}/p4-2-pay-reported-ar.png` });
+    await page.getByText("مدفوعة جزئيّاً").waitFor();
+    await page.screenshot({ path: `${OUT}/p4-2-pay-reported-ar.png`, fullPage: true });
+    // the rest, in full, with a photo
+    await page.getByRole("button", { name: "الإبلاغ عن دفعة أخرى" }).click();
+    await page.getByText(/كلّ المتبقّي/).waitFor();
+    await page.getByLabel("اسمك").fill("سارة أحمد");
+    await page.getByLabel(/إيصال الدفع/).setInputFiles(`${OUT}/logo.png`);
+    await page.getByRole("button", { name: "أبلغ عن الدفع" }).click();
+    await page.getByText(/أبلغتَ عن دفع المبلغ كاملاً/).waitFor();
+    await page.screenshot({ path: `${OUT}/p4-2b-pay-pending-ar.png`, fullPage: true });
+    if (await page.locator("#claim").count()) errors.push("pay form still shown with nothing left to report");
     await ctx.close();
   }
   // the issuer sees it, checks the receipt, confirms
   {
     const { ctx, page: pg } = await session("ar", false); const page = pg; const H = pg.locator("#pfmhost");
     page.on("dialog", (dl) => dl.accept());
-    await H.getByText(/بلاغ دفع من عملائك/).waitFor();
-    await H.getByText(/بلاغ دفع من عملائك/).click();
-    await H.getByText(/بلاغ دفع ينتظر تحقّقك/).waitFor();
+    await H.getByText(/2 بلاغات دفع من عملائك/).waitFor();
+    await H.getByText(/بلاغات دفع من عملائك/).click();
+    await H.getByText(/2 بلاغات دفع تنتظر تحقّقك/).waitFor();
     await H.getByRole("button", { name: /شركة النيل/ }).click();
-    await H.getByText(/يقول إنّه دفع/).waitFor();
+    await H.getByText(/يقول إنّه دفع/).first().waitFor();
+    await H.getByText("مدفوعة — بانتظار تحقّقك").first().waitFor();
     await shot(page, "p4-3-report-ar");
-    await H.getByRole("button", { name: "الإيصال" }).click();
+    {
+      const dl = page.waitForEvent("download", { timeout: 30000 });
+      await H.getByRole("button", { name: "الإيصال (PDF)" }).click();
+      const f = await dl; if (readFileSync(await f.path()).subarray(0, 5).toString() !== "%PDF-") errors.push("PDF receipt did not open as a PDF");
+    }
+    await H.getByRole("button", { name: "الإيصال", exact: true }).click();
     await H.getByRole("img", { name: "صورة الإيصال" }).waitFor();
     await H.getByRole("img", { name: "صورة الإيصال" }).click();
-    await H.getByRole("button", { name: "وصل — أكّد" }).click();
+    await H.getByRole("button", { name: "وصل — أكّد" }).first().click();
+    await H.getByText(/متبقٍّ من/).waitFor();
+    await H.getByRole("button", { name: "وصل — أكّد" }).first().click();
     await H.getByText(/دُفعت كاملةً/).waitFor();
     await ctx.close();
   }
@@ -412,6 +456,7 @@ if (invs.items.length !== 1 || invs.items[0].status !== "sent" || invs.items[0].
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, locale: "ar-SA", timezoneId: "Europe/Berlin" });
   await ctx.route("https://unpkg.com/react@18.3.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/react/umd/react.production.min.js"), contentType: "text/javascript" }));
   await ctx.route("https://unpkg.com/react-dom@18.3.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/react-dom/umd/react-dom.production.min.js"), contentType: "text/javascript" }));
+  await ctx.route("https://unpkg.com/html2canvas@1.4.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/html2canvas/dist/html2canvas.min.js"), contentType: "text/javascript", headers: { "Access-Control-Allow-Origin": "*" } }));   // C284
   await ctx.route(/gstatic\.com|googleapis\.com|fonts\./, (r) => r.fulfill({ body: "", contentType: "text/javascript" }));
   const page = await ctx.newPage();
   page.on("pageerror", (e) => errors.push("wallet pageerror: " + e.message));

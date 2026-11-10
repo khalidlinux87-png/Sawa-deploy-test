@@ -9,13 +9,13 @@ const L = {
         subtotal: "المجموع الفرعيّ", discount: "خصم الفاتورة", taxOn: "الضريبة", total: "الإجماليّ", paid: "المدفوع", balance: "المستحقّ",
         payWith: "ادفع بمحفظة سوا", payWithCard: "ادفع بمحفظة سوا أو بالبطاقة", viewOnline: "اعرض الفاتورة وأبلغ عن دفعك", scan: "امسح الرمز أو افتح الرابط", notes: "ملاحظات",
         payTo: "طرق الدفع", holder: "اسم صاحب الحساب", acct: "رقم الحساب", branch: "الفرع", ref: "اكتب رقم الفاتورة في خانة البيان",
-        status: { draft: "مسوّدة", sent: "مُرسلة", paid: "مدفوعة", overdue: "متأخّرة", cancelled: "ملغاة" } },
+        status: { draft: "مسوّدة", sent: "مُرسلة", paid: "مدفوعة", overdue: "متأخّرة", cancelled: "ملغاة", partially_paid: "مدفوعة جزئيّاً", pending_verification: "مدفوعة — بانتظار التحقّق" } },
   en: { invoice: "Invoice", no: "Invoice no.", issued: "Issue date", due: "Due date", from: "From", to: "Bill to", taxId: "Tax ID",
         desc: "Description", qty: "Qty", price: "Unit price", disc: "Discount", tax: "Tax", amount: "Amount (excl. tax)",
         subtotal: "Subtotal", discount: "Invoice discount", taxOn: "Tax", total: "Total", paid: "Paid", balance: "Balance due",
         payWith: "Pay with Sawa Wallet", payWithCard: "Pay with Sawa Wallet or card", viewOnline: "View the invoice and report your payment", scan: "Scan the code or open the link", notes: "Notes",
         payTo: "Payment details", holder: "Account holder", acct: "Account no.", branch: "Branch", ref: "Use the invoice number as the payment reference",
-        status: { draft: "Draft", sent: "Sent", paid: "Paid", overdue: "Overdue", cancelled: "Cancelled" } },
+        status: { draft: "Draft", sent: "Sent", paid: "Paid", overdue: "Overdue", cancelled: "Cancelled", partially_paid: "Partially paid", pending_verification: "Paid — pending verification" } },
 };
 
 /** inv: { number, lang, issueDate, dueDate, status, issuer{name,contact,taxId,address,logoDataUri?}, client{...}, items[], notes, payUrl,
@@ -43,7 +43,7 @@ export function renderInvoiceHtml(inv, totals, qrSvg = "") {
 header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #0f766e;padding-bottom:10px}
 h1{margin:0;font-size:22pt;color:#0f766e}.meta div{display:flex;gap:10px;justify-content:space-between}.muted,.lbl{color:#5b6470}
 .badge{display:inline-block;padding:1px 10px;border-radius:10px;font-size:9pt;background:#e6f4f1;color:#0f766e}
-.badge.overdue{background:#fdecec;color:#b42318}.badge.paid{background:#e7f6ea;color:#1e7b34}.badge.cancelled{background:#eee;color:#555}
+.badge.overdue{background:#fdecec;color:#b42318}.badge.partially_paid,.badge.pending_verification{background:#fff4e0;color:#8a4b00}.badge.paid{background:#e7f6ea;color:#1e7b34}.badge.cancelled{background:#eee;color:#555}
 .parties{display:flex;gap:24px;margin:16px 0}.party{flex:1}.nm{font-weight:700;font-size:12pt}
 table.items{width:100%;border-collapse:collapse}table.items th{background:#f2f5f7;font-weight:600;text-align:start;padding:6px}
 table.items td{padding:6px;border-bottom:1px solid #e3e7ea;vertical-align:top}table.items td:not(.d),table.items th:not(:first-child){text-align:end;white-space:nowrap}
@@ -57,7 +57,7 @@ table.sum tr.total td{font-weight:700;font-size:12.5pt;border-top:2px solid #1a1
 .brand{display:flex;gap:12px;align-items:center}.brand img{max-height:56px;max-width:140px;object-fit:contain}
 .accts{margin-top:16px;break-inside:avoid}.accts .grid{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0}.acct{flex:1 1 30%;min-width:160px;border:1px solid #e3e7ea;border-radius:8px;padding:6px 8px;font-size:9.5pt}.acct b{display:block}.small{font-size:8.5pt}
 </style></head><body>
-<header><div class="brand">${logo(inv.issuer.logoDataUri)}<div><h1>${t.invoice}</h1><span class="badge ${esc(inv.status)}">${t.status[inv.status] || ""}</span></div></div>
+<header><div class="brand">${logo(inv.issuer.logoDataUri)}<div><h1>${t.invoice}</h1><span class="badge ${esc(badgeOf(inv))}">${t.status[badgeOf(inv)] || ""}</span></div></div>
 <div class="meta"><div><span>${t.no}</span><b class="num">${esc(inv.number)}</b></div><div><span>${t.issued}</span><span class="num" dir="ltr">${esc(inv.issueDate)}</span></div>
 <div><span>${t.due}</span><span class="num" dir="ltr">${esc(inv.dueDate)}</span></div></div></header>
 <section class="parties">${party(inv.issuer, "from")}${party(inv.client, "to")}</section>
@@ -77,6 +77,8 @@ const auto = (v) => (/[\u0600-\u06FF]/.test(v) ? esc(v) : `<span class="num" dir
 // The pay-link block names only the ways to pay that are switched on. With wallet and card off,
 // the link still lets the client view the invoice and report a transfer.
 const payLabel = (m, t) => (m.includes("wallet") ? (m.includes("card") ? t.payWithCard : t.payWith) : t.viewOnline);
+// C284: an invoice with money on it shows that state ("Partially paid", "Paid — pending verification"), not just "Sent".
+const badgeOf = (inv) => (inv.payState === "partially_paid" || inv.payState === "pending_verification" ? inv.payState : inv.status);
 const payable = (inv) => inv.status === "sent" || inv.status === "overdue" || inv.status === "draft";
 // Only data: URIs pass, and only raster types (see sniffLogo). The renderer also blocks all network requests.
 const logo = (u) => (/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(u || "") ? `<img src="${u}" alt="">` : "");
