@@ -34,7 +34,7 @@ async function session(lang, dark) {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, locale: lang === "ar" ? "ar-SA" : "en-US", timezoneId: "Europe/Berlin" });
   await ctx.route("https://unpkg.com/react@18.3.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/react/umd/react.production.min.js"), contentType: "text/javascript" }));
   await ctx.route("https://unpkg.com/react-dom@18.3.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/react-dom/umd/react-dom.production.min.js"), contentType: "text/javascript" }));
-  await ctx.route("https://unpkg.com/html2canvas@1.4.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/html2canvas/dist/html2canvas.min.js"), contentType: "text/javascript", headers: { "Access-Control-Allow-Origin": "*" } }));   // C284
+  await ctx.route("https://unpkg.com/html2canvas@1.4.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/html2canvas/dist/html2canvas.min.js"), contentType: "text/javascript", headers: { "Access-Control-Allow-Origin": "*" } }));   // C287
   await ctx.route(/gstatic\.com|googleapis\.com|fonts\./, (r) => r.fulfill({ body: "", contentType: "text/javascript" }));
   await ctx.addInitScript((l) => { try { localStorage.setItem("sawaLang", l); } catch (e) {} }, lang);
   const page = await ctx.newPage();
@@ -252,7 +252,7 @@ if (!alertsFired.some((x) => x === "c_food:10000")) errors.push("expected the fo
   await H.getByRole("button", { name: "سجّل الدفعة" }).click();
   await H.getByText(/متبقٍّ من/).waitFor();
   await shot(page, "p3-3-detail-ar");
-  // C284: "Download PDF" makes a real file (the server's, or here on the device); "Print" stays for browsers
+  // C287: "Download PDF" makes a real file (the server's, or here on the device); "Print" stays for browsers
   {
     const dl = page.waitForEvent("download", { timeout: 60000 });
     await H.getByRole("button", { name: "تنزيل PDF" }).click();
@@ -287,7 +287,7 @@ if (invs.items.length !== 1 || invs.items[0].status !== "sent" || invs.items[0].
   const payPage = async (scheme, locale) => {
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, locale, colorScheme: scheme });
     await ctx.route(/fonts\./, (r) => r.fulfill({ body: "" }));
-  await ctx.route("https://unpkg.com/html2canvas@1.4.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/html2canvas/dist/html2canvas.min.js"), contentType: "text/javascript", headers: { "Access-Control-Allow-Origin": "*" } }));   // C284
+  await ctx.route("https://unpkg.com/html2canvas@1.4.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/html2canvas/dist/html2canvas.min.js"), contentType: "text/javascript", headers: { "Access-Control-Allow-Origin": "*" } }));   // C287
     await ctx.route("https://sawa-deploy-test.khalidlinux87.workers.dev/pfm/pay", async (r) => {
       const b = JSON.parse(r.request().postData() || "{}");
       let out; try { out = { ok: true, ...(await handlePfmPublic(b.op, b.payload, env, d, "203.0.113.7")) }; } catch (e) { out = { ok: false, error: e.message }; }
@@ -308,7 +308,7 @@ if (invs.items.length !== 1 || invs.items[0].status !== "sent" || invs.items[0].
     await page.getByRole("button", { name: /عرض الفاتورة كاملةً/ }).click();
     await page.waitForFunction(() => /INV-/.test(document.getElementById("frame").srcdoc || ""));
     await page.getByRole("button", { name: "إغلاق" }).click();
-    // C284: the full invoice as a PDF from the pay page
+    // C287: the full invoice as a PDF from the pay page
     await page.getByRole("button", { name: /عرض الفاتورة كاملةً/ }).click();
     {
       const dl = page.waitForEvent("download", { timeout: 60000 });
@@ -316,7 +316,7 @@ if (invs.items.length !== 1 || invs.items[0].status !== "sent" || invs.items[0].
       const f = await dl; if (readFileSync(await f.path()).subarray(0, 5).toString() !== "%PDF-") errors.push("pay page PDF is not a PDF");
     }
     await page.getByRole("button", { name: "إغلاق" }).click();
-    // C284: a part payment with a PDF receipt
+    // C287: a part payment with a PDF receipt
     await page.getByRole("radio", { name: /دفعة جزئيّة/ }).check();
     await page.getByLabel("المبلغ الذي دفعته الآن").fill("1000");
     await page.getByLabel("اسمك").fill("سارة أحمد");
@@ -456,7 +456,7 @@ if (invs.items.length !== 1 || invs.items[0].status !== "sent" || invs.items[0].
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, locale: "ar-SA", timezoneId: "Europe/Berlin" });
   await ctx.route("https://unpkg.com/react@18.3.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/react/umd/react.production.min.js"), contentType: "text/javascript" }));
   await ctx.route("https://unpkg.com/react-dom@18.3.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/react-dom/umd/react-dom.production.min.js"), contentType: "text/javascript" }));
-  await ctx.route("https://unpkg.com/html2canvas@1.4.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/html2canvas/dist/html2canvas.min.js"), contentType: "text/javascript", headers: { "Access-Control-Allow-Origin": "*" } }));   // C284
+  await ctx.route("https://unpkg.com/html2canvas@1.4.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/html2canvas/dist/html2canvas.min.js"), contentType: "text/javascript", headers: { "Access-Control-Allow-Origin": "*" } }));   // C287
   await ctx.route(/gstatic\.com|googleapis\.com|fonts\./, (r) => r.fulfill({ body: "", contentType: "text/javascript" }));
   const page = await ctx.newPage();
   page.on("pageerror", (e) => errors.push("wallet pageerror: " + e.message));

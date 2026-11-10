@@ -1191,7 +1191,7 @@ async function opInvHtml(x) {
   return { html, number: inv.number, status: inv.status, payState: inv.payState };
 }
 
-// C284: a PDF file of the invoice. With Browser Rendering configured (invoice-pdf.mjs) the Worker returns the file;
+// C287: a PDF file of the invoice. With Browser Rendering configured (invoice-pdf.mjs) the Worker returns the file;
 // otherwise, or if rendering fails, it returns the same HTML with pdf: null and the app makes the PDF on the phone.
 // Either way the app gets something to save, so the button never silently does nothing.
 async function opInvPdf(x) {
@@ -1246,7 +1246,7 @@ async function overdueSweep(env, d, token, max) {
 
 export const PAY_ORIGIN = "https://www.sawaaap.com";
 const payUrl = (token) => `${PAY_ORIGIN}/pay/${token}`;
-// C284: invoices sent before C267 have no token, so "Share" and "Copy pay link" had nothing to give. The link is now
+// C287: invoices sent before C267 have no token, so "Share" and "Copy pay link" had nothing to give. The link is now
 // made on first request (one commit: the token document must not exist, and the invoice must be unchanged).
 async function opInvLink(x) {
   let token = null;
@@ -1343,7 +1343,7 @@ async function payClaim(x, link, inv0) {
     if (link.revoked || !(inv.status === "sent" || inv.status === "overdue")) throw new C.PfmError("not_payable", inv.status);
     if ((inv.openClaims || 0) >= 5) throw new C.PfmError("claim_pending", "the issuer has not answered earlier reports yet");
     const room = inv.totals.total - (inv.amountPaid || 0) - (inv.claimedAmount || 0);
-    // C284: the payer says "full" or "partial". Full means everything still open, whatever was typed;
+    // C287: the payer says "full" or "partial". Full means everything still open, whatever was typed;
     // partial needs an amount below that. Old pages send no payType and keep the old meaning (the amount decides).
     const payType = p.payType == null ? null : p.payType;
     if (payType !== null && payType !== "full" && payType !== "partial") throw new C.PfmError("bad_pay_type");
@@ -1365,7 +1365,7 @@ async function payClaim(x, link, inv0) {
     const at = p.paidAt && DATE.test(p.paidAt) && p.paidAt <= today ? p.paidAt : today;
     let proofDoc = null;
     if (p.proof) {
-      // C284: a photo or a PDF (a bank's e-receipt). Judged by its bytes, not by the name the browser gave it.
+      // C287: a photo or a PDF (a bank's e-receipt). Judged by its bytes, not by the name the browser gave it.
       const f = checkFileData(p.proof, "bad_proof", PROOF_MAX);
       const name = txt(p.proofName, 120, "proof_name");
       proofDoc = { data: `data:${f.type};base64,${f.b64}`, type: f.type, size: f.bytes.length, name: name ? await seal(x, name) : "", at: now() };
@@ -1467,7 +1467,7 @@ export function checkImageData(data, code, max) {
   return { type, b64: m[3], bytes };
 }
 
-// C284: a data: URI of a photo or a PDF, judged by its bytes (the declared type must match). Returns { type, b64, bytes }.
+// C287: a data: URI of a photo or a PDF, judged by its bytes (the declared type must match). Returns { type, b64, bytes }.
 export const PROOF_MAX = 600 * 1024;   // base64 ≈ 800 KB: fits one Firestore document (1 MiB) with room for the fields
 export function checkFileData(data, code, max) {
   const m = /^data:(image\/(?:png|jpeg|webp)|application\/pdf);base64,([A-Za-z0-9+/=]+)$/.exec(String(data || ""));
@@ -1601,7 +1601,7 @@ const PJ_OPS = {
   "pfm.proj.members.remove": opMembersRemove,
   "pfm.proj.invite.create": opInviteCreate,
   "pfm.proj.invite.accept": opInviteAccept,
-  // C284: attachments with fixed dates, and price history per BOQ line
+  // C287: attachments with fixed dates, and price history per BOQ line
   "pfm.proj.file.add": opFileAdd,
   "pfm.proj.file.list": opFileList,
   "pfm.proj.file.get": opFileGet,
@@ -1812,7 +1812,7 @@ export async function dropProject(d, token, pid, spend) {
   for (const e of await d.fsList(token, J.paths.estimates(pid))) {
     if (!(await drain(d, token, J.paths.lines(pid, e.name.split("/").pop()), spend))) return false;
   }
-  for (const f of await d.fsList(token, J.paths.files(pid))) {          // C284: attachments' bytes, then their records
+  for (const f of await d.fsList(token, J.paths.files(pid))) {          // C287: attachments' bytes, then their records
     if (!(await drain(d, token, J.paths.parts(pid, f.name.split("/").pop()), spend))) return false;
   }
   for (const rel of [J.paths.estimates(pid), J.paths.tx(pid), J.paths.alerts(pid), J.paths.files(pid), J.paths.members(pid)]) {
@@ -1839,13 +1839,13 @@ async function lineRow(x, pid, v, sortOrder, stamp) {
   return {
     category: v.category, unit: v.unit, estQty: J.qtyText(v.estQty), estUnitPrice: v.estUnitPrice, estTotal: v.estTotal,
     name: await sealP(x, pid, v.name), notes: await sealP(x, pid, txt(v.notes, 300, "notes")), sortOrder,
-    // C284: when and from whom this price was quoted; the server time it was entered; every earlier price
+    // C287: when and from whom this price was quoted; the server time it was entered; every earlier price
     priceDate: v.priceDate, supplier: await sealP(x, pid, v.supplier || null), pricedAt: stamp.pricedAt, priceLog: stamp.priceLog,
   };
 }
 // The fields copied when a revision starts from the baseline (the price history travels with the line).
 const LINE_FIELDS = ["category", "unit", "estQty", "estUnitPrice", "estTotal", "name", "notes", "sortOrder", "priceDate", "supplier", "pricedAt", "priceLog"];
-// Lines written before C284 have no price date: they count as priced when their revision was created.
+// Lines written before C287 have no price date: they count as priced when their revision was created.
 const priceDateOfRow = (r, est) => r.priceDate || (est && est.createdAt ? String(est.createdAt).slice(0, 10) : null);
 const pricedAtOfRow = (r, est) => r.pricedAt || (est ? est.createdAt : null) || null;
 async function openLog(x, pid, log) {
@@ -2415,7 +2415,7 @@ async function opProjReport(x) {
 }
 
 // =====================================================================================================
-// C284: project attachments (photos, quotes, supplier invoices, receipts) and price history per BOQ line.
+// C287: project attachments (photos, quotes, supplier invoices, receipts) and price history per BOQ line.
 // pfmProjects/{pid}/files/{fid}            { target, kind, name🔒, note🔒, type, size, sha256, parts, docDate, quotedUnitPrice,
 //                                            uploadedAt ⚙, uploadedBy ⚙, removedAt ⚙, removedBy ⚙, removeReason🔒 }
 // pfmProjects/{pid}/files/{fid}/parts/{n}  { data: 🔒 base64 slice }
@@ -2552,7 +2552,7 @@ async function opProjPrices(x) {
   return { currency: p.currency, lines };
 }
 
-// C284: the project report as a PDF file (same contract as inv.pdf: the file, or the HTML for the phone to convert).
+// C287: the project report as a PDF file (same contract as inv.pdf: the file, or the HTML for the phone to convert).
 async function opProjReportPdf(x) {
   const r = await opProjReport(x);
   const filename = pdfName(r.filename.replace(/\.html$/, ""));

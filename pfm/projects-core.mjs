@@ -119,7 +119,7 @@ export function validateProjectInput(input = {}) {
 }
 
 // One BOQ line. estQty is text ("2.5") or BigInt; estUnitPrice is text or minor units.
-// C284: every price carries the date it was quoted (priceDate, the date on the supplier's quote or the day it was
+// C287: every price carries the date it was quoted (priceDate, the date on the supplier's quote or the day it was
 // checked) and optionally who quoted it. `today` (the user's local date) is the default and the upper bound.
 export function validateBoqLine(input = {}, currency, today = null) {
   if (!ID_RE.test(input.lineKey ?? "")) throw new PfmError("bad_line_key", String(input.lineKey));
@@ -144,13 +144,13 @@ export function validateBoqLine(input = {}, currency, today = null) {
 const MIN_DOC_DATE = "2000-01-01";
 // A date on a document or a quote: a real date, not before 2000, not after today (when today is known).
 function priceDateOf(v, today) {
-  if (v == null || v === "") return today ? assertDate(today, "bad_price_date") : null;   // no date and no "today": callers that predate C284
+  if (v == null || v === "") return today ? assertDate(today, "bad_price_date") : null;   // no date and no "today": callers that predate C287
   assertDate(v, "bad_price_date");
   if (v < MIN_DOC_DATE || (today && v > today)) throw new PfmError("bad_price_date", "out of range");
   return v;
 }
 
-// ---------- price history (C284) ----------
+// ---------- price history (C287) ----------
 // Each BOQ line keeps a priceLog: one entry per price change, stamped by the server. The log is copied into the next
 // revision with the line, so the history follows the lineKey across change orders. Approved revisions are read-only,
 // so a past price can never be rewritten. Entries: { unitPrice, priceDate, pricedAt, by, revision, supplier? }.
@@ -188,7 +188,7 @@ export function priceHistory(lineKey, logs, quotes, txs) {
     seen.add(k); est.push(e);
   }
   est.sort((a, b) => (a.pricedAt < b.pricedAt ? -1 : a.pricedAt > b.pricedAt ? 1 : 0));
-  // lines saved before C284 have no log; each revision then yields one stand-in entry. Keep it only when the price moved.
+  // lines saved before C287 have no log; each revision then yields one stand-in entry. Keep it only when the price moved.
   for (let i = est.length - 1; i > 0; i--) if (est[i].by == null && est[i].unitPrice === est[i - 1].unitPrice && est[i].priceDate === est[i - 1].priceDate) est.splice(i, 1);
   const actual = txs.filter((t) => t.status !== "voided" && t.kind === "expense" && t.lineKey === lineKey && t.quantity)
     .map((t) => ({ txId: t.id, occurredOn: t.occurredOn, quantity: t.quantity, amount: t.amount, unitPrice: actualUnitPrice(t.amount, t.quantity), createdAt: t.createdAt }))
@@ -209,7 +209,7 @@ export function priceHistory(lineKey, logs, quotes, txs) {
   };
 }
 
-// ---------- attachments (C284) ----------
+// ---------- attachments (C287) ----------
 // Photos, quotes, supplier invoices and receipts on a project, an estimate revision, a BOQ line or a ledger entry.
 // The bytes are sealed and split into parts (Firestore documents hold ≤ 1 MiB). Attachments are never edited:
 // the document date and the upload time are fixed when added. Removing keeps the record (who, when, why) and drops the bytes.

@@ -218,7 +218,7 @@ export function applyPayment(inv, amount) {
   return { amountPaid, amountDue: inv.total - amountPaid, status: amountPaid === inv.total ? "paid" : inv.status };
 }
 
-// What the money on an invoice looks like, for display (C284). Derived, never stored, so it cannot drift from the
+// What the money on an invoice looks like, for display (C287). Derived, never stored, so it cannot drift from the
 // amounts: amountPaid is confirmed money, claimedAmount is what payers reported and the issuer has not checked yet.
 //   paid                  everything confirmed
 //   pending_verification  confirmed + reported covers the total ("Paid — pending verification")

@@ -1,4 +1,4 @@
-// Server-side PDF for invoices and the project report (C284).
+// Server-side PDF for invoices and the project report (C287).
 //
 // Why this changed: the first version (C266) imported "@cloudflare/puppeteer", which is not installed in this repo,
 // read the logo from an R2 key that is never written (logos live in Firestore), and was never wired to an op.

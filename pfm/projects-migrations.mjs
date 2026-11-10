@@ -27,7 +27,7 @@ export const MIGRATIONS = Object.freeze([
   {
     version: 2,
     name: "dated_prices_and_files",
-    // C284: BOQ lines gain priceDate, supplier, pricedAt and priceLog; projects gain files/{fid} and files/{fid}/parts.
+    // C287: BOQ lines gain priceDate, supplier, pricedAt and priceLog; projects gain files/{fid} and files/{fid}/parts.
     // Nothing is rewritten: a line without priceDate/pricedAt reads as priced when its revision was created
     // (priceDateOfRow / pricedAtOfRow in pfm-worker.mjs), and a missing priceLog reads as that single price.
     async up() {},

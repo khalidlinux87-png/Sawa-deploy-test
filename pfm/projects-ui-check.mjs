@@ -12,7 +12,7 @@ const { handlePfmOp, handlePfmPublic } = await import("./pfm-worker.mjs");
 const { makeFs, ROOT } = await import("./fake-firestore.mjs");
 
 const APP = path.resolve(process.argv[2] || "../Sawa-app"), NM = path.resolve(process.argv[3] || "."), OUT = path.resolve(process.argv[4] || ".");
-copyFileSync(path.join(APP, "icons/icon-192.png"), path.join(OUT, "receipt.png"));   // C284: a photo to attach
+copyFileSync(path.join(APP, "icons/icon-192.png"), path.join(OUT, "receipt.png"));   // C287: a photo to attach
 const src = readFileSync(new URL("../worker-3.js", import.meta.url), "utf8");
 const grab = (name) => { const a = src.indexOf("function " + name + "("); let i = src.indexOf("{", a), depth = 0; for (; i < src.length; i++) { if (src[i] === "{") depth++; else if (src[i] === "}" && --depth === 0) break; } return src.slice(a, i + 1); };
 const { toFsValue, fsToJs } = new Function(grab("toFsValue") + grab("fsToJs") + "; return { toFsValue, fsToJs };")();
@@ -36,7 +36,7 @@ async function session(lang, dark) {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, locale: lang === "ar" ? "ar-SA" : "en-US", timezoneId: "Europe/Berlin" });
   await ctx.route("https://unpkg.com/react@18.3.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/react/umd/react.production.min.js"), contentType: "text/javascript" }));
   await ctx.route("https://unpkg.com/react-dom@18.3.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/react-dom/umd/react-dom.production.min.js"), contentType: "text/javascript" }));
-  await ctx.route("https://unpkg.com/html2canvas@1.4.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/html2canvas/dist/html2canvas.min.js"), contentType: "text/javascript", headers: { "Access-Control-Allow-Origin": "*" } }));   // C284
+  await ctx.route("https://unpkg.com/html2canvas@1.4.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/html2canvas/dist/html2canvas.min.js"), contentType: "text/javascript", headers: { "Access-Control-Allow-Origin": "*" } }));   // C287
   await ctx.route(/gstatic\.com|googleapis\.com|fonts\./, (r) => r.fulfill({ body: "", contentType: "text/javascript" }));
   await ctx.addInitScript((l) => { try { localStorage.setItem("sawaLang", l); } catch (e) {} }, lang);
   const page = await ctx.newPage();
@@ -90,7 +90,7 @@ const mount = (page, dark) => page.waitForFunction(() => window.SawaApp && typeo
   await H.getByLabel("الوحدة", { exact: true }).fill("كيس");
   await H.getByLabel("الكمّيّة", { exact: true }).fill("100");
   await H.getByLabel("سعر الوحدة", { exact: true }).fill("10");
-  // C284: the quote's date and supplier
+  // C287: the quote's date and supplier
   await H.getByLabel("تاريخ السعر").fill("2026-10-01");
   await H.getByLabel("المورّد (اختياري)").fill("أسمنت عطبرة");
   await H.getByRole("button", { name: "حفظ المسوّدة" }).click();
@@ -103,7 +103,7 @@ const mount = (page, dark) => page.waitForFunction(() => window.SawaApp && typeo
   await H.getByText("الفعلي:").first().waitFor({ timeout: 10000 });
   await H.getByText(/السعر بتاريخ .*أسمنت عطبرة/).waitFor();
   await shot(page, "p4-estimate-approved");
-  // C284: a supplier's quote (PDF) on the line, with the price it quotes
+  // C287: a supplier's quote (PDF) on the line, with the price it quotes
   await H.getByRole("button", { name: "المرفقات", exact: true }).first().click();
   await H.getByText("لا مرفقات بعد.").waitFor();
   await H.getByLabel("تاريخ المستند").fill("2026-10-05");

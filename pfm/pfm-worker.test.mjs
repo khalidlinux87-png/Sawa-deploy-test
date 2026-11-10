@@ -756,11 +756,11 @@ await t("import prefs: own accounts and confirmed names, sealed at rest, validat
   assert.ok(!fs.docs.has(`${ROOT}/pfm/u1/import/prefs`), "account deletion removes the import prefs");
 });
 
-// ---------- C284: pay states, full/partial reports, PDF proofs, links for old invoices, PDF files ----------
+// ---------- C287: pay states, full/partial reports, PDF proofs, links for old invoices, PDF files ----------
 const PDF_BYTES = Buffer.from("%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n");
 const pdfUri = (b = PDF_BYTES) => "data:application/pdf;base64," + b.toString("base64");
 
-await t("C284 pay state: partial report → partially_paid, the rest → pending_verification, confirm → paid", async () => {
+await t("C287 pay state: partial report → partially_paid, the rest → pending_verification, confirm → paid", async () => {
   const r = await sentInvoice();
   assert.equal((await r.call("inv.get", { id: r.inv.id })).invoice.payState, "unpaid");
   const a = await claim(r, { payType: "partial", amount: "300" });
@@ -780,7 +780,7 @@ await t("C284 pay state: partial report → partially_paid, the rest → pending
   assert.equal(g.status, "paid"); assert.equal(g.payState, "paid"); assert.equal(g.claimedAmount, 0);
 });
 
-await t("C284 pay type: partial must be below what is open and allowed; unknown type refused", async () => {
+await t("C287 pay type: partial must be below what is open and allowed; unknown type refused", async () => {
   const r = await sentInvoice();
   await assert.rejects(claim(r, { payType: "partial", amount: "930" }), err("partial_is_full"));
   await assert.rejects(claim(r, { payType: "some" }), err("bad_pay_type"));
@@ -791,7 +791,7 @@ await t("C284 pay type: partial must be below what is open and allowed; unknown 
   await assert.rejects(claim(r2, { payType: "full" }), err("overpay"));                 // nothing left to report
 });
 
-await t("C284 proof: a PDF receipt is accepted by its bytes and the issuer gets it back with its type", async () => {
+await t("C287 proof: a PDF receipt is accepted by its bytes and the issuer gets it back with its type", async () => {
   const r = await sentInvoice();
   await assert.rejects(claim(r, { proof: "data:application/pdf;base64," + Buffer.from("not a pdf at all, really").toString("base64") }), err("bad_proof"));
   await assert.rejects(claim(r, { proof: "data:image/png;base64," + PDF_BYTES.toString("base64") }), err("bad_proof"));   // declared type must match the bytes
@@ -805,7 +805,7 @@ await t("C284 proof: a PDF receipt is accepted by its bytes and the issuer gets 
   assert.ok(![...r.fs.docs.values()].some((e) => JSON.stringify(e.data).includes("bank-receipt")), "the file name is sealed");
 });
 
-await t("C284 inv.link: an invoice sent without a link gets one on request, and it opens the pay page", async () => {
+await t("C287 inv.link: an invoice sent without a link gets one on request, and it opens the pay page", async () => {
   const r = await sentInvoice();
   const doc = r.fs.docs.get(`${ROOT}/invoices/${r.inv.id}`);
   r.fs.docs.delete(`${ROOT}/payLinks/${r.tok}`); delete doc.data.payLinkToken;            // as if sent before C267
@@ -818,7 +818,7 @@ await t("C284 inv.link: an invoice sent without a link gets one on request, and 
   await assert.rejects(r.call("inv.link", { id: invoice.id }), err("not_sent"));
 });
 
-await t("C284 inv.pdf: the phone gets the HTML without Browser Rendering; the file with it; HTML again if it fails", async () => {
+await t("C287 inv.pdf: the phone gets the HTML without Browser Rendering; the file with it; HTML again if it fails", async () => {
   const r = await sentInvoice();
   const a = await r.call("inv.pdf", { id: r.inv.id });
   assert.equal(a.pdf, null); assert.equal(a.via, "device"); assert.match(a.html, new RegExp(r.inv.number)); assert.equal(a.filename, `invoice-${r.inv.number}.pdf`);

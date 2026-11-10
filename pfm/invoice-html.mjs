@@ -77,7 +77,7 @@ const auto = (v) => (/[\u0600-\u06FF]/.test(v) ? esc(v) : `<span class="num" dir
 // The pay-link block names only the ways to pay that are switched on. With wallet and card off,
 // the link still lets the client view the invoice and report a transfer.
 const payLabel = (m, t) => (m.includes("wallet") ? (m.includes("card") ? t.payWithCard : t.payWith) : t.viewOnline);
-// C284: an invoice with money on it shows that state ("Partially paid", "Paid — pending verification"), not just "Sent".
+// C287: an invoice with money on it shows that state ("Partially paid", "Paid — pending verification"), not just "Sent".
 const badgeOf = (inv) => (inv.payState === "partially_paid" || inv.payState === "pending_verification" ? inv.payState : inv.status);
 const payable = (inv) => inv.status === "sent" || inv.status === "overdue" || inv.status === "draft";
 // Only data: URIs pass, and only raster types (see sniffLogo). The renderer also blocks all network requests.

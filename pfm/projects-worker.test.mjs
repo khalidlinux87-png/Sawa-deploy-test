@@ -393,13 +393,13 @@ await t("report: user text is escaped; the report is self-contained and carries 
   assert.equal((await s.call("pfm.proj.report", { pid, lang: "ar" })).html.includes('dir="rtl"'), true);
 });
 
-// ---------- C284: dated prices, price history, attachments ----------
-const C284_PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(40, 1)]);
+// ---------- C287: dated prices, price history, attachments ----------
+const C287_PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(40, 1)]);
 const c284Pdf = (pad = 0) => Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.alloc(pad, 0x41), Buffer.from("\n%%EOF\n")]);
 const uri = (type, b) => `data:${type};base64,${b.toString("base64")}`;
 const todayBerlin = () => C.localDate("Europe/Berlin");
 
-await t("C284 prices: each line is dated; an unchanged save keeps its stamp; a new price is logged; the log follows the line", async () => {
+await t("C287 prices: each line is dated; an unchanged save keeps its stamp; a new price is logged; the log follows the line", async () => {
   const s = await ready();
   const { project } = await s.call("pfm.proj.create", PROJ);
   const pid = project.id;
@@ -438,19 +438,19 @@ await t("C284 prices: each line is dated; an unchanged save keeps its stamp; a n
   assert.equal(txs[0].unitPrice, 1400); assert.equal(txs[0].files, 0);
 });
 
-await t("C284 files: photo and multi-part PDF on a line and an entry, fixed dates, roles, removal keeps the record", async () => {
+await t("C287 files: photo and multi-part PDF on a line and an entry, fixed dates, roles, removal keeps the record", async () => {
   const s = await ready();
   const pid = await withBaseline(s);
   const eid = (await s.call("pfm.proj.get", { pid })).estimateId;
   await share(s, pid, "u2", "viewer");
   const big = c284Pdf(900 * 1024);                                                      // 3 parts
   const add = (extra, uid = "u1") => s.call("pfm.proj.file.add", { pid, idemKey: "file-key-" + Math.random().toString(36).slice(2, 10), kind: "quote", docDate: "2026-10-03", ...extra }, uid);
-  await assert.rejects(add({ target: { type: "line", estimateId: eid, lineKey: "cement" }, data: uri("image/png", C284_PNG) }, "u2"), err("forbidden"));
-  await assert.rejects(add({ target: { type: "line", estimateId: eid, lineKey: "nope" }, data: uri("image/png", C284_PNG) }), err("not_found"));
-  await assert.rejects(add({ target: { type: "line", estimateId: eid, lineKey: "cement" }, data: uri("image/png", C284_PNG), docDate: "2999-01-01" }), err("bad_price_date"));
-  await assert.rejects(add({ target: { type: "line", estimateId: eid, lineKey: "cement" }, data: uri("application/pdf", C284_PNG) }), err("bad_file"));
-  await assert.rejects(add({ target: { type: "tx", txId: "x_nothing" }, data: uri("image/png", C284_PNG) }), err("not_found"));
-  await assert.rejects(add({ kind: "photo", target: { type: "line", estimateId: eid, lineKey: "cement" }, data: uri("image/png", C284_PNG), quotedUnitPrice: "9" }), err("bad_quote"));
+  await assert.rejects(add({ target: { type: "line", estimateId: eid, lineKey: "cement" }, data: uri("image/png", C287_PNG) }, "u2"), err("forbidden"));
+  await assert.rejects(add({ target: { type: "line", estimateId: eid, lineKey: "nope" }, data: uri("image/png", C287_PNG) }), err("not_found"));
+  await assert.rejects(add({ target: { type: "line", estimateId: eid, lineKey: "cement" }, data: uri("image/png", C287_PNG), docDate: "2999-01-01" }), err("bad_price_date"));
+  await assert.rejects(add({ target: { type: "line", estimateId: eid, lineKey: "cement" }, data: uri("application/pdf", C287_PNG) }), err("bad_file"));
+  await assert.rejects(add({ target: { type: "tx", txId: "x_nothing" }, data: uri("image/png", C287_PNG) }), err("not_found"));
+  await assert.rejects(add({ kind: "photo", target: { type: "line", estimateId: eid, lineKey: "cement" }, data: uri("image/png", C287_PNG), quotedUnitPrice: "9" }), err("bad_quote"));
   const q = (await add({ target: { type: "line", estimateId: eid, lineKey: "cement" }, data: uri("application/pdf", big), name: "Atbara quote Oct.pdf", quotedUnitPrice: "9.50" })).file;
   assert.equal(q.type, "application/pdf"); assert.equal(q.size, big.length); assert.equal(q.docDate, "2026-10-03"); assert.ok(q.uploadedAt); assert.equal(q.uploadedBy, "u1");
   assert.equal(s.fs.docs.get(`${ROOT}/pfmProjects/${pid}/files/${q.id}`).data.parts, 3);
@@ -459,7 +459,7 @@ await t("C284 files: photo and multi-part PDF on a line and an entry, fixed date
   const got = await s.call("pfm.proj.file.get", { pid, fid: q.id }, "u2");
   assert.equal(got.data, uri("application/pdf", big));
   const { tx } = await s.call("pfm.proj.tx.add", { pid, idemKey: "tx-key-c284-02", kind: "expense", amount: "100", occurredOn: "2026-11-02", description: "Cement", lineKey: "cement", quantity: "10", unit: "bag" });
-  const rc = (await add({ kind: "receipt", target: { type: "tx", txId: tx.id }, data: uri("image/png", C284_PNG), docDate: "2026-11-02" })).file;
+  const rc = (await add({ kind: "receipt", target: { type: "tx", txId: tx.id }, data: uri("image/png", C287_PNG), docDate: "2026-11-02" })).file;
   assert.equal((await s.call("pfm.proj.file.list", { pid, target: { type: "tx", txId: tx.id } })).items.length, 1);
   assert.equal((await s.call("pfm.proj.tx.list", { pid })).items[0].files, 1);
   assert.equal((await s.call("pfm.proj.variance", { pid })).lines.find((l) => l.lineKey === "cement").files, 1);
@@ -475,11 +475,11 @@ await t("C284 files: photo and multi-part PDF on a line and an entry, fixed date
   assert.equal((await s.call("pfm.proj.file.list", { pid, withRemoved: true })).items.length, 2);
   // an editor who never set up their own accountant can still attach (dates fall back to UTC)
   await share(s, pid, "u3", "editor");
-  assert.ok((await add({ kind: "photo", target: { type: "project" }, data: uri("image/png", C284_PNG), docDate: "2026-11-01" }, "u3")).file.id);
+  assert.ok((await add({ kind: "photo", target: { type: "project" }, data: uri("image/png", C287_PNG), docDate: "2026-11-01" }, "u3")).file.id);
   // the same idemKey twice: one file
   const key = "file-key-same0001";
-  await s.call("pfm.proj.file.add", { pid, idemKey: key, kind: "photo", target: { type: "project" }, docDate: "2026-11-01", data: uri("image/png", C284_PNG) });
-  await s.call("pfm.proj.file.add", { pid, idemKey: key, kind: "photo", target: { type: "project" }, docDate: "2026-11-01", data: uri("image/png", C284_PNG) });
+  await s.call("pfm.proj.file.add", { pid, idemKey: key, kind: "photo", target: { type: "project" }, docDate: "2026-11-01", data: uri("image/png", C287_PNG) });
+  await s.call("pfm.proj.file.add", { pid, idemKey: key, kind: "photo", target: { type: "project" }, docDate: "2026-11-01", data: uri("image/png", C287_PNG) });
   assert.equal((await s.call("pfm.proj.file.list", { pid, target: { type: "project" } })).items.length, 2);
   // audit entries
   assert.ok(auditChain(s.fs).some((e) => e.action === "project.file.add") && auditChain(s.fs).some((e) => e.action === "project.file.remove"));
@@ -488,7 +488,7 @@ await t("C284 files: photo and multi-part PDF on a line and an entry, fixed date
   assert.equal(docsUnder(s.fs, `pfmProjects/${pid}`).length, 0);
 });
 
-await t("C284 report.pdf: HTML for the phone when Browser Rendering is not set up", async () => {
+await t("C287 report.pdf: HTML for the phone when Browser Rendering is not set up", async () => {
   const s = await ready();
   const pid = await withBaseline(s);
   const r = await s.call("pfm.proj.report.pdf", { pid, lang: "en" });
