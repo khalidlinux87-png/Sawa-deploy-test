@@ -1389,11 +1389,13 @@ async function payClaim(x, link, inv0) {
     out = { payId, state: "claimed", amount, payState: after }; fresh = { name, amount, number: inv.number, currency: inv.currency, locale: s.locale, after };
     const writes = [
       { update: { name: P(x, `invoices/${inv.id}/payments/${payId}`), fields: fieldsOf(x, pay) }, currentDocument: { exists: false } },
-      { transform: { document: P(x, `invoices/${inv.id}`), fieldTransforms: [{ fieldPath: "openClaims", increment: { integerValue: "1" } }, { fieldPath: "claimedAmount", increment: { integerValue: String(amount) } }] } },
     ];
     if (proofDoc) writes.push({ update: { name: P(x, `invoices/${inv.id}/proofs/${payId}`), fields: fieldsOf(x, proofDoc) } });
-    // the invoice's updateTime guards the "room" check against a concurrent claim or payment
-    writes.push({ update: { name: P(x, `invoices/${inv.id}`), fields: fieldsOf(x, { updatedAt: now() }) }, updateMask: { fieldPaths: ["updatedAt"] }, currentDocument: { updateTime: inv._updateTime } });
+    // The invoice's updateTime guards the "room" check against a concurrent claim or payment. The counters ride on
+    // the same write: Firestore refuses two writes to one document in a commit with different preconditions.
+    writes.push({ update: { name: P(x, `invoices/${inv.id}`), fields: fieldsOf(x, { updatedAt: now() }) }, updateMask: { fieldPaths: ["updatedAt"] },
+      updateTransforms: [{ fieldPath: "openClaims", increment: { integerValue: "1" } }, { fieldPath: "claimedAmount", increment: { integerValue: String(amount) } }],
+      currentDocument: { updateTime: inv._updateTime } });
     return { writes, audit: [{ action: "invoice.claim", ref: `invoices/${inv.id}`, after: { amount, method, payId }, actor: "payer" }], result: null };
   });
   if (fresh && x.d.push) {
@@ -1444,8 +1446,9 @@ async function opClaimDecide(x) {
     const writes = [
       { update: { name: P(x, `invoices/${inv.id}/payments/${payId}`), fields: fieldsOf(x, { state: "succeeded", amount, decidedAt: now(), note: note ? await seal(x, note) : "" }) },
         updateMask: { fieldPaths: ["state", "amount", "decidedAt", "note"] }, currentDocument: { updateTime: pay._updateTime } },
-      { update: { name: P(x, `invoices/${inv.id}`), fields: fieldsOf(x, patch) }, updateMask: { fieldPaths: Object.keys(patch) }, currentDocument: { updateTime: inv._updateTime } },
-      undoClaim,
+      // the claim counters come down on the same guarded write (one write per document, see payClaim)
+      { update: { name: P(x, `invoices/${inv.id}`), fields: fieldsOf(x, patch) }, updateMask: { fieldPaths: Object.keys(patch) },
+        updateTransforms: undoClaim.transform.fieldTransforms, currentDocument: { updateTime: inv._updateTime } },
       { update: { name: P(x, `pfm/${x.uid}/tx/i_${inv.id.slice(3)}_${payId}`), fields: fieldsOf(x, txRow) }, currentDocument: { exists: false } },
       ...rollupWrites(x, C.rollupDiff(null, txRow)),
     ];
