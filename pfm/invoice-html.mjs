@@ -35,7 +35,7 @@ export function renderInvoiceHtml(inv, totals, qrSvg = "") {
   const rows = totals.lines.map((l) => {
     const it = inv.items[l.index];
     return `<tr><td class="d">${esc(it.description)}</td><td><span class="num" dir="ltr">${esc(fromQty(l.qtyMilli))}</span></td><td>${money(it.unitPrice)}</td>
-      <td>${l.lineDiscount ? money(-l.lineDiscount) : "—"}</td><td>${l.taxRate !== "0" ? `<span class="num" dir="ltr">${pct(l.taxRate)}</span>` : "—"}</td><td>${money(l.amount)}</td></tr>`;
+      <td class="dc">${l.lineDiscount ? money(-l.lineDiscount) : "—"}</td><td>${l.taxRate !== "0" ? `<span class="num" dir="ltr">${pct(l.taxRate)}</span>` : "—"}</td><td>${money(l.amount)}</td></tr>`;
   }).join("");
   const taxRows = totals.taxBreakdown.map((b) => `<tr><td>${taxName} <span class="num" dir="ltr">${pct(b.taxRate)}</span></td><td>${money(b.tax)}</td></tr>`).join("");
   return `<!doctype html><html lang="${lang}" dir="${lang === "ar" ? "rtl" : "ltr"}"><head><meta charset="utf-8">
@@ -59,12 +59,26 @@ table.sum tr.total td{font-weight:700;font-size:12.5pt;border-top:2px solid #1a1
 .amt{white-space:nowrap}
 .brand{display:flex;gap:12px;align-items:center}.brand img{max-height:56px;max-width:140px;object-fit:contain}
 .accts{margin-top:16px;break-inside:avoid}.accts .grid{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0}.acct{flex:1 1 30%;min-width:160px;border:1px solid #e3e7ea;border-radius:8px;padding:6px 8px;font-size:9.5pt}.acct b{display:block}.small{font-size:8.5pt}
+/* Phone-width screens (the in-app invoice view is an iframe ~360 px wide). The A4 layout above is for print and the PDF,
+   which lay the page out at 794 px and never match this rule. Here the columns wrap instead of overflowing: in an RTL
+   page, content that overflows to the left cannot be scrolled to, which is what cut off the first columns. */
+@media screen and (max-width:640px){
+  body{padding:12px 10px;font-size:10pt;overflow-wrap:anywhere}
+  header{flex-direction:column;gap:10px}.meta div{justify-content:flex-start;gap:6px;flex-wrap:wrap}
+  .parties{flex-direction:column;gap:12px}
+  table.items{table-layout:auto}table.items th,table.items td{padding:4px 3px;font-size:8.5pt}
+  table.items.nodisc .dc{display:none}   /* the discount column only when some line has one */
+  table.items th,table.items td:not(.d){white-space:nowrap!important}table.items td.d{white-space:normal!important}
+  .bottom{flex-direction:column;gap:12px}.pay{width:100%}
+  table.sum{min-width:0;width:100%}
+  .accts .grid{flex-direction:column}.acct{flex:none;min-width:0}
+}
 </style></head><body>
 <header><div class="brand">${logo(inv.issuer.logoDataUri)}<div><h1>${t.invoice}</h1><span class="badge ${esc(badgeOf(inv))}">${t.status[badgeOf(inv)] || ""}</span></div></div>
 <div class="meta"><div><span>${t.no}</span><b class="num">${esc(inv.number)}</b></div><div><span>${t.issued}</span><span class="num" dir="ltr">${esc(inv.issueDate)}</span></div>
 <div><span>${t.due}</span><span class="num" dir="ltr">${esc(inv.dueDate)}</span></div></div></header>
 <section class="parties">${party(inv.issuer, "from")}${party(inv.client, "to")}</section>
-<table class="items"><thead><tr><th>${t.desc}</th><th>${t.qty}</th><th>${t.price}</th><th>${t.disc}</th><th>${inv.taxLabel ? taxName : t.tax}</th><th>${t.amount}</th></tr></thead><tbody>${rows}</tbody></table>
+<table class="items${totals.lines.some((l) => l.lineDiscount) ? "" : " nodisc"}"><thead><tr><th>${t.desc}</th><th>${t.qty}</th><th>${t.price}</th><th class="dc">${t.disc}</th><th>${inv.taxLabel ? taxName : t.tax}</th><th>${t.amount}</th></tr></thead><tbody>${rows}</tbody></table>
 <div class="bottom">${inv.payUrl && payable(inv) ? `<div class="pay">${qrSvg}<div><b>${payLabel(inv.methods || [], t)}</b><div class="muted">${t.scan}</div><div class="num" style="font-size:8.5pt">${esc(inv.payUrl)}</div></div></div>` : "<div></div>"}
 <table class="sum"><tr><td>${t.subtotal}</td><td>${money(totals.subtotal)}</td></tr>
 ${totals.invoiceDiscount ? `<tr><td>${t.discount}</td><td>${money(-totals.invoiceDiscount)}</td></tr>` : ""}${taxRows}
