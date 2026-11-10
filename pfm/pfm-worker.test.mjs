@@ -392,6 +392,26 @@ await t("business settings: sealed at rest, tax rates and prefix validated, next
   assert.equal(r.biz.taxRates[0].rate, "19"); assert.equal(r.biz.defaultTaxRateId, "std");
 });
 
+await t("C288: phone, address and Sawa ID for both parties reach the invoice; old snapshots take today's phone and code", async () => {
+  const { fs, call } = await shop();
+  await assert.rejects(call("pfm.biz.set", { sawaId: "12345" }), err("bad_sawa_id"));
+  const b = await call("pfm.biz.set", { phone: "+249 912 345 678", sawaId: "136-860-8541" });
+  assert.equal(b.biz.phone, "+249 912 345 678"); assert.equal(b.biz.sawaId, "1368608541");
+  assert.ok(!JSON.stringify(fs.docs.get(`${ROOT}/pfm/u1`).data).includes("912 345"));
+  await assert.rejects(draft(call, { client: { name: "Nile", sawaId: "abc" } }), err("bad_sawa_id"));
+  const d = await draft(call, { client: { name: "Nile Trading", phone: "+249 911 111 111", address: "Bahri, Khartoum North", sawaId: "2223334445" } });
+  assert.equal(d.invoice.client.address, "Bahri, Khartoum North"); assert.equal(d.invoice.client.sawaId, "2223334445");
+  const inv = (await call("inv.send", { id: d.invoice.id })).invoice;
+  const html = (await call("inv.html", { id: inv.id, lang: "en" })).html;
+  for (const s of ["+249 912 345 678", "136-860-8541", "Riyadh, King Fahd Rd", "+249 911 111 111", "Bahri, Khartoum North", "222-333-4445", "Sawa ID"]) assert.ok(html.includes(s), s);
+  // an invoice sent before C288 has no phone or Sawa ID in its issuer snapshot: today's details fill them
+  const iss = fs.docs.get(`${ROOT}/invoices/${inv.id}`).data.issuer;
+  assert.ok(iss.sawaId === "1368608541" && iss.phone && !String(iss.phone).includes("912"));   // the phone is sealed in the snapshot
+  delete iss.phone; delete iss.sawaId;
+  const old = (await call("inv.html", { id: inv.id, lang: "en" })).html;
+  assert.ok(old.includes("+249 912 345 678") && old.includes("136-860-8541"));
+});
+
 await t("receiving accounts: masked, sealed, number change pushes a warning, wallet type refused", async () => {
   const { fs, call, pushes, acct } = await shop();
   assert.equal(acct.number, "•••• 3000");

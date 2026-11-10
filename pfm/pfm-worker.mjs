@@ -856,9 +856,13 @@ export async function pfmCron(env, d, max = 20) {
 // P3: business settings · logo · receiving accounts · invoices (draft → sent → paid/overdue/cancelled)
 // =====================================================================================================
 
-const BIZ_SEALED = ["address", "taxId"];
+const BIZ_SEALED = ["address", "taxId", "phone"];
+// C288: the Sawa code (10 digits, "Sawa ID" on the invoice). Dashes and spaces are dropped; anything else is refused.
+const sawaIdOf = (v) => { if (v == null || v === "") return ""; if (typeof v !== "string") throw new C.PfmError("bad_sawa_id"); const d = v.replace(/[\s\-\u2066-\u2069]/g, ""); if (d && !/^\d{10}$/.test(d)) throw new C.PfmError("bad_sawa_id"); return d; };
+// C288: a sent invoice keeps the issuer as it was; fields added after it was sent (phone, Sawa ID) come from today's details.
+const withNewIssuerFields = (issuer, biz) => ({ ...issuer, phone: issuer?.phone ?? biz.phone ?? "", sawaId: issuer?.sawaId ?? biz.sawaId ?? "" });
 async function bizOf(x, s) {
-  const b = { name: "", contact: "", address: "", taxId: "", taxRegistered: false, taxLabel: "", taxRates: [], defaultTaxRateId: null,
+  const b = { name: "", contact: "", address: "", taxId: "", phone: "", sawaId: "", taxRegistered: false, taxLabel: "", taxRates: [], defaultTaxRateId: null,
     invoicePrefix: "INV", defaultDueDays: 14, defaultAllowPartial: true, defaultInvoiceCurrency: s.baseCurrency, defaultPayoutAccountIds: [], lang: s.locale || "ar", ...(s.biz || {}) };
   for (const k of BIZ_SEALED) b[k] = b[k] ? await C.openField(b[k], x.uid, keys(x)).catch(() => "") : "";
   return b;
@@ -880,7 +884,8 @@ async function opBizSet(x) {
     const next = { ...cur };
     const str = (k, max) => { if (p[k] !== undefined) next[k] = txt(p[k], max, k) || ""; };
     str("name", 80); str("contact", 120); str("taxLabel", 24);
-    for (const k of BIZ_SEALED) if (p[k] !== undefined) { const v = txt(p[k], k === "address" ? 200 : 40, k); next[k] = v ? await seal(x, v) : ""; }
+    for (const k of BIZ_SEALED) if (p[k] !== undefined) { const v = txt(p[k], k === "address" ? 200 : k === "phone" ? 30 : 40, k); next[k] = v ? await seal(x, v) : ""; }
+    if (p.sawaId !== undefined) next.sawaId = sawaIdOf(p.sawaId);
     if (p.taxRegistered !== undefined) next.taxRegistered = !!p.taxRegistered;
     if (p.taxRates !== undefined) {
       if (!Array.isArray(p.taxRates) || p.taxRates.length > 10) throw new C.PfmError("bad_tax");
@@ -1038,7 +1043,10 @@ async function opInvSave(x) {
     const id = old?.id || "iv_" + rid(12);
     const doc = { issuerUid: x.uid, status: "draft", number: null, lang: p.lang || old?.lang || biz.lang, currency, issueDate, dueDate,
       client: { name: cname != null ? await seal(x, cname) : old.client.name, contact: c.contact !== undefined ? await seal(x, txt(c.contact, 120, "contact") || "") : old?.client?.contact || "",
-        taxId: c.taxId !== undefined ? await seal(x, txt(c.taxId, 40, "taxId") || "") : old?.client?.taxId || "" },
+        taxId: c.taxId !== undefined ? await seal(x, txt(c.taxId, 40, "taxId") || "") : old?.client?.taxId || "",
+        address: c.address !== undefined ? await seal(x, txt(c.address, 200, "address") || "") : old?.client?.address || "",
+        phone: c.phone !== undefined ? await seal(x, txt(c.phone, 30, "phone") || "") : old?.client?.phone || "",
+        sawaId: c.sawaId !== undefined ? sawaIdOf(c.sawaId) : old?.client?.sawaId || "" },
       items: v.items, invoiceDiscount: v.invoiceDiscount, taxInclusive: v.taxInclusive, taxLabel: v.taxLabel,
       allowPartial: p.allowPartial ?? old?.allowPartial ?? biz.defaultAllowPartial, payoutAccountIds: ids,
       notes: p.notes !== undefined ? await seal(x, txt(p.notes, 1000, "notes") || "") : old?.notes || "",
@@ -1062,9 +1070,10 @@ async function opInvDelete(x) {
 async function presentInvoice(x, inv, withPayments) {
   const o = strip(inv);
   const open = (v) => (v ? C.openField(v, x.uid, keys(x)).catch(() => "") : "");
-  o.client = { name: await open(inv.client?.name), contact: await open(inv.client?.contact), taxId: await open(inv.client?.taxId) };
+  o.client = { name: await open(inv.client?.name), contact: await open(inv.client?.contact), taxId: await open(inv.client?.taxId),
+    address: await open(inv.client?.address), phone: await open(inv.client?.phone), sawaId: inv.client?.sawaId || "" };
   o.notes = await open(inv.notes);
-  if (o.issuer) o.issuer = { ...o.issuer, address: await open(o.issuer.address), taxId: await open(o.issuer.taxId) };
+  if (o.issuer) o.issuer = { ...o.issuer, address: await open(o.issuer.address), taxId: await open(o.issuer.taxId), ...(o.issuer.phone !== undefined ? { phone: await open(o.issuer.phone) } : {}) };
   if (Array.isArray(o.payoutAccounts)) o.payoutAccounts = await Promise.all(o.payoutAccounts.map(async (a) => ({ ...a, number: await open(a.number) })));
   o.totals = totalsOf(inv);
   o.claimedAmount = Math.max(0, inv.claimedAmount || 0);
@@ -1106,7 +1115,8 @@ async function opInvSend(x) {
     const chosen = C.accountsForInvoice(accounts, inv.payoutAccountIds || [], inv.currency);
     const token = rid(22);
     const sentAt = now();
-    const issuer = { name: biz.name, contact: biz.contact, address: biz.address ? await seal(x, biz.address) : "", taxId: biz.taxId ? await seal(x, biz.taxId) : "" };
+    const issuer = { name: biz.name, contact: biz.contact, address: biz.address ? await seal(x, biz.address) : "", taxId: biz.taxId ? await seal(x, biz.taxId) : "",
+      phone: biz.phone ? await seal(x, biz.phone) : "", sawaId: biz.sawaId || "" };
     const payoutAccounts = await Promise.all(chosen.map(async (a) => ({ id: a.id, type: a.type, currency: a.currency, label: a.label, holderName: a.holderName || null,
       bankName: a.bankName || null, provider: a.provider || null, branch: a.branch || null, details: a.details || null, number: a.number ? await seal(x, a.number) : null })));
     const patch = { status: "sent", number, issuer, payoutAccounts, payLinkToken: token, sentAt, rev: inv.rev + 1, updatedAt: sentAt };
@@ -1182,7 +1192,7 @@ async function opInvHtml(x) {
   const inv = await presentInvoice(x, await loadInvoice(x, x.p.id));
   const s = await settingsOf(x), biz = await bizOf(x, s);
   const logo = js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/files/logo`));
-  const issuer = inv.status === "draft" ? { name: biz.name, contact: biz.contact, address: biz.address, taxId: biz.taxId } : inv.issuer;
+  const issuer = inv.status === "draft" ? { name: biz.name, contact: biz.contact, address: biz.address, taxId: biz.taxId, phone: biz.phone, sawaId: biz.sawaId } : withNewIssuerFields(inv.issuer, biz);
   let accounts = inv.payoutAccounts;
   if (inv.status === "draft") accounts = C.accountsForInvoice(await accountsOf(x, false), inv.payoutAccountIds || [], inv.currency);
   const lang = x.p.lang === "en" || x.p.lang === "ar" ? x.p.lang : inv.lang;
@@ -1309,6 +1319,7 @@ async function payView(x, link, inv) {
   const pi = await presentInvoice(x, inv);
   const s = await settingsOf(x, false);
   const logo = js(x, await x.d.fsGet(x.token, `pfm/${x.uid}/files/logo`));
+  if (pi.issuer && (pi.issuer.phone === undefined || pi.issuer.sawaId === undefined)) pi.issuer = withNewIssuerFields(pi.issuer, s ? await bizOf(x, s) : {});
   const lang = x.p.lang === "en" || x.p.lang === "ar" ? x.p.lang : pi.lang;
   const payable = !link.revoked && (pi.status === "sent" || pi.status === "overdue");
   const html = renderInvoiceHtml({ ...pi, lang, issuer: { ...pi.issuer, logoDataUri: logo ? logo.data : null }, methods: [], payUrl: null }, pi.totals);

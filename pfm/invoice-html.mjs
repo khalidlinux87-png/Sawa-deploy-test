@@ -4,13 +4,13 @@ import { fromMinor } from "./pfm-core.mjs";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const L = {
-  ar: { invoice: "فاتورة", no: "رقم الفاتورة", issued: "تاريخ الإصدار", due: "تاريخ الاستحقاق", from: "من", to: "إلى", taxId: "الرقم الضريبيّ",
+  ar: { invoice: "فاتورة", no: "رقم الفاتورة", issued: "تاريخ الإصدار", due: "تاريخ الاستحقاق", from: "من", to: "إلى", taxId: "الرقم الضريبيّ", phone: "الهاتف", sawaId: "رمز سوا", address: "العنوان",
         desc: "الوصف", qty: "الكمّيّة", price: "سعر الوحدة", disc: "الخصم", tax: "الضريبة", amount: "المبلغ قبل الضريبة",
         subtotal: "المجموع الفرعيّ", discount: "خصم الفاتورة", taxOn: "الضريبة", total: "الإجماليّ", paid: "المدفوع", balance: "المستحقّ",
         payWith: "ادفع بمحفظة سوا", payWithCard: "ادفع بمحفظة سوا أو بالبطاقة", viewOnline: "اعرض الفاتورة وأبلغ عن دفعك", scan: "امسح الرمز أو افتح الرابط", notes: "ملاحظات",
         payTo: "طرق الدفع", holder: "اسم صاحب الحساب", acct: "رقم الحساب", branch: "الفرع", ref: "اكتب رقم الفاتورة في خانة البيان",
         status: { draft: "مسوّدة", sent: "مُرسلة", paid: "مدفوعة", overdue: "متأخّرة", cancelled: "ملغاة", partially_paid: "مدفوعة جزئيّاً", pending_verification: "مدفوعة — بانتظار التحقّق" } },
-  en: { invoice: "Invoice", no: "Invoice no.", issued: "Issue date", due: "Due date", from: "From", to: "Bill to", taxId: "Tax ID",
+  en: { invoice: "Invoice", no: "Invoice no.", issued: "Issue date", due: "Due date", from: "From", to: "Bill to", taxId: "Tax ID", phone: "Phone", sawaId: "Sawa ID", address: "Address",
         desc: "Description", qty: "Qty", price: "Unit price", disc: "Discount", tax: "Tax", amount: "Amount (excl. tax)",
         subtotal: "Subtotal", discount: "Invoice discount", taxOn: "Tax", total: "Total", paid: "Paid", balance: "Balance due",
         payWith: "Pay with Sawa Wallet", payWithCard: "Pay with Sawa Wallet or card", viewOnline: "View the invoice and report your payment", scan: "Scan the code or open the link", notes: "Notes",
@@ -18,7 +18,7 @@ const L = {
         status: { draft: "Draft", sent: "Sent", paid: "Paid", overdue: "Overdue", cancelled: "Cancelled", partially_paid: "Partially paid", pending_verification: "Paid — pending verification" } },
 };
 
-/** inv: { number, lang, issueDate, dueDate, status, issuer{name,contact,taxId,address,logoDataUri?}, client{...}, items[], notes, payUrl,
+/** inv: { number, lang, issueDate, dueDate, status, issuer{name,contact,phone,sawaId,taxId,address,logoDataUri?}, client{...}, items[], notes, payUrl,
  *         payoutAccounts?: [validatePayoutAccount() output, already decrypted], methods?: payOptions().methods }
  *  totals: computeInvoice() output.  qrSvg: optional inline SVG of the pay link. */
 export function renderInvoiceHtml(inv, totals, qrSvg = "") {
@@ -27,7 +27,10 @@ export function renderInvoiceHtml(inv, totals, qrSvg = "") {
   const pct = (rate) => esc(rate) + "%";                  // the rate exactly as the issuer typed it ("8.875")
   const taxName = esc(inv.taxLabel || t.taxOn);          // the issuer's own name for the tax: "VAT", "GST", "TVA", …
   const party = (p, label) => `<div class="party"><div class="lbl">${t[label]}</div><div class="nm">${esc(p.name)}</div>
-    ${p.contact ? `<div>${auto(p.contact)}</div>` : ""}${p.address ? `<div>${esc(p.address)}</div>` : ""}
+    ${p.contact ? `<div>${auto(p.contact)}</div>` : ""}
+    ${p.phone ? `<div><span class="muted">${t.phone}: </span><span class="num" dir="ltr">${esc(p.phone)}</span></div>` : ""}
+    ${p.address ? `<div><span class="muted">${t.address}: </span>${esc(p.address)}</div>` : ""}
+    ${sawaCode(p.sawaId) ? `<div><span class="muted">${t.sawaId}: </span><span class="num" dir="ltr">${sawaCode(p.sawaId)}</span></div>` : ""}
     ${p.taxId ? `<div class="muted">${t.taxId}: <span class="num" dir="ltr">${esc(p.taxId)}</span></div>` : ""}</div>`;
   const rows = totals.lines.map((l) => {
     const it = inv.items[l.index];
@@ -72,6 +75,8 @@ ${inv.notes ? `<div class="notes"><div class="lbl">${t.notes}</div>${esc(inv.not
 </body></html>`;
 }
 
+// C288: the 10-digit Sawa code as the app shows it: 136-860-8541.
+const sawaCode = (v) => { const d = String(v || "").replace(/\D/g, ""); return d.length === 10 ? `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}` : ""; };
 // Phone numbers and emails have no letters that set a direction, so in Arabic a leading "+" would drift to the end.
 const auto = (v) => (/[\u0600-\u06FF]/.test(v) ? esc(v) : `<span class="num" dir="ltr">${esc(v)}</span>`);
 // The pay-link block names only the ways to pay that are switched on. With wallet and card off,

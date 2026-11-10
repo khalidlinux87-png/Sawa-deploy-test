@@ -212,7 +212,9 @@ if (!alertsFired.some((x) => x === "c_food:10000")) errors.push("expected the fo
   await H.locator('input[type="file"]').setInputFiles(`${OUT}/logo.png`);
   await H.getByRole("img", { name: "الشعار الحاليّ" }).waitFor();
   await H.getByLabel("اسم النشاط").fill("استوديو خالد للتصميم");
-  await H.getByLabel("هاتف أو بريد").fill("+966 51 234 5678");
+  await H.getByLabel("الهاتف", { exact: true }).fill("+966 51 234 5678");
+  await H.getByLabel("العنوان", { exact: true }).fill("الرياض، طريق الملك فهد");
+  await H.getByLabel("رمز سوا", { exact: true }).fill("136-860-8541");   // C288
   await H.getByText("أفرض ضريبة على فواتيري").click();
   await H.getByLabel("رقمي الضريبيّ").fill("300123456700003");
   await H.getByLabel("اسم الضريبة كما يظهر على الفاتورة").fill("ضريبة القيمة المضافة");
@@ -233,6 +235,9 @@ if (!alertsFired.some((x) => x === "c_food:10000")) errors.push("expected the fo
   // a new invoice
   await H.getByRole("button", { name: /فاتورة جديدة/ }).click();
   await H.getByPlaceholder("الاسم", { exact: true }).fill("شركة النيل للتجارة");
+  await H.getByLabel("هاتف العميل").fill("+249 911 111 111");   // C288
+  await H.getByLabel("عنوان العميل").fill("الخرطوم بحري");
+  await H.getByLabel("رمز سوا للعميل").fill("2223334445");
   await H.getByLabel("الوصف").first().fill("تصميم هويّة بصريّة");
   await H.getByLabel("سعر الوحدة").first().fill("4500");
   await H.getByRole("button", { name: "＋ بند آخر" }).click();
@@ -259,6 +264,8 @@ if (!alertsFired.some((x) => x === "c_food:10000")) errors.push("expected the fo
     const file = await dl;
     const bytes = readFileSync(await file.path());
     if (bytes.subarray(0, 5).toString() !== "%PDF-") errors.push("invoice PDF is not a PDF");
+    const pages = (bytes.toString("latin1").match(/\/Type\/Page\//g) || []).length;   // C288: a short invoice is one page
+    if (pages !== 1) errors.push("short invoice PDF has " + pages + " pages");
     if (!/^invoice-INV-\d{4}-0001\.pdf$/.test(file.suggestedFilename())) errors.push("invoice PDF name: " + file.suggestedFilename());
     await file.saveAs(`${OUT}/p3-invoice-device-ar.pdf`);
     await H.getByText(/نُزّل ملفّ PDF/).waitFor();
@@ -271,6 +278,7 @@ if (!alertsFired.some((x) => x === "c_food:10000")) errors.push("expected the fo
   await pp.screenshot({ path: `${OUT}/p3-4-printed-ar.png`, fullPage: true }); await pp.pdf({ path: `${OUT}/p3-invoice-ar.pdf`, format: "A4", printBackground: true }); await pp.close();
   if (!/data:image\/(webp|png)/.test(printed)) errors.push("printed invoice has no logo");
   if (!printed.includes("SA0380000000608010167519")) errors.push("printed invoice has no account number");
+  for (const s of ["+966 51 234 5678", "136-860-8541", "الرياض، طريق الملك فهد", "+249 911 111 111", "الخرطوم بحري", "222-333-4445"]) if (!printed.includes(s)) errors.push("printed invoice lacks " + s);
   await H.getByRole("button", { name: "إغلاق" }).click();
   await H.getByText(/عند عملائك/).waitFor();
   await shot(page, "p3-5-invoices-ar");
@@ -313,7 +321,9 @@ if (invs.items.length !== 1 || invs.items[0].status !== "sent" || invs.items[0].
     {
       const dl = page.waitForEvent("download", { timeout: 60000 });
       await page.getByRole("button", { name: "تنزيل PDF" }).click();
-      const f = await dl; if (readFileSync(await f.path()).subarray(0, 5).toString() !== "%PDF-") errors.push("pay page PDF is not a PDF");
+      const f = await dl, pb = readFileSync(await f.path()); if (pb.subarray(0, 5).toString() !== "%PDF-") errors.push("pay page PDF is not a PDF");
+      const n = (pb.toString("latin1").match(/\/Type\/Page\//g) || []).length; if (n !== 1) errors.push("pay page PDF has " + n + " pages");   // C288
+      await f.saveAs(`${OUT}/p4-invoice-pay-page-ar.pdf`);
     }
     await page.getByRole("button", { name: "إغلاق" }).click();
     // C287: a part payment with a PDF receipt
