@@ -4,7 +4,7 @@
 // Needs Playwright with Chromium. The CDNs are replaced by local React and an empty Firebase, so it runs offline.
 import { createRequire } from "module";
 import http from "node:http";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, copyFileSync } from "node:fs";
 import path from "node:path";
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -12,6 +12,7 @@ const { handlePfmOp, handlePfmPublic } = await import("./pfm-worker.mjs");
 const { makeFs, ROOT } = await import("./fake-firestore.mjs");
 
 const APP = path.resolve(process.argv[2] || "../Sawa-app"), NM = path.resolve(process.argv[3] || "."), OUT = path.resolve(process.argv[4] || ".");
+copyFileSync(path.join(APP, "icons/icon-192.png"), path.join(OUT, "receipt.png"));   // C287: a photo to attach
 const src = readFileSync(new URL("../worker-3.js", import.meta.url), "utf8");
 const grab = (name) => { const a = src.indexOf("function " + name + "("); let i = src.indexOf("{", a), depth = 0; for (; i < src.length; i++) { if (src[i] === "{") depth++; else if (src[i] === "}" && --depth === 0) break; } return src.slice(a, i + 1); };
 const { toFsValue, fsToJs } = new Function(grab("toFsValue") + grab("fsToJs") + "; return { toFsValue, fsToJs };")();
@@ -35,6 +36,7 @@ async function session(lang, dark) {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, locale: lang === "ar" ? "ar-SA" : "en-US", timezoneId: "Europe/Berlin" });
   await ctx.route("https://unpkg.com/react@18.3.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/react/umd/react.production.min.js"), contentType: "text/javascript" }));
   await ctx.route("https://unpkg.com/react-dom@18.3.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/react-dom/umd/react-dom.production.min.js"), contentType: "text/javascript" }));
+  await ctx.route("https://unpkg.com/html2canvas@1.4.1/**", (r) => r.fulfill({ path: path.join(NM, "node_modules/html2canvas/dist/html2canvas.min.js"), contentType: "text/javascript", headers: { "Access-Control-Allow-Origin": "*" } }));   // C287
   await ctx.route(/gstatic\.com|googleapis\.com|fonts\./, (r) => r.fulfill({ body: "", contentType: "text/javascript" }));
   await ctx.addInitScript((l) => { try { localStorage.setItem("sawaLang", l); } catch (e) {} }, lang);
   const page = await ctx.newPage();
@@ -88,24 +90,57 @@ const mount = (page, dark) => page.waitForFunction(() => window.SawaApp && typeo
   await H.getByLabel("الوحدة", { exact: true }).fill("كيس");
   await H.getByLabel("الكمّيّة", { exact: true }).fill("100");
   await H.getByLabel("سعر الوحدة", { exact: true }).fill("10");
+  // C287: the quote's date and supplier
+  await H.getByLabel("تاريخ السعر").fill("2026-10-01");
+  await H.getByLabel("المورّد (اختياري)").fill("أسمنت عطبرة");
   await H.getByRole("button", { name: "حفظ المسوّدة" }).click();
+  await H.getByText(/سُجّل هذا السعر/).waitFor({ timeout: 10000 });
+  await shot(page, "c284-1-estimate-dated");
   await H.getByText("مراجعة 1").waitFor({ timeout: 10000 }).catch(() => {});
   await shot(page, "p3-estimate-draft");
   page.once("dialog", (d) => d.accept());
   await H.getByRole("button", { name: "اعتماد التقدير" }).click();
   await H.getByText("الفعلي:").first().waitFor({ timeout: 10000 });
+  await H.getByText(/السعر بتاريخ .*أسمنت عطبرة/).waitFor();
   await shot(page, "p4-estimate-approved");
+  // C287: a supplier's quote (PDF) on the line, with the price it quotes
+  await H.getByRole("button", { name: "المرفقات", exact: true }).first().click();
+  await H.getByText("لا مرفقات بعد.").waitFor();
+  await H.getByLabel("تاريخ المستند").fill("2026-10-05");
+  await H.getByLabel(/سعر الوحدة في العرض/).fill("9.5");
+  writeFileSync(path.join(OUT, "quote.pdf"), "%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n");
+  await H.locator('input[type="file"]').setInputFiles(path.join(OUT, "quote.pdf"));
+  await H.getByText("quote.pdf").waitFor({ timeout: 10000 });
+  await H.getByText(/بتاريخ .* · رُفع /).waitFor();
+  await shot(page, "c284-2-line-files");
+  {
+    const dl = page.waitForEvent("download", { timeout: 20000 });
+    await H.getByRole("button", { name: "فتح PDF" }).click();
+    const f = await dl; if (readFileSync(await f.path()).subarray(0, 5).toString() !== "%PDF-") errors.push("attachment PDF did not open as a PDF");
+  }
+  await H.getByRole("button", { name: /إغلاق|Close/ }).first().click();
+  await H.getByRole("button", { name: "المرفقات (1)" }).waitFor();
+  await H.getByRole("button", { name: "سجلّ الأسعار" }).first().click();
+  await H.getByText(/عرض سعر مرفق/).waitFor();
+  await H.getByText(/تقدير — مراجعة 1 · أسمنت عطبرة/).waitFor();
+  await shot(page, "c284-3-price-history");
+  await H.getByRole("button", { name: /إغلاق|Close/ }).first().click();
   await H.getByRole("tab", { name: "الحركات" }).click();
   await H.getByRole("button", { name: "حركة جديدة" }).click();
   await H.getByLabel("المبلغ", { exact: true }).fill("1210");
   await H.getByLabel("الوصف", { exact: true }).fill("إسمنت - دفعة أولى");
   await H.locator('select[aria-label="البند"]').selectOption({ index: 1 });
+  await H.getByLabel("الكمّيّة (اختياري)").fill("110");
+  await H.getByLabel("الوحدة", { exact: true }).fill("كيس");
+  await H.getByLabel(/إيصال أو فاتورة مورّد/).setInputFiles(path.join(OUT, "receipt.png"));
   await shot(page, "p5-entry-sheet");
   await H.getByRole("button", { name: "حفظ" }).click();
   await page.waitForTimeout(1500);
   await shot(page, "p5b-after-save");
   console.log("alerts after save:", JSON.stringify(await H.locator('[role="alert"]').allInnerTexts()));
   await H.getByText("إسمنت - دفعة أولى").first().waitFor({ timeout: 10000 });
+  await H.getByText(/11\.00.* للوحدة/).first().waitFor();                                 // 1,210 ÷ 110 bags
+  await H.getByRole("button", { name: "المرفقات (1)" }).waitFor();
   await shot(page, "p6-ledger");
   await H.getByRole("tab", { name: "الأعضاء" }).click();
   await H.getByRole("button", { name: "إنشاء رمز دعوة" }).click();
@@ -114,6 +149,13 @@ const mount = (page, dark) => page.waitForFunction(() => window.SawaApp && typeo
   await H.getByRole("tab", { name: "الملخّص" }).click();
   await H.getByText("التقدير مقابل الفعلي").waitFor({ timeout: 10000 });
   await shot(page, "p8-overview-charts");
+  {
+    const dl = page.waitForEvent("download", { timeout: 60000 });
+    await H.getByRole("button", { name: "تقرير PDF" }).click();
+    const f = await dl; const b = readFileSync(await f.path());
+    if (b.subarray(0, 5).toString() !== "%PDF-") errors.push("project report is not a PDF");
+    await f.saveAs(path.join(OUT, "c284-project-report.pdf"));
+  }
   await ctx.close();
 }
 

@@ -7,6 +7,7 @@
 // the loser re-reads and retries.
 import * as C from "./pfm-core.mjs";
 import { renderInvoiceHtml } from "./invoice-html.mjs";
+import { htmlToPdf, pdfAvailable, toBase64, pdfName } from "./invoice-pdf.mjs";
 import * as J from "./projects-core.mjs";
 import { migrateProjects } from "./projects-migrations.mjs";
 
@@ -56,6 +57,7 @@ const OPS = {
   "inv.cancel": opInvCancel,
   "inv.markPaid": opInvMarkPaid,
   "inv.html": opInvHtml,
+  "inv.pdf": opInvPdf,
   // P4
   "inv.claim.decide": opClaimDecide,
   "inv.claim.proof": opClaimProof,
@@ -1065,6 +1067,8 @@ async function presentInvoice(x, inv, withPayments) {
   if (o.issuer) o.issuer = { ...o.issuer, address: await open(o.issuer.address), taxId: await open(o.issuer.taxId) };
   if (Array.isArray(o.payoutAccounts)) o.payoutAccounts = await Promise.all(o.payoutAccounts.map(async (a) => ({ ...a, number: await open(a.number) })));
   o.totals = totalsOf(inv);
+  o.claimedAmount = Math.max(0, inv.claimedAmount || 0);
+  o.payState = C.payState({ status: inv.status, total: o.totals.total, amountPaid: inv.amountPaid, claimedAmount: inv.claimedAmount });
   if (withPayments) o.payments = await Promise.all((await x.d.fsList(x.token, `invoices/${inv.id}/payments`)).map((dd) => strip(js(x, dd))).sort((a, b) => (a.at < b.at ? -1 : 1))
     .map(async (p) => ({ ...p, reference: await open(p.reference), payer: p.payer ? { name: await open(p.payer.name), phone: await open(p.payer.phone) } : null, note: await open(p.note) })));
   return o;
@@ -1080,7 +1084,8 @@ async function opInvList(x) {
   list.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
   const items = await Promise.all(list.map(async (i) => ({ id: i.id, status: i.status, number: i.number, currency: i.currency, issueDate: i.issueDate, dueDate: i.dueDate,
     clientName: i.client?.name ? await C.openField(i.client.name, x.uid, keys(x)).catch(() => "") : "", total: i.totals.total, amountPaid: i.amountPaid || 0,
-    amountDue: i.totals.total - (i.amountPaid || 0), openClaims: i.openClaims || 0, updatedAt: i.updatedAt })));
+    amountDue: i.totals.total - (i.amountPaid || 0), openClaims: i.openClaims || 0, claimedAmount: Math.max(0, i.claimedAmount || 0),
+    payState: C.payState({ status: i.status, total: i.totals.total, amountPaid: i.amountPaid, claimedAmount: i.claimedAmount }), updatedAt: i.updatedAt })));
   const sum = (st) => items.filter((i) => st.includes(i.status));
   return { items, outstanding: byCurrency(sum(["sent", "overdue"]), "amountDue"), overdue: sum(["overdue"]).length, claims: items.reduce((a, i) => a + i.openClaims, 0) };
 }
@@ -1172,8 +1177,7 @@ async function opInvMarkPaid(x) {
   return { invoice: await presentInvoice(x, out, true) };
 }
 
-// Printable page (issuer only). The phone prints it to PDF; the Browser Rendering pipeline (invoice-pdf.mjs)
-// can take over once its R2 bucket and binding exist.
+// Printable page (issuer only). Browsers print it; the apps use inv.pdf (WebViews ignore window.print()).
 async function opInvHtml(x) {
   const inv = await presentInvoice(x, await loadInvoice(x, x.p.id));
   const s = await settingsOf(x), biz = await bizOf(x, s);
@@ -1184,7 +1188,22 @@ async function opInvHtml(x) {
   const lang = x.p.lang === "en" || x.p.lang === "ar" ? x.p.lang : inv.lang;
   const html = renderInvoiceHtml({ ...inv, lang, number: inv.number || (lang === "ar" ? "مسوّدة" : "Draft"), issuer: { ...issuer, logoDataUri: logo ? logo.data : null },
     client: inv.client, payoutAccounts: accounts, methods: [], payUrl: null }, inv.totals);
-  return { html, number: inv.number, status: inv.status };
+  return { html, number: inv.number, status: inv.status, payState: inv.payState };
+}
+
+// C287: a PDF file of the invoice. With Browser Rendering configured (invoice-pdf.mjs) the Worker returns the file;
+// otherwise, or if rendering fails, it returns the same HTML with pdf: null and the app makes the PDF on the phone.
+// Either way the app gets something to save, so the button never silently does nothing.
+async function opInvPdf(x) {
+  const r = await opInvHtml(x);
+  const filename = pdfName(r.number ? "invoice-" + r.number : "invoice-draft");
+  if (!pdfAvailable(x.env)) return { pdf: null, html: r.html, filename, via: "device" };
+  try {
+    const bytes = await htmlToPdf(x.env, r.html, { footer: r.number || "", fetchImpl: x.d.fetch || fetch });
+    return { pdf: toBase64(bytes), size: bytes.length, filename, via: "server" };
+  } catch (e) {
+    return { pdf: null, html: r.html, filename, via: "device", serverError: String(e.message || e).slice(0, 120) };
+  }
 }
 
 // Cron: sent invoices past their due date (in the issuer's time zone) become overdue; the issuer is told once.
@@ -1227,10 +1246,25 @@ async function overdueSweep(env, d, token, max) {
 
 export const PAY_ORIGIN = "https://www.sawaaap.com";
 const payUrl = (token) => `${PAY_ORIGIN}/pay/${token}`;
+// C287: invoices sent before C267 have no token, so "Share" and "Copy pay link" had nothing to give. The link is now
+// made on first request (one commit: the token document must not exist, and the invoice must be unchanged).
 async function opInvLink(x) {
-  const inv = await loadInvoice(x, x.p.id);
-  if (!inv.payLinkToken || inv.status === "draft") throw new C.PfmError("not_sent");
-  return { url: payUrl(inv.payLinkToken) };
+  let token = null;
+  await commitAudited(x, async () => {
+    const inv = await loadInvoice(x, x.p.id);
+    if (inv.status === "draft") throw new C.PfmError("not_sent");
+    if (inv.payLinkToken) {
+      const link = js(x, await x.d.fsGet(x.token, `payLinks/${inv.payLinkToken}`));
+      if (link && link.invoiceId === inv.id) { token = inv.payLinkToken; return { result: null }; }
+    }
+    token = rid(22);
+    const at = now();
+    return { writes: [
+        { update: { name: P(x, `payLinks/${token}`), fields: fieldsOf(x, { invoiceId: inv.id, issuerUid: x.uid, createdAt: at, revoked: inv.status === "cancelled" }) }, currentDocument: { exists: false } },
+        { update: { name: P(x, `invoices/${inv.id}`), fields: fieldsOf(x, { payLinkToken: token, updatedAt: at }) }, updateMask: { fieldPaths: ["payLinkToken", "updatedAt"] }, currentDocument: { updateTime: inv._updateTime } }],
+      audit: [{ action: "invoice.link", ref: `invoices/${inv.id}` }], result: null };
+  });
+  return { url: payUrl(token), token };
 }
 
 // Best-effort per-IP limiter for the public endpoint (per Worker isolate). The durable limits are in the data:
@@ -1285,6 +1319,7 @@ async function payView(x, link, inv) {
     issuer: { name: pi.issuer?.name || "", logo: logo ? logo.data : null }, client: { name: pi.client.name },
     issueDate: pi.issueDate, dueDate: pi.dueDate, total: pi.totals.total, amountPaid: pi.totals.amountPaid, amountDue: pi.totals.amountDue,
     pendingClaims: inv.claimedAmount || 0, allowPartial: pi.allowPartial !== false, payable,
+    payState: link.revoked && pi.status !== "paid" ? null : pi.payState, proofTypes: C.FILE_TYPES, proofMax: PROOF_MAX,
     items: pi.items.map((it, i) => ({ description: it.description, qty: it.qty, amount: pi.totals.lines[i].amount })),
     taxTotal: pi.totals.taxTotal, taxLabel: pi.taxLabel, accounts, methods: payable && accounts.length ? ["transfer"] : [], html,
     tz: s ? s.tz : "UTC",
@@ -1300,12 +1335,23 @@ async function payClaim(x, link, inv0) {
   await commitAudited(x, async () => {
     const inv = js(x, await x.d.fsGet(x.token, `invoices/${inv0.id}`));
     const existing = js(x, await x.d.fsGet(x.token, `invoices/${inv.id}/payments/${payId}`));
-    if (existing) { out = { payId, state: existing.state }; return { result: null }; }
+    if (existing) {   // the same report again: the same answer
+      out = { payId, state: existing.state, amount: existing.amount,
+        payState: C.payState({ status: inv.status, total: inv.totals.total, amountPaid: inv.amountPaid, claimedAmount: inv.claimedAmount }) };
+      return { result: null };
+    }
     if (link.revoked || !(inv.status === "sent" || inv.status === "overdue")) throw new C.PfmError("not_payable", inv.status);
     if ((inv.openClaims || 0) >= 5) throw new C.PfmError("claim_pending", "the issuer has not answered earlier reports yet");
-    const amount = C.toMinor(p.amount, inv.currency);
     const room = inv.totals.total - (inv.amountPaid || 0) - (inv.claimedAmount || 0);
+    // C287: the payer says "full" or "partial". Full means everything still open, whatever was typed;
+    // partial needs an amount below that. Old pages send no payType and keep the old meaning (the amount decides).
+    const payType = p.payType == null ? null : p.payType;
+    if (payType !== null && payType !== "full" && payType !== "partial") throw new C.PfmError("bad_pay_type");
+    if (payType === "full" && room <= 0) throw new C.PfmError("overpay", "due 0");
+    const amount = payType === "full" ? room : C.toMinor(p.amount, inv.currency);
     if (amount <= 0) throw new C.PfmError("bad_amount");
+    if (payType === "partial" && inv.allowPartial === false) throw new C.PfmError("partial_not_allowed", "due " + room);
+    if (payType === "partial" && amount >= room) throw new C.PfmError("partial_is_full", "due " + room);
     if (amount > room) throw new C.PfmError("overpay", "due " + room);
     if (inv.allowPartial === false && amount !== room) throw new C.PfmError("partial_not_allowed", "due " + room);
     const acct = (inv.payoutAccounts || []).find((a) => a.id === p.payoutAccountId);
@@ -1319,18 +1365,17 @@ async function payClaim(x, link, inv0) {
     const at = p.paidAt && DATE.test(p.paidAt) && p.paidAt <= today ? p.paidAt : today;
     let proofDoc = null;
     if (p.proof) {
-      const m = /^data:(image\/(png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String(p.proof));
-      if (!m) throw new C.PfmError("bad_proof");
-      const bytes = Uint8Array.from(atob(m[3]), (c) => c.charCodeAt(0));
-      if (bytes.length > 400 * 1024) throw new C.PfmError("bad_proof", "too_big");
-      let type; try { type = C.sniffLogo(bytes.length > 512 * 1024 ? bytes.subarray(0, 64) : bytes); } catch { throw new C.PfmError("bad_proof"); }
-      if (type !== m[1]) throw new C.PfmError("bad_proof");
-      proofDoc = { data: `data:${type};base64,${m[3]}`, size: bytes.length, at: now() };
+      // C287: a photo or a PDF (a bank's e-receipt). Judged by its bytes, not by the name the browser gave it.
+      const f = checkFileData(p.proof, "bad_proof", PROOF_MAX);
+      const name = txt(p.proofName, 120, "proof_name");
+      proofDoc = { data: `data:${f.type};base64,${f.b64}`, type: f.type, size: f.bytes.length, name: name ? await seal(x, name) : "", at: now() };
     }
     const method = acct.type === "mobile_money" ? "mobile_money" : acct.type === "bank" ? "bank_transfer" : "other";
     const pay = { amount, currency: inv.currency, method, state: "claimed", at, payoutAccountId: acct.id, reference: reference ? await seal(x, reference) : "",
-      payer: { name: await seal(x, name), phone: phone ? await seal(x, phone) : "" }, hasProof: !!proofDoc, claimedAt: now() };
-    out = { payId, state: "claimed" }; fresh = { name, amount, number: inv.number, currency: inv.currency, locale: s.locale };
+      payer: { name: await seal(x, name), phone: phone ? await seal(x, phone) : "" }, hasProof: !!proofDoc, proofType: proofDoc ? proofDoc.type : null,
+      payType: payType || (amount === room ? "full" : "partial"), claimedAt: now() };
+    const after = C.payState({ status: inv.status, total: inv.totals.total, amountPaid: inv.amountPaid, claimedAmount: (inv.claimedAmount || 0) + amount });
+    out = { payId, state: "claimed", amount, payState: after }; fresh = { name, amount, number: inv.number, currency: inv.currency, locale: s.locale, after };
     const writes = [
       { update: { name: P(x, `invoices/${inv.id}/payments/${payId}`), fields: fieldsOf(x, pay) }, currentDocument: { exists: false } },
       { transform: { document: P(x, `invoices/${inv.id}`), fieldTransforms: [{ fieldPath: "openClaims", increment: { integerValue: "1" } }, { fieldPath: "claimedAmount", increment: { integerValue: String(amount) } }] } },
@@ -1342,7 +1387,8 @@ async function payClaim(x, link, inv0) {
   });
   if (fresh && x.d.push) {
     const ar = fresh.locale !== "en", amt = moneyText(fresh.amount, fresh.currency);
-    await x.d.push(x.token, x.uid, ar ? `أبلغ ${fresh.name} عن دفع ${amt}` : `${fresh.name} reports paying ${amt}`,
+    const full = fresh.after === "pending_verification";
+    await x.d.push(x.token, x.uid, ar ? `أبلغ ${fresh.name} عن دفع ${amt}${full ? " (كامل المبلغ)" : " (دفعة جزئيّة)"}` : `${fresh.name} reports paying ${amt}${full ? " (in full)" : " (part payment)"}`,
       ar ? `الفاتورة ${fresh.number} — تحقّق من حسابك ثمّ أكّد الدفعة أو ارفضها.` : `Invoice ${fresh.number} — check your account, then confirm or reject the payment.`).catch(() => 0);
   }
   return out;
@@ -1351,7 +1397,9 @@ async function payClaim(x, link, inv0) {
 async function opClaimProof(x) {
   const inv = await loadInvoice(x, x.p.id);
   const d0 = js(x, await x.d.fsGet(x.token, `invoices/${inv.id}/proofs/${segId(x.p.payId)}`));
-  return { data: d0 ? d0.data : null };
+  if (!d0) return { data: null };
+  const type = d0.type || (/^data:([^;]+);/.exec(d0.data || "") || [])[1] || null;
+  return { data: d0.data, type, size: d0.size || null, name: d0.name ? await C.openField(d0.name, x.uid, keys(x)).catch(() => null) : null };
 }
 
 // The issuer decides. Confirm = the same booking as a recorded payment (invoice totals, ledger income).
@@ -1417,6 +1465,19 @@ export function checkImageData(data, code, max) {
   let type; try { type = C.sniffLogo(bytes); } catch { throw new C.PfmError(code, "type"); }
   if (type !== m[1]) throw new C.PfmError(code, "type");
   return { type, b64: m[3], bytes };
+}
+
+// C287: a data: URI of a photo or a PDF, judged by its bytes (the declared type must match). Returns { type, b64, bytes }.
+export const PROOF_MAX = 600 * 1024;   // base64 ≈ 800 KB: fits one Firestore document (1 MiB) with room for the fields
+export function checkFileData(data, code, max) {
+  const m = /^data:(image\/(?:png|jpeg|webp)|application\/pdf);base64,([A-Za-z0-9+/=]+)$/.exec(String(data || ""));
+  if (!m) throw new C.PfmError(code, "type");
+  if (m[2].length > Math.ceil(max / 3) * 4 + 4) throw new C.PfmError(code, "too_big");
+  const bytes = Uint8Array.from(atob(m[2]), (c) => c.charCodeAt(0));
+  if (bytes.length > max) throw new C.PfmError(code, "too_big");
+  let type; try { type = C.sniffFile(bytes); } catch { throw new C.PfmError(code, "type"); }
+  if (type !== m[1]) throw new C.PfmError(code, "type");
+  return { type, b64: m[2], bytes };
 }
 
 // One photo per entry at pfm/{uid}/files/r_{txId}, sealed like notes (a receipt can show card digits or an
@@ -1540,6 +1601,12 @@ const PJ_OPS = {
   "pfm.proj.members.remove": opMembersRemove,
   "pfm.proj.invite.create": opInviteCreate,
   "pfm.proj.invite.accept": opInviteAccept,
+  // C287: attachments with fixed dates, and price history per BOQ line
+  "pfm.proj.file.add": opFileAdd,
+  "pfm.proj.file.list": opFileList,
+  "pfm.proj.file.get": opFileGet,
+  "pfm.proj.file.remove": opFileRemove,
+  "pfm.proj.prices": opProjPrices,
 };
 Object.assign(OPS, PJ_OPS);
 PFM_OPS.push(...Object.keys(PJ_OPS));
@@ -1745,7 +1812,10 @@ export async function dropProject(d, token, pid, spend) {
   for (const e of await d.fsList(token, J.paths.estimates(pid))) {
     if (!(await drain(d, token, J.paths.lines(pid, e.name.split("/").pop()), spend))) return false;
   }
-  for (const rel of [J.paths.estimates(pid), J.paths.tx(pid), J.paths.alerts(pid), J.paths.members(pid)]) {
+  for (const f of await d.fsList(token, J.paths.files(pid))) {          // C287: attachments' bytes, then their records
+    if (!(await drain(d, token, J.paths.parts(pid, f.name.split("/").pop()), spend))) return false;
+  }
+  for (const rel of [J.paths.estimates(pid), J.paths.tx(pid), J.paths.alerts(pid), J.paths.files(pid), J.paths.members(pid)]) {
     if (!(await drain(d, token, rel, spend))) return false;
   }
   if (!spend()) return false;
@@ -1765,11 +1835,21 @@ async function opProjDelete(x) {
 
 // ---------- estimates (BOQ) ----------
 
-async function lineRow(x, pid, v, sortOrder) {
+async function lineRow(x, pid, v, sortOrder, stamp) {
   return {
     category: v.category, unit: v.unit, estQty: J.qtyText(v.estQty), estUnitPrice: v.estUnitPrice, estTotal: v.estTotal,
     name: await sealP(x, pid, v.name), notes: await sealP(x, pid, txt(v.notes, 300, "notes")), sortOrder,
+    // C287: when and from whom this price was quoted; the server time it was entered; every earlier price
+    priceDate: v.priceDate, supplier: await sealP(x, pid, v.supplier || null), pricedAt: stamp.pricedAt, priceLog: stamp.priceLog,
   };
+}
+// The fields copied when a revision starts from the baseline (the price history travels with the line).
+const LINE_FIELDS = ["category", "unit", "estQty", "estUnitPrice", "estTotal", "name", "notes", "sortOrder", "priceDate", "supplier", "pricedAt", "priceLog"];
+// Lines written before C287 have no price date: they count as priced when their revision was created.
+const priceDateOfRow = (r, est) => r.priceDate || (est && est.createdAt ? String(est.createdAt).slice(0, 10) : null);
+const pricedAtOfRow = (r, est) => r.pricedAt || (est ? est.createdAt : null) || null;
+async function openLog(x, pid, log) {
+  return Promise.all((Array.isArray(log) ? log : []).map(async (e) => ({ ...e, supplier: e.supplier ? await openP(x, pid, e.supplier) : null })));
 }
 
 async function opEstCreate(x) {
@@ -1788,10 +1868,11 @@ async function opEstCreate(x) {
     const revision = J.nextRevision(ests);
     const reason = txt(x.p.reason, 200, "reason");
     if (revision > 1 && !reason) throw new C.PfmError("reason_required", "a change order needs a reason");
-    let rows = [];
+    let rows = [], base = null;
     if (x.p.fromBaseline) {
       if (!p.baselineEstimateId) throw new C.PfmError("no_baseline");
       rows = await linesOf(x, pid, p.baselineEstimateId);
+      base = await getDoc(x, J.paths.estimate(pid, p.baselineEstimateId));
     }
     if (rows.length > PROJ_MAX_LINES) throw new C.PfmError("too_many_lines", String(PROJ_MAX_LINES));
     const est = { revision, status: "draft", reason: reason || (revision === 1 ? "Initial estimate" : null), rev: 1,
@@ -1800,7 +1881,7 @@ async function opEstCreate(x) {
     return {
       writes: [
         createAt(x, J.paths.estimate(pid, eid), est),
-        ...rows.map((r) => createAt(x, `${J.paths.lines(pid, eid)}/${r.id}`, pick(r, ["category", "unit", "estQty", "estUnitPrice", "estTotal", "name", "notes", "sortOrder"]))),
+        ...rows.map((r) => createAt(x, `${J.paths.lines(pid, eid)}/${r.id}`, { ...pick(r, LINE_FIELDS), priceDate: priceDateOfRow(r, base), pricedAt: pricedAtOfRow(r, base) })),
         updateAt(x, J.paths.project(pid), { rev: p.rev + 1, updatedAt: now() }, ["rev", "updatedAt"], p._updateTime),
       ],
       audit: [{ action: "estimate.create", ref: `projects/${pid}/estimates/${eid}`, after: { revision, lineCount: rows.length, total: est.total } }],
@@ -1821,13 +1902,26 @@ async function opEstLines(x) {
     const est = await estimateOf(x, pid, eid);
     if (x.p.rev !== est.rev) throw new C.PfmError("stale", "reload and try again");
     J.assertEstimateEditable(est);
-    const checked = x.p.lines.map((l) => ({ ...J.validateBoqLine(l, p.currency), notes: l.notes }));
+    const today = await todayOf(x);
+    const checked = x.p.lines.map((l) => ({ ...J.validateBoqLine(l, p.currency, today), notes: l.notes }));
     J.assertUniqueLineKeys(checked);
-    const rows = [];
-    for (let i = 0; i < checked.length; i++) rows.push({ key: checked[i].lineKey, data: await lineRow(x, pid, checked[i], i) });
+    const old = await linesOf(x, pid, eid);
+    const oldBy = new Map(old.map((r) => [r.id, r]));
+    const at = now(), rows = [];
+    let repriced = 0;
+    for (let i = 0; i < checked.length; i++) {
+      const o = oldBy.get(checked[i].lineKey);
+      const prev = o ? { ...o, priceDate: priceDateOfRow(o, est), pricedAt: pricedAtOfRow(o, est), supplierPlain: (await openP(x, pid, o.supplier)) || "" } : null;
+      const stamp = J.nextPriceLog(prev, checked[i], { at, by: x.uid, revision: est.revision });
+      if (stamp.changed) {
+        repriced++;
+        const last = stamp.priceLog[stamp.priceLog.length - 1];
+        stamp.priceLog = [...stamp.priceLog.slice(0, -1), { ...last, supplier: await sealP(x, pid, last.supplier) }];
+      }
+      rows.push({ key: checked[i].lineKey, data: await lineRow(x, pid, checked[i], i, stamp) });
+    }
     totals = J.estimateTotals(checked);
     const keep = new Set(rows.map((r) => r.key));
-    const old = await linesOf(x, pid, eid);
     const estRow = { rev: est.rev + 1, total: totals.total, lineCount: rows.length, updatedAt: now() };
     out = { id: eid, ...est, ...estRow };
     return {
@@ -1836,7 +1930,7 @@ async function opEstLines(x) {
         ...rows.map((r) => ({ update: { name: P(x, `${J.paths.lines(pid, eid)}/${r.key}`), fields: fieldsOf(x, r.data) } })),
         updateAt(x, J.paths.estimate(pid, eid), estRow, ["rev", "total", "lineCount", "updatedAt"], est._updateTime),
       ],
-      audit: [{ action: "estimate.lines", ref: `projects/${pid}/estimates/${eid}`, after: { lineCount: rows.length, total: totals.total } }],
+      audit: [{ action: "estimate.lines", ref: `projects/${pid}/estimates/${eid}`, after: { lineCount: rows.length, total: totals.total, repriced } }],
       result: null,
     };
   });
@@ -1979,7 +2073,10 @@ async function opPtxList(x) {
   if (x.p.kind) rows = rows.filter((t) => t.kind === x.p.kind);
   if (x.p.lineKey) rows = rows.filter((t) => t.lineKey === x.p.lineKey);
   rows.sort((a, b) => (a.occurredOn === b.occurredOn ? (a.createdAt < b.createdAt ? 1 : -1) : a.occurredOn < b.occurredOn ? 1 : -1));
-  return { items: await Promise.all(rows.map((t) => presentTx(x, pid, t))), truncated: rows.length >= PROJ_MAX_TX };
+  const counts = fileCounts(await filesOf(x, pid));
+  const items = await Promise.all(rows.map(async (t) => ({ ...(await presentTx(x, pid, t)), files: counts.get(J.targetKey({ type: "tx", txId: t.id })) || 0,
+    unitPrice: t.kind === "expense" && t.quantity ? J.actualUnitPrice(t.amount, t.quantity) : null })));
+  return { items, truncated: rows.length >= PROJ_MAX_TX };
 }
 
 // ---------- analytics, charts, alerts ----------
@@ -2000,12 +2097,15 @@ async function opProjVariance(x) {
   const { health } = await healthFor(x, p, eid);
   const rows = eid ? await linesOf(x, pid, eid) : [];
   const byKey = new Map(rows.map((r) => [r.id, r]));
+  const est = eid ? await getDoc(x, J.paths.estimate(pid, eid)) : null;
+  const counts = fileCounts(await filesOf(x, pid));
   const lines = [];
   for (const v of health.lines) {
     const r = byKey.get(v.lineKey) || {};
-    lines.push({ ...v, name: await openP(x, pid, r.name), unit: r.unit ?? null, category: r.category ?? null, notes: await openP(x, pid, r.notes) });
+    lines.push({ ...v, name: await openP(x, pid, r.name), unit: r.unit ?? null, category: r.category ?? null, notes: await openP(x, pid, r.notes),
+      priceDate: priceDateOfRow(r, est), pricedAt: pricedAtOfRow(r, est), supplier: await openP(x, pid, r.supplier), priceChanges: Array.isArray(r.priceLog) ? r.priceLog.length : 0,
+      files: eid ? counts.get(J.targetKey({ type: "line", estimateId: eid, lineKey: v.lineKey })) || 0 : 0 });
   }
-  const est = eid ? await getDoc(x, J.paths.estimate(pid, eid)) : null;
   return { estimateId: eid, estimateRev: est ? est.rev : null, currency: p.currency, lines };
 }
 
@@ -2197,8 +2297,8 @@ export async function purgeProjects(d, token, uid, spend) {
 // Both read the same snapshot as the screens. Text is escaped; amounts are formatted from minor units.
 // =====================================================================================================
 
-Object.assign(OPS, { "pfm.proj.export": opProjExport, "pfm.proj.report": opProjReport });
-PFM_OPS.push("pfm.proj.export", "pfm.proj.report");
+Object.assign(OPS, { "pfm.proj.export": opProjExport, "pfm.proj.report": opProjReport, "pfm.proj.report.pdf": opProjReportPdf });
+PFM_OPS.push("pfm.proj.export", "pfm.proj.report", "pfm.proj.report.pdf");
 
 const escH = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const fmtMoney = (minor, cur) => (minor == null ? "" : C.fromMinor(minor, cur) + " " + cur);
@@ -2312,4 +2412,155 @@ async function opProjReport(x) {
   const snap = await projectSnapshot(x, pid);
   const ar = x.p.lang !== "en";
   return { filename: `project-${pid}.html`, html: projectReportHtml(snap, ar, new Date().toISOString().slice(0, 10)) };
+}
+
+// =====================================================================================================
+// C287: project attachments (photos, quotes, supplier invoices, receipts) and price history per BOQ line.
+// pfmProjects/{pid}/files/{fid}            { target, kind, name🔒, note🔒, type, size, sha256, parts, docDate, quotedUnitPrice,
+//                                            uploadedAt ⚙, uploadedBy ⚙, removedAt ⚙, removedBy ⚙, removeReason🔒 }
+// pfmProjects/{pid}/files/{fid}/parts/{n}  { data: 🔒 base64 slice }
+// Nothing about an attachment can be edited after it is added: its dates are the audit trail. Removing drops the bytes
+// and keeps the record. One commit writes the record and all parts (≤ 11 parts of 384 KB for the 4 MB limit).
+// =====================================================================================================
+
+const filesOf = (x, pid) => listDocs(x, J.paths.files(pid));
+// A shared project's members need not have set up their own accountant: then today is the UTC date.
+async function todayOf(x) { const s = await settingsOf(x, false); return C.localDate((s && s.tz) || "UTC"); }
+function fileCounts(files) {
+  const m = new Map();
+  for (const f of files) if (!f.removedAt && f.target) { const k = J.targetKey(f.target); m.set(k, (m.get(k) || 0) + 1); }
+  return m;
+}
+async function presentFile(x, pid, f) {
+  return { id: f.id, target: f.target, kind: f.kind, name: await openP(x, pid, f.name), note: await openP(x, pid, f.note), type: f.type, size: f.size,
+    sha256: f.sha256, docDate: f.docDate, quotedUnitPrice: f.quotedUnitPrice ?? null, uploadedAt: f.uploadedAt, uploadedBy: f.uploadedBy,
+    removedAt: f.removedAt || null, removedBy: f.removedBy || null, removeReason: f.removedAt ? await openP(x, pid, f.removeReason) : null };
+}
+// The thing a file is attached to must exist (and, for a line, be on that revision).
+async function assertTarget(x, pid, t) {
+  if (t.type === "project") return;
+  if (t.type === "tx") { if (!(await getDoc(x, `${J.paths.tx(pid)}/${segId(t.txId)}`))) throw new C.PfmError("not_found", "entry"); return; }
+  await estimateOf(x, pid, segId(t.estimateId));
+  if (t.type === "line" && !(await getDoc(x, `${J.paths.lines(pid, t.estimateId)}/${t.lineKey}`))) throw new C.PfmError("not_found", "line");
+}
+
+async function opFileAdd(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  const fid = ID_OF(x, "f_");
+  await accessOf(x, pid, "editor");                      // before decoding megabytes for someone who may not add
+  const today = await todayOf(x);
+  const f = checkFileData(x.p.data, "bad_file", J.FILE_MAX);
+  const sha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", f.bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  let out = null;
+  await commitAudited(x, async () => {
+    const { p } = await accessOf(x, pid, "editor");
+    const existing = await getDoc(x, J.paths.file(pid, fid));
+    if (existing) { out = existing; return { result: null }; }
+    const v = J.validateAttachment(x.p, today, p.currency);
+    await assertTarget(x, pid, v.target);
+    const live = (await filesOf(x, pid)).filter((r) => !r.removedAt);
+    if (live.length >= J.FILES_PER_PROJECT) throw new C.PfmError("too_many_files", String(J.FILES_PER_PROJECT));
+    if (live.filter((r) => J.targetKey(r.target) === J.targetKey(v.target)).length >= J.FILES_PER_TARGET) throw new C.PfmError("too_many_files", String(J.FILES_PER_TARGET));
+    // split the base64 text on 4-character boundaries, so every part decodes on its own
+    const step = (J.FILE_PART / 3) * 4, parts = [];
+    for (let i = 0; i < f.b64.length; i += step) parts.push(f.b64.slice(i, i + step));
+    const row = { target: v.target, kind: v.kind, name: await sealP(x, pid, v.name), note: await sealP(x, pid, v.note), type: f.type, size: f.bytes.length, sha256,
+      parts: parts.length, docDate: v.docDate, quotedUnitPrice: v.quotedUnitPrice, uploadedAt: now(), uploadedBy: x.uid, removedAt: null };
+    out = { id: fid, ...row };
+    const writes = [createAt(x, J.paths.file(pid, fid), row)];
+    for (let i = 0; i < parts.length; i++) writes.push(createAt(x, `${J.paths.parts(pid, fid)}/${String(i).padStart(3, "0")}`, { data: await sealP(x, pid, parts[i]) }));
+    return { writes, audit: [{ action: "project.file.add", ref: `projects/${pid}/files/${fid}`, after: { target: J.targetKey(v.target), kind: v.kind, type: f.type, size: f.bytes.length, sha256: sha256.slice(0, 16), docDate: v.docDate, quotedUnitPrice: v.quotedUnitPrice } }], result: null };
+  });
+  return { file: await presentFile(x, pid, out) };
+}
+
+async function opFileList(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  await accessOf(x, pid, "viewer");
+  let rows = await filesOf(x, pid);
+  if (x.p.target) { const k = J.targetKey(J.validateAttachment({ kind: "other", target: x.p.target }, "9999-12-31", "SDG").target); rows = rows.filter((r) => r.target && J.targetKey(r.target) === k); }
+  if (!x.p.withRemoved) rows = rows.filter((r) => !r.removedAt);
+  rows.sort((a, b) => (a.docDate === b.docDate ? (a.uploadedAt < b.uploadedAt ? 1 : -1) : a.docDate < b.docDate ? 1 : -1));
+  return { items: await Promise.all(rows.map((r) => presentFile(x, pid, r))) };
+}
+
+async function opFileGet(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid), fid = segId(x.p.fid);
+  await accessOf(x, pid, "viewer");
+  const f = await getDoc(x, J.paths.file(pid, fid));
+  if (!f) throw new C.PfmError("not_found", "file");
+  if (f.removedAt) throw new C.PfmError("file_removed");
+  const parts = (await listDocs(x, J.paths.parts(pid, fid))).sort((a, b) => (a.id < b.id ? -1 : 1));
+  if (parts.length !== f.parts) throw new C.PfmError("file_incomplete");
+  let b64 = "";
+  for (const pt of parts) b64 += await C.openField(pt.data, pbind(pid), keys(x));
+  return { file: await presentFile(x, pid, f), data: `data:${f.type};base64,${b64}` };
+}
+
+async function opFileRemove(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid), fid = segId(x.p.fid);
+  const reason = txt(x.p.reason, 200, "reason");
+  if (!reason) throw new C.PfmError("reason_required");
+  let out;
+  await commitAudited(x, async () => {
+    await accessOf(x, pid, "editor");
+    const f = await getDoc(x, J.paths.file(pid, fid));
+    if (!f) throw new C.PfmError("not_found", "file");
+    if (f.removedAt) { out = f; return { result: null }; }
+    const row = { removedAt: now(), removedBy: x.uid, removeReason: await sealP(x, pid, reason) };
+    out = { ...f, ...row };
+    const parts = await listDocs(x, J.paths.parts(pid, fid));
+    return { writes: [updateAt(x, J.paths.file(pid, fid), row, ["removedAt", "removedBy", "removeReason"], f._updateTime), ...parts.map((pt) => deleteAt(x, `${J.paths.parts(pid, fid)}/${pt.id}`))],
+      audit: [{ action: "project.file.remove", ref: `projects/${pid}/files/${fid}`, before: { sha256: (f.sha256 || "").slice(0, 16), docDate: f.docDate } }], result: null };
+  });
+  return { file: await presentFile(x, pid, out) };
+}
+
+// Price history of the BOQ lines: every price each line had across all revisions (with the date it was quoted and the
+// time it was entered), quoted prices from attached quotes, and the unit prices actually paid. Optional lineKey.
+async function opProjPrices(x) {
+  await projSchemaReady(x);
+  const pid = segId(x.p.pid);
+  const { p } = await accessOf(x, pid, "viewer");
+  const only = x.p.lineKey ? segId(x.p.lineKey) : null;
+  const ests = await estimatesOf(x, pid);
+  const logs = new Map(), meta = new Map();
+  for (const e of ests) {
+    for (const r of await linesOf(x, pid, e.id)) {
+      if (only && r.id !== only) continue;
+      const log = Array.isArray(r.priceLog) && r.priceLog.length ? r.priceLog
+        : [{ unitPrice: r.estUnitPrice, priceDate: priceDateOfRow(r, e), pricedAt: pricedAtOfRow(r, e), by: null, revision: e.revision, supplier: r.supplier || null }];
+      if (!logs.has(r.id)) logs.set(r.id, []);
+      logs.get(r.id).push(log);
+      meta.set(r.id, { name: r.name, unit: r.unit, revision: e.revision });   // the latest revision names the line
+    }
+  }
+  const txs = await txsOf(x, pid);
+  const files = (await filesOf(x, pid)).filter((f) => !f.removedAt && f.target && f.target.type === "line");
+  const lines = [];
+  for (const [k, ls] of logs) {
+    const opened = await Promise.all(ls.map((l) => openLog(x, pid, l)));
+    const h = J.priceHistory(k, opened, files.filter((f) => f.target.lineKey === k), txs);
+    const m = meta.get(k);
+    lines.push({ ...h, name: await openP(x, pid, m.name), unit: m.unit ?? null });
+  }
+  lines.sort((a, b) => ((a.name || "") < (b.name || "") ? -1 : 1));
+  return { currency: p.currency, lines };
+}
+
+// C287: the project report as a PDF file (same contract as inv.pdf: the file, or the HTML for the phone to convert).
+async function opProjReportPdf(x) {
+  const r = await opProjReport(x);
+  const filename = pdfName(r.filename.replace(/\.html$/, ""));
+  if (!pdfAvailable(x.env)) return { pdf: null, html: r.html, filename, via: "device" };
+  try {
+    const bytes = await htmlToPdf(x.env, r.html, { footer: "", fetchImpl: x.d.fetch || fetch });
+    return { pdf: toBase64(bytes), size: bytes.length, filename, via: "server" };
+  } catch (e) {
+    return { pdf: null, html: r.html, filename, via: "device", serverError: String(e.message || e).slice(0, 120) };
+  }
 }

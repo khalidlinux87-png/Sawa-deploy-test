@@ -756,5 +756,84 @@ await t("import prefs: own accounts and confirmed names, sealed at rest, validat
   assert.ok(!fs.docs.has(`${ROOT}/pfm/u1/import/prefs`), "account deletion removes the import prefs");
 });
 
+// ---------- C287: pay states, full/partial reports, PDF proofs, links for old invoices, PDF files ----------
+const PDF_BYTES = Buffer.from("%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n");
+const pdfUri = (b = PDF_BYTES) => "data:application/pdf;base64," + b.toString("base64");
+
+await t("C287 pay state: partial report → partially_paid, the rest → pending_verification, confirm → paid", async () => {
+  const r = await sentInvoice();
+  assert.equal((await r.call("inv.get", { id: r.inv.id })).invoice.payState, "unpaid");
+  const a = await claim(r, { payType: "partial", amount: "300" });
+  assert.equal(a.payState, "partially_paid"); assert.equal(a.amount, 30000);
+  let g = (await r.call("inv.get", { id: r.inv.id })).invoice;
+  assert.equal(g.status, "sent"); assert.equal(g.payState, "partially_paid"); assert.equal(g.claimedAmount, 30000);
+  assert.equal((await pub(r, "pay.view", { token: r.tok })).payState, "partially_paid");
+  // "full" pays what is still open (630.00), whatever amount was typed
+  const b = await claim(r, { payType: "full", amount: "1" });
+  assert.equal(b.amount, 63000); assert.equal(b.payState, "pending_verification");
+  const list = await r.call("inv.list", {});
+  assert.equal(list.items.find((i) => i.id === r.inv.id).payState, "pending_verification");
+  const html = (await r.call("inv.html", { id: r.inv.id, lang: "en" })).html;
+  assert.match(html, /Paid — pending verification/);
+  for (const p of (await r.call("inv.get", { id: r.inv.id })).invoice.payments) await r.call("inv.claim.decide", { id: r.inv.id, payId: p.id, decision: "confirm" });
+  g = (await r.call("inv.get", { id: r.inv.id })).invoice;
+  assert.equal(g.status, "paid"); assert.equal(g.payState, "paid"); assert.equal(g.claimedAmount, 0);
+});
+
+await t("C287 pay type: partial must be below what is open and allowed; unknown type refused", async () => {
+  const r = await sentInvoice();
+  await assert.rejects(claim(r, { payType: "partial", amount: "930" }), err("partial_is_full"));
+  await assert.rejects(claim(r, { payType: "some" }), err("bad_pay_type"));
+  const r2 = await sentInvoice({ allowPartial: false });
+  await assert.rejects(claim(r2, { payType: "partial", amount: "100" }), err("partial_not_allowed"));
+  const f = await claim(r2, { payType: "full" });
+  assert.equal(f.amount, 93000); assert.equal(f.payState, "pending_verification");
+  await assert.rejects(claim(r2, { payType: "full" }), err("overpay"));                 // nothing left to report
+});
+
+await t("C287 proof: a PDF receipt is accepted by its bytes and the issuer gets it back with its type", async () => {
+  const r = await sentInvoice();
+  await assert.rejects(claim(r, { proof: "data:application/pdf;base64," + Buffer.from("not a pdf at all, really").toString("base64") }), err("bad_proof"));
+  await assert.rejects(claim(r, { proof: "data:image/png;base64," + PDF_BYTES.toString("base64") }), err("bad_proof"));   // declared type must match the bytes
+  await assert.rejects(claim(r, { proof: pdfUri(Buffer.concat([PDF_BYTES, Buffer.alloc(610 * 1024)])) }), err("bad_proof"));   // over 600 KB
+  const c = await claim(r, { payType: "partial", amount: "100", proof: pdfUri(), proofName: "bank-receipt.pdf" });
+  const g = (await r.call("inv.get", { id: r.inv.id })).invoice;
+  const p = g.payments.find((x) => x.id === c.payId);
+  assert.equal(p.hasProof, true); assert.equal(p.proofType, "application/pdf"); assert.equal(p.payType, "partial");
+  const got = await r.call("inv.claim.proof", { id: r.inv.id, payId: c.payId });
+  assert.equal(got.type, "application/pdf"); assert.equal(got.name, "bank-receipt.pdf"); assert.equal(got.data, pdfUri());
+  assert.ok(![...r.fs.docs.values()].some((e) => JSON.stringify(e.data).includes("bank-receipt")), "the file name is sealed");
+});
+
+await t("C287 inv.link: an invoice sent without a link gets one on request, and it opens the pay page", async () => {
+  const r = await sentInvoice();
+  const doc = r.fs.docs.get(`${ROOT}/invoices/${r.inv.id}`);
+  r.fs.docs.delete(`${ROOT}/payLinks/${r.tok}`); delete doc.data.payLinkToken;            // as if sent before C267
+  const a = await r.call("inv.link", { id: r.inv.id });
+  assert.match(a.url, /^https:\/\/www\.sawaaap\.com\/pay\/[a-z0-9]{22}$/);
+  assert.equal((await r.call("inv.link", { id: r.inv.id })).url, a.url);                  // stable
+  const v = await pub(r, "pay.view", { token: a.token });
+  assert.equal(v.number, r.inv.number); assert.equal(v.payable, true);
+  const { invoice } = await draft(r.call);
+  await assert.rejects(r.call("inv.link", { id: invoice.id }), err("not_sent"));
+});
+
+await t("C287 inv.pdf: the phone gets the HTML without Browser Rendering; the file with it; HTML again if it fails", async () => {
+  const r = await sentInvoice();
+  const a = await r.call("inv.pdf", { id: r.inv.id });
+  assert.equal(a.pdf, null); assert.equal(a.via, "device"); assert.match(a.html, new RegExp(r.inv.number)); assert.equal(a.filename, `invoice-${r.inv.number}.pdf`);
+  const env = { ...r.env, CF_ACCOUNT_ID: "acct1", CF_BR_TOKEN: "tok1" };
+  let sent = null;
+  const d = { ...r.d, fetch: async (url, init) => { sent = { url, init, body: JSON.parse(init.body) }; return new Response(PDF_BYTES, { headers: { "content-type": "application/pdf" } }); } };
+  const b = await handlePfmOp("inv.pdf", "u1", { id: r.inv.id }, env, d);
+  assert.equal(b.via, "server"); assert.equal(Buffer.from(b.pdf, "base64").toString(), PDF_BYTES.toString());
+  assert.equal(sent.url, "https://api.cloudflare.com/client/v4/accounts/acct1/browser-rendering/pdf");
+  assert.equal(sent.init.headers.Authorization, "Bearer tok1"); assert.match(sent.body.html, new RegExp(r.inv.number));
+  assert.deepEqual(sent.body.rejectRequestPattern, ["^(?!data:).*"]);
+  const bad = { ...r.d, fetch: async () => new Response(JSON.stringify({ errors: [{ message: "quota" }] }), { status: 429, headers: { "content-type": "application/json" } }) };
+  const c = await handlePfmOp("inv.pdf", "u1", { id: r.inv.id }, env, bad);
+  assert.equal(c.pdf, null); assert.equal(c.via, "device"); assert.match(c.serverError, /429 quota/); assert.ok(c.html.length > 500);
+});
+
 assert.ok(PFM_OPS.includes("pfm.tx.add"));
 console.log(process.exitCode ? "FAILED" : `pfm-worker: ${n} passed`);

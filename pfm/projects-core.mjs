@@ -119,7 +119,9 @@ export function validateProjectInput(input = {}) {
 }
 
 // One BOQ line. estQty is text ("2.5") or BigInt; estUnitPrice is text or minor units.
-export function validateBoqLine(input = {}, currency) {
+// C287: every price carries the date it was quoted (priceDate, the date on the supplier's quote or the day it was
+// checked) and optionally who quoted it. `today` (the user's local date) is the default and the upper bound.
+export function validateBoqLine(input = {}, currency, today = null) {
   if (!ID_RE.test(input.lineKey ?? "")) throw new PfmError("bad_line_key", String(input.lineKey));
   if (!BOQ_CATEGORIES.includes(input.category)) throw new PfmError("bad_category", String(input.category));
   const estQty = qOf(input.estQty);
@@ -134,8 +136,120 @@ export function validateBoqLine(input = {}, currency) {
     estQty,
     estUnitPrice,
     estTotal: lineTotal(estQty, estUnitPrice),
+    priceDate: priceDateOf(input.priceDate, today),
+    supplier: text(input.supplier, 120, "bad_supplier", false),
   };
 }
+
+const MIN_DOC_DATE = "2000-01-01";
+// A date on a document or a quote: a real date, not before 2000, not after today (when today is known).
+function priceDateOf(v, today) {
+  if (v == null || v === "") return today ? assertDate(today, "bad_price_date") : null;   // no date and no "today": callers that predate C287
+  assertDate(v, "bad_price_date");
+  if (v < MIN_DOC_DATE || (today && v > today)) throw new PfmError("bad_price_date", "out of range");
+  return v;
+}
+
+// ---------- price history (C287) ----------
+// Each BOQ line keeps a priceLog: one entry per price change, stamped by the server. The log is copied into the next
+// revision with the line, so the history follows the lineKey across change orders. Approved revisions are read-only,
+// so a past price can never be rewritten. Entries: { unitPrice, priceDate, pricedAt, by, revision, supplier? }.
+export const PRICE_LOG_MAX = 60;
+
+// The log after saving a line. `old` is the stored line of the same draft (or the copy from the baseline), or null.
+// Returns { pricedAt, priceLog } — unchanged when the price, its date and its supplier are the same.
+export function nextPriceLog(old, v, { at, by, revision }) {
+  const prevLog = Array.isArray(old?.priceLog) ? old.priceLog : [];
+  const same = old && old.estUnitPrice === v.estUnitPrice && (old.priceDate || null) === v.priceDate && (old.supplierPlain ?? old.supplier ?? "") === (v.supplier || "");
+  if (same && old.pricedAt) return { pricedAt: old.pricedAt, priceLog: prevLog, changed: false };
+  const entry = { unitPrice: v.estUnitPrice, priceDate: v.priceDate, pricedAt: at, by, revision, supplier: v.supplier || null };
+  let log = [...prevLog, entry];
+  if (log.length > PRICE_LOG_MAX) log = [log[0], ...log.slice(log.length - PRICE_LOG_MAX + 1)];   // keep the first price and the latest
+  return { pricedAt: at, priceLog: log, changed: true };
+}
+
+// Unit price actually paid on an expense with a quantity: amount ÷ quantity, in minor units (rounded).
+export function actualUnitPrice(amount, quantity) {
+  const q = qOf(quantity);
+  if (q <= 0n) return null;
+  return toNum(divRound(big(amount) * QTY_SCALE, q));
+}
+
+// Price history for one line: estimate prices over time (from the priceLog of every revision, de-duplicated),
+// quotes attached as files, and the prices actually paid (posted expenses on the line with a quantity).
+// changeBp: latest estimate vs the first one. actualVsEstimateBp: weighted average paid vs the price in force
+// on the day of each purchase (the latest estimate priced on or before that day; else the first estimate).
+export function priceHistory(lineKey, logs, quotes, txs) {
+  const seen = new Set(), est = [];
+  for (const e of logs.flat()) {
+    if (!e || typeof e.unitPrice !== "number") continue;
+    const k = e.pricedAt + "|" + e.unitPrice + "|" + e.priceDate;
+    if (seen.has(k)) continue;
+    seen.add(k); est.push(e);
+  }
+  est.sort((a, b) => (a.pricedAt < b.pricedAt ? -1 : a.pricedAt > b.pricedAt ? 1 : 0));
+  // lines saved before C287 have no log; each revision then yields one stand-in entry. Keep it only when the price moved.
+  for (let i = est.length - 1; i > 0; i--) if (est[i].by == null && est[i].unitPrice === est[i - 1].unitPrice && est[i].priceDate === est[i - 1].priceDate) est.splice(i, 1);
+  const actual = txs.filter((t) => t.status !== "voided" && t.kind === "expense" && t.lineKey === lineKey && t.quantity)
+    .map((t) => ({ txId: t.id, occurredOn: t.occurredOn, quantity: t.quantity, amount: t.amount, unitPrice: actualUnitPrice(t.amount, t.quantity), createdAt: t.createdAt }))
+    .filter((a) => a.unitPrice != null)
+    .sort((a, b) => (a.occurredOn < b.occurredOn ? -1 : a.occurredOn > b.occurredOn ? 1 : 0));
+  const q = quotes.filter((f) => f.quotedUnitPrice != null).map((f) => ({ fileId: f.id, docDate: f.docDate, unitPrice: f.quotedUnitPrice, uploadedAt: f.uploadedAt }))
+    .sort((a, b) => (a.docDate < b.docDate ? -1 : 1));
+  const first = est[0] || null, latest = est[est.length - 1] || null;
+  const inForce = (day) => { let r = null; for (const e of est) if (e.priceDate <= day) r = !r || e.priceDate >= r.priceDate ? e : r; return r || first; };
+  let paid = 0n, expected = 0n;
+  for (const a of actual) { const e = inForce(a.occurredOn); if (!e) continue; paid += big(a.amount); expected += divRound(big(e.unitPrice) * qOf(a.quantity), QTY_SCALE); }
+  const bp = (now, was) => (was > 0n ? toNum(divRound((now - was) * 10000n, was)) : null);
+  return {
+    lineKey, estimates: est, quotes: q, actual,
+    firstEstimate: first, latestEstimate: latest, latestActual: actual[actual.length - 1] || null,
+    changeBp: first && latest ? bp(big(latest.unitPrice), big(first.unitPrice)) : null,
+    actualVsEstimateBp: actual.length && expected > 0n ? bp(paid, expected) : null,
+  };
+}
+
+// ---------- attachments (C287) ----------
+// Photos, quotes, supplier invoices and receipts on a project, an estimate revision, a BOQ line or a ledger entry.
+// The bytes are sealed and split into parts (Firestore documents hold ≤ 1 MiB). Attachments are never edited:
+// the document date and the upload time are fixed when added. Removing keeps the record (who, when, why) and drops the bytes.
+export const FILE_KINDS = Object.freeze(["photo", "quote", "supplier_invoice", "receipt", "other"]);
+export const FILE_TARGETS = Object.freeze(["project", "estimate", "line", "tx"]);
+export const FILE_MAX = 4 * 1024 * 1024;
+export const FILE_PART = 384 * 1024;           // raw bytes per part; sealed base64 ≈ 690 KB
+export const FILES_PER_TARGET = 20;
+export const FILES_PER_PROJECT = 300;
+const TARGET_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+export function validateAttachment(input = {}, today, currency) {
+  if (!FILE_KINDS.includes(input.kind)) throw new PfmError("bad_file_kind", String(input.kind));
+  const t = input.target || {};
+  if (!FILE_TARGETS.includes(t.type)) throw new PfmError("bad_target", String(t.type));
+  const target = { type: t.type };
+  if (t.type === "estimate" || t.type === "line") {
+    if (!TARGET_ID_RE.test(t.estimateId || "")) throw new PfmError("bad_target", "estimateId");
+    target.estimateId = t.estimateId;
+  }
+  if (t.type === "line") {
+    if (!ID_RE.test(t.lineKey || "")) throw new PfmError("bad_line_key", String(t.lineKey));
+    target.lineKey = t.lineKey;
+  }
+  if (t.type === "tx") {
+    if (!TARGET_ID_RE.test(t.txId || "")) throw new PfmError("bad_target", "txId");
+    target.txId = t.txId;
+  }
+  if (!today) throw new PfmError("bad_date", "today required");
+  const docDate = priceDateOf(input.docDate, today);
+  let quotedUnitPrice = null;
+  if (input.quotedUnitPrice != null && input.quotedUnitPrice !== "") {
+    if (input.kind !== "quote" || t.type !== "line") throw new PfmError("bad_quote", "a quoted price belongs to a quote on a line");
+    quotedUnitPrice = toMinor(input.quotedUnitPrice, currency);
+    if (quotedUnitPrice < 0) throw new PfmError("bad_amount", "price cannot be negative");
+  }
+  return { kind: input.kind, target, name: text(input.name, 120, "bad_file_name", false) || null, note: text(input.note, 300, "bad_note", false) || null, docDate, quotedUnitPrice };
+}
+// The key that groups files by what they are attached to.
+export const targetKey = (t) => (t.type === "project" ? "project" : t.type === "estimate" ? `e:${t.estimateId}` : t.type === "line" ? `l:${t.estimateId}:${t.lineKey}` : `t:${t.txId}`);
 
 // A ledger entry. Returns values ready to store (amount in the project currency).
 export function validateProjectTx(input = {}, project) {
@@ -486,4 +600,7 @@ export const paths = Object.freeze({
   tx: (pid) => `pfmProjects/${pid}/tx`,
   alerts: (pid) => `pfmProjects/${pid}/alerts`,
   invite: (token) => `pfmInvites/${token}`,
+  files: (pid) => `pfmProjects/${pid}/files`,
+  file: (pid, fid) => `pfmProjects/${pid}/files/${fid}`,
+  parts: (pid, fid) => `pfmProjects/${pid}/files/${fid}/parts`,
 });

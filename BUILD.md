@@ -1401,3 +1401,11 @@ Decisions (owner, 2026-11-09): no tax on estimate lines (P11) · copy an expense
 - `selfDeceasedRule` في `person.set`: «نفسي» المخزَّنة أو الشخص الذي ربط به المتّصلُ حسابه لا يُسجَّل `alive: false` ⇒ «not allowed: …». `bulk.import` يُبقي «نفسي» حيّاً بدل الرفض.
 - حذف الحساب يحذف `kinrem/{uid}`.
 - اختبار: `node kin.test.js` ✓ 17/17 · `node marriage.test.js` ✓ 9/9.
+
+## C287 — invoice PDF, pay links, client pay portal; project dated prices and attachments
+- `inv.pdf`, `pfm.proj.report.pdf`: PDF via Browser Rendering REST (`invoice-pdf.mjs`, secrets `CF_ACCOUNT_ID`, `CF_BR_TOKEN`), else the HTML for the phone. The old puppeteer/R2 code is gone.
+- `inv.link` makes a link for invoices sent without one. `C.payState` (derived) on invoices, list, pay view, printed badge.
+- `pay.claim`: `payType` full | partial (`partial_is_full`, `bad_pay_type`), proof image or PDF ≤ 600 KB (`checkFileData`, `C.sniffFile`), sealed proof name; the reply carries `amount` and `payState`.
+- Projects schema v2 (no backfill): lines gain `priceDate`, `supplier`🔒, `pricedAt`, `priceLog`; `files/{fid}` + `parts/{n}`. Ops `pfm.proj.file.add|list|get|remove`, `pfm.proj.prices`. Variance lines and ledger rows carry file counts; ledger rows carry `unitPrice`. Deleting a project drains files.
+- Fixed while testing: the new ops required the caller's own accountant setup, which shared-project editors may not have (they now use UTC for "today").
+- Tests: pfm-worker 50 · projects-worker 23 · others unchanged and passing · both UI checks pass. Details: `Sawa-app/BUILD.md` § C287, `pfm/PROJECTS.md` §12.

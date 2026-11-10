@@ -218,6 +218,37 @@ export function applyPayment(inv, amount) {
   return { amountPaid, amountDue: inv.total - amountPaid, status: amountPaid === inv.total ? "paid" : inv.status };
 }
 
+// What the money on an invoice looks like, for display (C287). Derived, never stored, so it cannot drift from the
+// amounts: amountPaid is confirmed money, claimedAmount is what payers reported and the issuer has not checked yet.
+//   paid                  everything confirmed
+//   pending_verification  confirmed + reported covers the total ("Paid — pending verification")
+//   partially_paid        some money confirmed or reported, not the total
+//   unpaid                nothing yet
+// draft and cancelled invoices have no pay state (null).
+export const PAY_STATES = Object.freeze(["unpaid", "partially_paid", "pending_verification", "paid"]);
+export function payState(inv) {
+  if (!inv || inv.status === "draft" || inv.status === "cancelled") return null;
+  const total = inv.total ?? inv.totals?.total ?? 0, paid = inv.amountPaid || 0, claimed = Math.max(0, inv.claimedAmount || 0);
+  if (inv.status === "paid" || (total > 0 && paid >= total)) return "paid";
+  if (claimed > 0 && paid + claimed >= total) return "pending_verification";
+  if (paid > 0 || claimed > 0) return "partially_paid";
+  return "unpaid";
+}
+
+// A file by its bytes: the photo types plus PDF. Used for payment proofs and project attachments.
+export const FILE_TYPES = Object.freeze(["image/png", "image/jpeg", "image/webp", "application/pdf"]);
+export function sniffFile(u8) {
+  if (!(u8 instanceof Uint8Array) || u8.length < 16) throw new PfmError("bad_file", "empty");
+  // "%PDF-" at the start (some writers put a few junk bytes first; the spec allows up to 1024)
+  const head = Math.min(u8.length - 5, 1024);
+  for (let i = 0; i <= head; i++) if (u8[i] === 0x25 && u8[i + 1] === 0x50 && u8[i + 2] === 0x44 && u8[i + 3] === 0x46 && u8[i + 4] === 0x2d) return "application/pdf";
+  const h = (i, ...b) => b.every((x, k) => u8[i + k] === x);
+  if (h(0, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return "image/png";
+  if (h(0, 0xff, 0xd8, 0xff)) return "image/jpeg";
+  if (h(0, 0x52, 0x49, 0x46, 0x46) && h(8, 0x57, 0x45, 0x42, 0x50)) return "image/webp";
+  throw new PfmError("bad_file", "type");
+}
+
 // ---------- invoice numbers (one sequence per issuer, reset every year) ----------
 
 // The year comes from the issue date in the issuer's time zone, so an invoice issued

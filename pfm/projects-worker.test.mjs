@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { handlePfmOp, purgePfm, PFM_OPS } from "./pfm-worker.mjs";
 import * as C from "./pfm-core.mjs";
 import { makeFs as makeFsWith, ROOT } from "./fake-firestore.mjs";
+import { PROJECTS_SCHEMA_VERSION } from "./projects-migrations.mjs";
 
 const src = readFileSync(new URL("../worker-3.js", import.meta.url), "utf8");
 const grab = (name) => { const a = src.indexOf("function " + name + "("); let i = src.indexOf("{", a), depth = 0; for (; i < src.length; i++) { if (src[i] === "{") depth++; else if (src[i] === "}" && --depth === 0) break; } return src.slice(a, i + 1); };
@@ -72,7 +73,7 @@ await t("create: needs init, validates, is idempotent, seals the description, wr
   assert.ok(raw.description && raw.description !== "Two-room extension");
   assert.equal(s.fs.docs.get(`${ROOT}/pfmProjects/p_proj-key-0001/members/u1`).data.role, "owner");
   assert.equal(s.fs.docs.get(`${ROOT}/pfm/u1/projectIndex/p_proj-key-0001`).data.role, "owner");
-  assert.equal(s.fs.docs.get(`${ROOT}/pfm/u1/meta/projects`).data.schemaVersion, 1);
+  assert.equal(s.fs.docs.get(`${ROOT}/pfm/u1/meta/projects`).data.schemaVersion, PROJECTS_SCHEMA_VERSION);
 });
 
 await t("update: stale rev refused, currency locked, audited", async () => {
@@ -390,6 +391,108 @@ await t("report: user text is escaped; the report is self-contained and carries 
   assert.ok(html.includes("2,350.00") || html.includes("2350.00"), "estimate total shown");
   assert.equal(filename, `project-${pid}.html`);
   assert.equal((await s.call("pfm.proj.report", { pid, lang: "ar" })).html.includes('dir="rtl"'), true);
+});
+
+// ---------- C287: dated prices, price history, attachments ----------
+const C287_PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(40, 1)]);
+const c284Pdf = (pad = 0) => Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.alloc(pad, 0x41), Buffer.from("\n%%EOF\n")]);
+const uri = (type, b) => `data:${type};base64,${b.toString("base64")}`;
+const todayBerlin = () => C.localDate("Europe/Berlin");
+
+await t("C287 prices: each line is dated; an unchanged save keeps its stamp; a new price is logged; the log follows the line", async () => {
+  const s = await ready();
+  const { project } = await s.call("pfm.proj.create", PROJ);
+  const pid = project.id;
+  const { estimate } = await s.call("pfm.proj.estimate.create", { pid, idemKey: "est-key-0001" });
+  await assert.rejects(s.call("pfm.proj.estimate.lines", { pid, eid: estimate.id, rev: estimate.rev, lines: [{ ...LINES[0], priceDate: "2999-01-01" }] }), err("bad_price_date"));
+  await s.call("pfm.proj.estimate.lines", { pid, eid: estimate.id, rev: estimate.rev, lines: [{ ...LINES[0], priceDate: "2026-10-01", supplier: "Atbara Cement" }, LINES[1]] });
+  let v = (await s.call("pfm.proj.variance", { pid, estimateId: estimate.id })).lines;
+  const cem = v.find((l) => l.lineKey === "cement"), mas = v.find((l) => l.lineKey === "mason");
+  assert.equal(cem.priceDate, "2026-10-01"); assert.equal(cem.supplier, "Atbara Cement"); assert.ok(cem.pricedAt); assert.equal(cem.priceChanges, 1);
+  assert.equal(mas.priceDate, todayBerlin());                                           // no date given: today
+  const raw = s.fs.docs.get(`${ROOT}/pfmProjects/${pid}/estimates/${estimate.id}/lines/cement`).data;
+  assert.ok(raw.supplier !== "Atbara Cement" && !JSON.stringify(raw.priceLog).includes("Atbara"), "supplier sealed, in the line and in its log");
+  // the same values again: same stamp, no new log entry
+  await s.call("pfm.proj.estimate.lines", { pid, eid: estimate.id, rev: estimate.rev + 1, lines: [{ ...LINES[0], priceDate: "2026-10-01", supplier: "Atbara Cement" }, { ...LINES[1], priceDate: mas.priceDate }] });
+  v = (await s.call("pfm.proj.variance", { pid, estimateId: estimate.id })).lines;
+  assert.equal(v.find((l) => l.lineKey === "cement").pricedAt, cem.pricedAt); assert.equal(v.find((l) => l.lineKey === "cement").priceChanges, 1);
+  // a new quote: logged
+  await s.call("pfm.proj.estimate.lines", { pid, eid: estimate.id, rev: estimate.rev + 2, lines: [{ ...LINES[0], estUnitPrice: "12", priceDate: "2026-10-20", supplier: "Atbara Cement" }, { ...LINES[1], priceDate: mas.priceDate }] });
+  await s.call("pfm.proj.estimate.approve", { pid, eid: estimate.id, rev: estimate.rev + 3 });
+  // change order: the line and its log are copied into revision 2, then the price moves again
+  const { estimate: e2 } = await s.call("pfm.proj.estimate.create", { pid, idemKey: "est-key-0002", fromBaseline: true, reason: "Cement went up" });
+  await s.call("pfm.proj.estimate.lines", { pid, eid: e2.id, rev: e2.rev, lines: [{ ...LINES[0], estUnitPrice: "15", priceDate: "2026-11-05" }, { ...LINES[1], priceDate: mas.priceDate }] });
+  await s.call("pfm.proj.estimate.approve", { pid, eid: e2.id, rev: e2.rev + 1 });
+  // what was actually paid: 50 bags for 700.00 on 2026-11-06 → 14.00 a bag
+  await s.call("pfm.proj.tx.add", { pid, idemKey: "tx-key-c284-01", kind: "expense", amount: "700", occurredOn: "2026-11-06", description: "Cement", lineKey: "cement", quantity: "50", unit: "bag" });
+  const h = (await s.call("pfm.proj.prices", { pid, lineKey: "cement" })).lines[0];
+  assert.deepEqual(h.estimates.map((e) => [e.unitPrice, e.priceDate, e.revision]), [[1000, "2026-10-01", 1], [1200, "2026-10-20", 1], [1500, "2026-11-05", 2]]);
+  assert.equal(h.estimates[0].supplier, "Atbara Cement"); assert.equal(h.estimates[2].supplier, null);
+  assert.equal(h.changeBp, 5000);                                                       // 10.00 → 15.00
+  assert.equal(h.actual[0].unitPrice, 1400);
+  assert.equal(h.actualVsEstimateBp, -667);                                             // paid 14.00 against 15.00 in force that day
+  // the first revision is untouched (approved revisions are read-only)
+  const r1 = s.fs.docs.get(`${ROOT}/pfmProjects/${pid}/estimates/${estimate.id}/lines/cement`).data;
+  assert.equal(r1.estUnitPrice, 1200); assert.equal(r1.priceLog.length, 2);
+  const txs = (await s.call("pfm.proj.tx.list", { pid })).items;
+  assert.equal(txs[0].unitPrice, 1400); assert.equal(txs[0].files, 0);
+});
+
+await t("C287 files: photo and multi-part PDF on a line and an entry, fixed dates, roles, removal keeps the record", async () => {
+  const s = await ready();
+  const pid = await withBaseline(s);
+  const eid = (await s.call("pfm.proj.get", { pid })).estimateId;
+  await share(s, pid, "u2", "viewer");
+  const big = c284Pdf(900 * 1024);                                                      // 3 parts
+  const add = (extra, uid = "u1") => s.call("pfm.proj.file.add", { pid, idemKey: "file-key-" + Math.random().toString(36).slice(2, 10), kind: "quote", docDate: "2026-10-03", ...extra }, uid);
+  await assert.rejects(add({ target: { type: "line", estimateId: eid, lineKey: "cement" }, data: uri("image/png", C287_PNG) }, "u2"), err("forbidden"));
+  await assert.rejects(add({ target: { type: "line", estimateId: eid, lineKey: "nope" }, data: uri("image/png", C287_PNG) }), err("not_found"));
+  await assert.rejects(add({ target: { type: "line", estimateId: eid, lineKey: "cement" }, data: uri("image/png", C287_PNG), docDate: "2999-01-01" }), err("bad_price_date"));
+  await assert.rejects(add({ target: { type: "line", estimateId: eid, lineKey: "cement" }, data: uri("application/pdf", C287_PNG) }), err("bad_file"));
+  await assert.rejects(add({ target: { type: "tx", txId: "x_nothing" }, data: uri("image/png", C287_PNG) }), err("not_found"));
+  await assert.rejects(add({ kind: "photo", target: { type: "line", estimateId: eid, lineKey: "cement" }, data: uri("image/png", C287_PNG), quotedUnitPrice: "9" }), err("bad_quote"));
+  const q = (await add({ target: { type: "line", estimateId: eid, lineKey: "cement" }, data: uri("application/pdf", big), name: "Atbara quote Oct.pdf", quotedUnitPrice: "9.50" })).file;
+  assert.equal(q.type, "application/pdf"); assert.equal(q.size, big.length); assert.equal(q.docDate, "2026-10-03"); assert.ok(q.uploadedAt); assert.equal(q.uploadedBy, "u1");
+  assert.equal(s.fs.docs.get(`${ROOT}/pfmProjects/${pid}/files/${q.id}`).data.parts, 3);
+  assert.ok(![...s.fs.docs.values()].some((e) => JSON.stringify(e.data).includes("Atbara quote")), "file names are sealed");
+  // the viewer can list and open
+  const got = await s.call("pfm.proj.file.get", { pid, fid: q.id }, "u2");
+  assert.equal(got.data, uri("application/pdf", big));
+  const { tx } = await s.call("pfm.proj.tx.add", { pid, idemKey: "tx-key-c284-02", kind: "expense", amount: "100", occurredOn: "2026-11-02", description: "Cement", lineKey: "cement", quantity: "10", unit: "bag" });
+  const rc = (await add({ kind: "receipt", target: { type: "tx", txId: tx.id }, data: uri("image/png", C287_PNG), docDate: "2026-11-02" })).file;
+  assert.equal((await s.call("pfm.proj.file.list", { pid, target: { type: "tx", txId: tx.id } })).items.length, 1);
+  assert.equal((await s.call("pfm.proj.tx.list", { pid })).items[0].files, 1);
+  assert.equal((await s.call("pfm.proj.variance", { pid })).lines.find((l) => l.lineKey === "cement").files, 1);
+  // quotes feed the price history
+  assert.deepEqual((await s.call("pfm.proj.prices", { pid, lineKey: "cement" })).lines[0].quotes.map((x) => [x.unitPrice, x.docDate]), [[950, "2026-10-03"]]);
+  // removal: needs a reason, keeps who/when/why, drops the bytes
+  await assert.rejects(s.call("pfm.proj.file.remove", { pid, fid: rc.id }), err("reason_required"));
+  const rm = (await s.call("pfm.proj.file.remove", { pid, fid: rc.id, reason: "Wrong receipt" })).file;
+  assert.ok(rm.removedAt); assert.equal(rm.removeReason, "Wrong receipt"); assert.equal(rm.docDate, "2026-11-02");
+  assert.equal(docsUnder(s.fs, `pfmProjects/${pid}/files/${rc.id}/parts`).length, 0);
+  await assert.rejects(s.call("pfm.proj.file.get", { pid, fid: rc.id }), err("file_removed"));
+  assert.equal((await s.call("pfm.proj.file.list", { pid })).items.length, 1);
+  assert.equal((await s.call("pfm.proj.file.list", { pid, withRemoved: true })).items.length, 2);
+  // an editor who never set up their own accountant can still attach (dates fall back to UTC)
+  await share(s, pid, "u3", "editor");
+  assert.ok((await add({ kind: "photo", target: { type: "project" }, data: uri("image/png", C287_PNG), docDate: "2026-11-01" }, "u3")).file.id);
+  // the same idemKey twice: one file
+  const key = "file-key-same0001";
+  await s.call("pfm.proj.file.add", { pid, idemKey: key, kind: "photo", target: { type: "project" }, docDate: "2026-11-01", data: uri("image/png", C287_PNG) });
+  await s.call("pfm.proj.file.add", { pid, idemKey: key, kind: "photo", target: { type: "project" }, docDate: "2026-11-01", data: uri("image/png", C287_PNG) });
+  assert.equal((await s.call("pfm.proj.file.list", { pid, target: { type: "project" } })).items.length, 2);
+  // audit entries
+  assert.ok(auditChain(s.fs).some((e) => e.action === "project.file.add") && auditChain(s.fs).some((e) => e.action === "project.file.remove"));
+  // deleting the project removes the files and their parts
+  await s.call("pfm.proj.delete", { pid, confirm: pid });
+  assert.equal(docsUnder(s.fs, `pfmProjects/${pid}`).length, 0);
+});
+
+await t("C287 report.pdf: HTML for the phone when Browser Rendering is not set up", async () => {
+  const s = await ready();
+  const pid = await withBaseline(s);
+  const r = await s.call("pfm.proj.report.pdf", { pid, lang: "en" });
+  assert.equal(r.pdf, null); assert.equal(r.via, "device"); assert.match(r.filename, /^project-.*\.pdf$/); assert.match(r.html, /<html/);
 });
 
 console.log(process.exitCode ? "FAILED" : `projects-worker: ${n} passed`);

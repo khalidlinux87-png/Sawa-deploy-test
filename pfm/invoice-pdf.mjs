@@ -1,71 +1,62 @@
-// Worker side of PDF export: invoice -> totals -> HTML -> PDF (Cloudflare Browser Rendering) -> R2 cache -> signed link.
-// Needs these wrangler.toml bindings (not added yet; create the bucket first):
-//   browser = { binding = "BROWSER" }
-//   [[r2_buckets]] binding = "PFM_FILES"  bucket_name = "sawa-pfm-files"
-// and the secret PFM_LINK_KEY (HMAC key for download links).
-import puppeteer from "@cloudflare/puppeteer";
-import { computeInvoice, canonical } from "./pfm-core.mjs";
-import { renderInvoiceHtml } from "./invoice-html.mjs";
+// Server-side PDF for invoices and the project report (C287).
+//
+// Why this changed: the first version (C266) imported "@cloudflare/puppeteer", which is not installed in this repo,
+// read the logo from an R2 key that is never written (logos live in Firestore), and was never wired to an op.
+// "Print or PDF" in the app therefore printed a hidden frame, and Android's WebView and iOS's WKWebView ignore
+// window.print(): in the Sawa apps the button did nothing.
+//
+// Now the Worker asks Cloudflare Browser Rendering for the PDF over its REST API (a plain fetch, no package, no binding).
+// It needs two Worker secrets:
+//   CF_ACCOUNT_ID   the Cloudflare account id
+//   CF_BR_TOKEN     an API token with "Browser Rendering: Edit"
+// Without them pdfAvailable() is false and the app builds the PDF on the phone from the same HTML (pfmPdf in app.p9.js).
+// The HTML is self-contained (data: logo, no scripts, no fonts from the network), and every other request is refused,
+// so the renderer cannot be pointed at anything else.
 
-const b64 = (u8) => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000)); return btoa(s); };
-const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+const API = (acct) => `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(acct)}/browser-rendering/pdf`;
+export const PDF_MAX = 8 * 1024 * 1024;
 
-// inv.payoutAccounts must already be decrypted (openField) and limited to the accounts the issuer chose for this invoice.
-export async function invoicePdf(env, inv, { qrSvg = "" } = {}) {
-  // 1. Recompute the totals on the server. Stored totals are never trusted for output.
-  const totals = computeInvoice(inv.items, { currency: inv.currency, invoiceDiscount: inv.invoiceDiscount, taxInclusive: inv.taxInclusive, amountPaid: inv.amountPaid });
-  // 2. The content hash is the cache key. A status change or a payment gives a new file.
-  //    The same invoice in the same state reuses the stored PDF and never starts a browser.
-  // The logo is read from R2 and inlined, because the renderer may not fetch anything.
-  let logoDataUri = null;
-  if (inv.issuer.logoKey) {
-    const obj = await env.PFM_FILES.get(inv.issuer.logoKey);
-    if (obj) logoDataUri = `data:${obj.httpMetadata.contentType};base64,` + b64(new Uint8Array(await obj.arrayBuffer()));
+export const pdfAvailable = (env) => !!(env && env.CF_ACCOUNT_ID && env.CF_BR_TOKEN);
+
+const escTpl = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// html -> PDF bytes (Uint8Array). footer: short plain text printed at the bottom of each page with "page/pages".
+export async function htmlToPdf(env, html, { footer = "", fetchImpl = fetch, timeoutMs = 25000 } = {}) {
+  if (!pdfAvailable(env)) throw new Error("pdf_unavailable");
+  const body = {
+    html,
+    rejectRequestPattern: ["^(?!data:).*"],     // only data: URIs load; the template needs nothing else
+    gotoOptions: { waitUntil: "load", timeout: timeoutMs },
+    pdfOptions: {
+      format: "a4", printBackground: true, preferCSSPageSize: true,
+      displayHeaderFooter: true, headerTemplate: "<span></span>",
+      footerTemplate: `<div style="font-size:7pt;width:100%;text-align:center;color:#888;font-family:sans-serif"><span dir="ltr">${escTpl(footer)}${footer ? " · " : ""}<span class="pageNumber"></span>/<span class="totalPages"></span></span></div>`,
+    },
+  };
+  const ctl = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), timeoutMs + 5000) : null;
+  let r;
+  try {
+    r = await fetchImpl(API(env.CF_ACCOUNT_ID), { method: "POST", headers: { Authorization: "Bearer " + env.CF_BR_TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify(body), signal: ctl ? ctl.signal : undefined });
+  } finally { if (timer) clearTimeout(timer); }
+  const type = (r.headers.get("content-type") || "").toLowerCase();
+  if (!r.ok || !type.includes("application/pdf")) {
+    let why = "status " + r.status;
+    try { const j = await r.json(); if (j && j.errors && j.errors[0]) why += " " + String(j.errors[0].message || j.errors[0].code).slice(0, 80); } catch (e) { /* not JSON */ }
+    throw new Error("pdf_failed: " + why);
   }
-  const html = renderInvoiceHtml({ ...inv, issuer: { ...inv.issuer, logoDataUri } }, totals, qrSvg);
-  const hash = hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical({ v: 1, html }))));
-  const key = `invoices/${inv.issuerUid}/${inv.id}/${hash.slice(0, 32)}.pdf`;
-
-  if (!(await env.PFM_FILES.head(key))) {
-    // 3. Render. A real browser is needed: it shapes Arabic and lays out RTL text correctly,
-    //    which most JS PDF libraries cannot do.
-    const browser = await puppeteer.launch(env.BROWSER);
-    try {
-      const page = await browser.newPage();
-      await page.setJavaScriptEnabled(false);                       // the template needs no script
-      await page.setRequestInterception(true);                      // and must not fetch anything
-      page.on("request", (r) => (r.url().startsWith("data:") ? r.continue() : r.abort()));
-      await page.setContent(html, { waitUntil: "load" });
-      const pdf = await page.pdf({ format: "A4", printBackground: true, preferCSSPageSize: true,
-        displayHeaderFooter: true, headerTemplate: "<span></span>",
-        footerTemplate: `<div style="font-size:7pt;width:100%;text-align:center;color:#888">${inv.number} · <span class="pageNumber"></span>/<span class="totalPages"></span></div>` });
-      await env.PFM_FILES.put(key, pdf, {
-        httpMetadata: { contentType: "application/pdf", contentDisposition: `inline; filename="invoice-${inv.number}.pdf"` },
-        customMetadata: { invoiceId: inv.id, status: inv.status, sha256: hash },
-      });
-    } finally { await browser.close(); }
-  }
-  return { key, hash, totals };
+  const bytes = new Uint8Array(await r.arrayBuffer());
+  if (bytes.length < 16 || bytes[0] !== 0x25 || bytes[1] !== 0x50 || bytes[2] !== 0x44 || bytes[3] !== 0x46) throw new Error("pdf_failed: not a PDF");
+  if (bytes.length > PDF_MAX) throw new Error("pdf_failed: too big");
+  return bytes;
 }
 
-// Short-lived download link served by GET /pfm/file. The Worker checks the HMAC and expiry, then streams from R2.
-// R2 objects are never public.
-export async function signedFileUrl(env, origin, key, ttlSec = 900) {
-  const exp = Math.floor(Date.now() / 1000) + ttlSec;
-  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.PFM_LINK_KEY), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = hex(await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(key + "|" + exp)));
-  return `${origin}/pfm/file?k=${encodeURIComponent(key)}&e=${exp}&s=${sig}`;
+export function toBase64(u8) {
+  let s = "";
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+  return btoa(s);
 }
 
-export async function serveSignedFile(env, url) {
-  const key = url.searchParams.get("k"), exp = Number(url.searchParams.get("e")), sig = url.searchParams.get("s") || "";
-  if (!key || !(exp > Date.now() / 1000)) return new Response("expired", { status: 410 });
-  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.PFM_LINK_KEY), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
-  const ok = await crypto.subtle.verify("HMAC", k, Uint8Array.from(sig.match(/../g) || [], (h) => parseInt(h, 16)), new TextEncoder().encode(key + "|" + exp));
-  if (!ok) return new Response("forbidden", { status: 403 });
-  const obj = await env.PFM_FILES.get(key);
-  if (!obj) return new Response("not found", { status: 404 });
-  const h = new Headers(); obj.writeHttpMetadata(h);
-  h.set("Cache-Control", "private, max-age=300"); h.set("X-Content-Type-Options", "nosniff");
-  return new Response(obj.body, { headers: h });
-}
+// A safe file name for the download: letters, digits, dash, underscore and dot only.
+export const pdfName = (stem) => (String(stem || "invoice").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "invoice") + ".pdf";
