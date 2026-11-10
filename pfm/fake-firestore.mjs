@@ -28,6 +28,14 @@ export function makeFs(toFsValue, fsToJs) {
     },
     async fsCommit(_t, writes) {
       // all preconditions first (atomic), then apply
+      // Like Firestore: writes to one document in one commit are collapsed, and that is refused when their
+      // preconditions differ ("Cannot collapse mutations with different version preconditions").
+      const pre = new Map();
+      for (const w of writes) {
+        const name = w.update?.name || w.delete || w.transform?.document, cd = JSON.stringify(w.currentDocument || null);
+        if (pre.has(name) && pre.get(name) !== cd) err("INVALID_ARGUMENT");
+        pre.set(name, cd);
+      }
       for (const w of writes) {
         const name = w.update?.name || w.delete || w.transform?.document, cd = w.currentDocument, e = docs.get(name);
         if (!(name.startsWith(ROOT + "/") && name.slice(ROOT.length + 1).split("/").length % 2 === 0)) throw new Error("bad doc path " + name);
