@@ -6149,18 +6149,15 @@ async function handleRequest(request, env, ctx, meta) {
   try { if (request.method === "GET" && new URL(request.url).pathname === "/av") return await avatarImg(request, env); } catch (e) { return new Response("", { status: 500 }); }   // C152
   // C267 (P4): the public pay page — no Authorization; the unguessable link token picks the invoice and its issuer.
   if (request.method === "POST" && new URL(request.url).pathname === "/pfm/pay") {
-    let b = {};
     try {
-      try { b = await request.json(); } catch (e) {}
+      let b = {}; try { b = await request.json(); } catch (e) {}
       meta.op = "pfm.pay"; stat("ops:pfm.pay");
       const r = await handlePfmPublic(String(b.op || ""), b.payload, env, PFM_DEPS, request.headers.get("CF-Connecting-IP") || "?");
       return json({ ok: true, ...r });
     } catch (e) {
       const pub = publicErr(e);
-      // TEMP-DEBUG (revert after the pay-claim failure is found): the raw internal error text for pay.claim only
-      const dbg = b && b.op === "pay.claim" ? { detail: String((e && e.message) || e || "").slice(0, 300) } : {};
-      if (isTransientErr(e)) return json({ ok: false, error: "server_error: busy", retry: true, ...dbg }, 503);
-      return json({ ok: false, error: pub, ...dbg }, /^rate_limited/.test(pub) ? 429 : /^not_found/.test(pub) ? 404 : 400);
+      if (isTransientErr(e)) return json({ ok: false, error: "server_error: busy", retry: true }, 503);
+      return json({ ok: false, error: pub }, /^rate_limited/.test(pub) ? 429 : /^not_found/.test(pub) ? 404 : 400);
     }
   }
   let statOp = null;
