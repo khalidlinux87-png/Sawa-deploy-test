@@ -179,6 +179,17 @@ await page.reload(); await mount();
 await H.getByRole("tab", { name: "السجلّ" }).waitFor();
 await page.waitForTimeout(1500);
 check(!(await bar.count()), "a cleared batch does not come back after a restart");
+// C292: this device has used the reader, so reopening Personal Accountant starts the engines without opening Import
+let warmed = 0; page.on("request", (r) => { if (/\/ocr\/v1\/worker\.min\.js/.test(r.url())) warmed++; });
+await page.reload(); await mount();
+await H.getByRole("tab", { name: "السجلّ" }).waitFor();
+for (let i = 0; i < 40 && warmed < 3; i++) await page.waitForTimeout(250);
+check(warmed >= 3, "the reader starts by itself when Personal Accountant opens, workers started: " + warmed);
+await H.getByRole("tab", { name: "السجلّ" }).click();
+const t1 = Date.now();
+await H.getByRole("button", { name: "استيراد", exact: true }).click();
+await dlg.getByText(/القارئ جاهز|Reader ready/).waitFor({ timeout: 60000 });
+console.log(`Import opened ready ${Date.now() - t1} ms after the tap (engines started in the background)`);
 
 await browser.close(); server.close();
 console.log(`read 4 invented screenshots in ${readMs} ms (engine download included)`);
