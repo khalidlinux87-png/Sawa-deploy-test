@@ -329,10 +329,20 @@ if (invs.items.length !== 1 || invs.items[0].status !== "sent" || invs.items[0].
     // C287: a part payment with a PDF receipt
     await page.getByRole("radio", { name: /دفعة جزئيّة/ }).check();
     await page.getByLabel("المبلغ الذي دفعته الآن").fill("1000");
-    await page.getByLabel("اسمك").fill("سارة أحمد");
     await page.getByLabel(/رقم العمليّة/).fill("FT2611-7781");
     writeFileSync(`${OUT}/receipt.pdf`, "%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n");
     await page.getByLabel(/إيصال الدفع/).setInputFiles(`${OUT}/receipt.pdf`);
+    await page.getByText(/مُرفق: receipt\.pdf/).waitFor();
+    // C294: an error (no name yet) redraws the form: the receipt and the typed fields stay
+    await page.getByRole("button", { name: "أبلغ عن الدفع" }).click();
+    await page.getByText("اكتب اسمك.").waitFor();
+    if (!(await page.getByText(/مُرفق: receipt\.pdf/).count())) errors.push("the receipt was dropped by an error redraw");
+    // C294: the tab reloads (a phone after the camera or gallery): the draft and the receipt come back
+    await page.reload();
+    await page.getByText(/مُرفق: receipt\.pdf/).waitFor({ timeout: 10000 }).catch(() => errors.push("the receipt was lost on a tab reload"));
+    if ((await page.getByLabel("المبلغ الذي دفعته الآن").inputValue()) !== "1000") errors.push("the part amount was lost on a tab reload");
+    if ((await page.getByLabel(/رقم العمليّة/).inputValue()) !== "FT2611-7781") errors.push("the reference was lost on a tab reload");
+    await page.getByLabel("اسمك").fill("سارة أحمد");
     await page.screenshot({ path: `${OUT}/p4-2a-pay-partial-form-ar.png`, fullPage: true });
     await page.getByRole("button", { name: "أبلغ عن الدفع" }).click();
     await page.getByText(/وصل بلاغك/).waitFor();
@@ -342,7 +352,9 @@ if (invs.items.length !== 1 || invs.items[0].status !== "sent" || invs.items[0].
     await page.getByRole("button", { name: "الإبلاغ عن دفعة أخرى" }).click();
     await page.getByText(/كلّ المتبقّي/).waitFor();
     await page.getByLabel("اسمك").fill("سارة أحمد");
+    if (await page.getByText(/مُرفق:/).count()) errors.push("the sent receipt was still attached to the next report");
     await page.getByLabel(/إيصال الدفع/).setInputFiles(`${OUT}/logo.png`);
+    await page.getByText(/مُرفق: logo\.png/).waitFor();
     await page.getByRole("button", { name: "أبلغ عن الدفع" }).click();
     await page.getByText(/أبلغتَ عن دفع المبلغ كاملاً/).waitFor();
     await page.screenshot({ path: `${OUT}/p4-2b-pay-pending-ar.png`, fullPage: true });
