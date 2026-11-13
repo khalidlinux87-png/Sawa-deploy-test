@@ -1139,6 +1139,9 @@ async function opInvCancel(x) {
     const inv = await loadInvoice(x, x.p.id);
     C.assertTransition(inv.status, "cancelled");
     if ((inv.amountPaid || 0) > 0) throw new C.PfmError("has_payments", "record a refund instead");
+    // A payer's "I've paid" report is waiting: the money may be on its way. The issuer confirms or rejects it first,
+    // otherwise the report is left on a cancelled invoice that can no longer take it.
+    if ((inv.openClaims || 0) > 0) throw new C.PfmError("claims_open", "confirm or reject the payment reports first");
     const reason = txt(x.p.reason, 200, "reason") || "";
     const patch = { status: "cancelled", cancelledAt: now(), cancelReason: reason ? await seal(x, reason) : "", rev: inv.rev + 1, updatedAt: now() };
     out = { ...inv, ...patch };
@@ -1163,6 +1166,11 @@ async function opInvMarkPaid(x) {
     if (await x.d.fsGet(x.token, `invoices/${inv.id}/payments/${payId}`)) { out = inv; return { result: null }; }
     const s = await settingsOf(x), cats = await categoryMap(x);
     const amount = C.toMinor(p.amount, inv.currency);
+    // Money payers reported and the issuer has not checked yet is held back: recording it here as well would leave
+    // those reports impossible to confirm (overpay) and the pay page showing more than the total.
+    const claimed = Math.max(0, inv.claimedAmount || 0);
+    if (claimed > 0 && (inv.status === "sent" || inv.status === "overdue") && amount > inv.totals.total - (inv.amountPaid || 0) - claimed)
+      throw new C.PfmError("claims_open", "due " + (inv.totals.total - (inv.amountPaid || 0) - claimed) + " after reports");
     // The issuer may always record part of the money; allowPartial governs what a payer can choose.
     const next = C.applyPayment({ status: inv.status, total: inv.totals.total, amountPaid: inv.amountPaid || 0, allowPartial: true }, amount);
     const paidAt = p.paidAt || C.localDate(s.tz);

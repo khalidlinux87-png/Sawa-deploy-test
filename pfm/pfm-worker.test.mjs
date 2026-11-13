@@ -621,6 +621,21 @@ await t("pay.claim: proof screenshot checked and kept apart", async () => {
   assert.equal((await r.call("inv.claim.proof", { id: r.inv.id, payId: c.payId })).data, PNG);
 });
 
+await t("open reports: cancel waits for them; a recorded payment can't take the reported money", async () => {
+  const r = await sentInvoice();
+  const a = await claim(r, { amount: "500" });
+  await assert.rejects(r.call("inv.cancel", { id: r.inv.id }), err("claims_open"));
+  await assert.rejects(r.call("inv.markPaid", { id: r.inv.id, amount: "930", method: "cash", idemKey: k() }), err("claims_open"));
+  await assert.rejects(r.call("inv.markPaid", { id: r.inv.id, amount: "431", method: "cash", idemKey: k() }), err("claims_open"));
+  assert.equal((await r.call("inv.markPaid", { id: r.inv.id, amount: "430", method: "cash", idemKey: k() })).invoice.amountPaid, 43000);
+  // the report can still be confirmed in full, and that pays the invoice
+  assert.equal((await r.call("inv.claim.decide", { id: r.inv.id, payId: a.payId, decision: "confirm" })).invoice.status, "paid");
+  const r2 = await sentInvoice();
+  const b = await claim(r2, { amount: "100" });
+  await r2.call("inv.claim.decide", { id: r2.inv.id, payId: b.payId, decision: "reject" });
+  assert.equal((await r2.call("inv.cancel", { id: r2.inv.id })).invoice.status, "cancelled");   // answered: cancel goes through
+});
+
 await t("decide: confirm books the payment (amount can be corrected), reject frees the room", async () => {
   const r = await sentInvoice();
   const a = await claim(r, { amount: "500" }), b = await claim(r, { amount: "430" });
