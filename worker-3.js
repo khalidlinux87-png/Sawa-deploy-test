@@ -6122,9 +6122,14 @@ function rateOk(uid) {
 }
 // \u0643\u0644\u0651 \u0645\u0639\u0631\u0651\u0641\u064d \u064a\u062f\u062e\u0644 \u0645\u0633\u0627\u0631 Firestore: \u0628\u0644\u0627 \u00ab/\u00bb \u0648\u0644\u0627 \u00ab..\u00bb \u0648\u0644\u0627 \u0637\u0648\u0644\u064d \u0645\u0641\u0631\u0637
 const ID_KEYS = ["groupId", "personId", "eventId", "relationId", "reviewId", "token", "uid", "from", "to", "cid", "for"];   // C198: + for (vouch.respond)
-function badIds(p) {
+// push.*: الـtoken رمز FCM/APNs (فيه «:») ويُجزَّأ بـtokenId قبل أيّ مسار — لا يُفحص كمعرّف
+const RAW_TOKEN_OPS = new Set(["push.register", "push.check", "push.unregister"]);
+function badIds(p, op) {
   if (!p || typeof p !== "object") return null;
-  for (const k of ID_KEYS) if (k in p && p[k] != null && !segOk(String(p[k]))) return k;
+  for (const k of ID_KEYS) {
+    if (k === "token" && RAW_TOKEN_OPS.has(op)) continue;
+    if (k in p && p[k] != null && !segOk(String(p[k]))) return k;
+  }
   if (Array.isArray(p.groupIds) && p.groupIds.some(x => !segOk(String(x)))) return "groupIds";
   return null;
 }
@@ -6179,7 +6184,7 @@ async function handleRequest(request, env, ctx, meta) {
     meta.op = statOp; stat("ops:" + statOp); stat("req");
     // \u0627\u0644\u0639\u0645\u0644\u064a\u0651\u0627\u062a \u0627\u0644\u062b\u0642\u064a\u0644\u0629 \u0642\u0631\u064a\u0628\u0629 \u0645\u0646 \u062d\u062f\u0651 \u0665\u0660 \u0637\u0644\u0628\u0627\u064b \u0641\u0631\u0639\u064a\u0651\u0627\u064b \u2014 \u0644\u0627 \u0646\u0636\u064a\u0641 \u0625\u0644\u064a\u0647\u0627 \u0627\u0644\u0625\u0631\u0633\u0627\u0644
     if (ctx && ctx.waitUntil && !HEAVY_OPS.has(statOp)) ctx.waitUntil(flushStats(env));
-    const bad = badIds(body.payload);
+    const bad = badIds(body.payload, op);
     if (bad) return json({ ok: false, error: "bad id: " + bad }, 400);
 
     // \u0627\u0633\u0645 \u00ab\u0633\u0648\u0627\u00bb \u0627\u0644\u0645\u062d\u0641\u0648\u0638 \u064a\u0633\u0628\u0642 \u0627\u0633\u0645 Google \u0641\u064a \u0643\u0644\u0651 \u0627\u0644\u0639\u0645\u0644\u064a\u0651\u0627\u062a (\u0630\u0627\u0643\u0631\u0629 \u0645\u0624\u0642\u0651\u062a\u0629 \u2014 \u0644\u0627 \u0642\u0631\u0627\u0621\u0629 \u0641\u064a \u0643\u0644\u0651 \u0637\u0644\u0628)
