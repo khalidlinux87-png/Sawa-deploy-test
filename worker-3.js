@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v127-otp";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
+const VER = "v128-otp";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -3876,7 +3876,7 @@ async function opPhoneStatus(uid, payload, env) {
   const c = PROFILE_CACHE.get(uid); if (c) { c.phoneVerified = v; c.phone = phone; }
   const exp = Number(d && d.fields && d.fields.otpExp && d.fields.otpExp.integerValue || 0);
   const vouches = phone ? await vouchCount(token, uid, phone) : { n: 0, names: [] };
-  return { phone, phoneVerified: v, verifiedBy: v ? (fstr(d, "verifiedBy") || "whatsapp") : null, pending: !v && exp > Date.now(), mismatch: fstr(d, "otpMismatch") || null,
+  return { phone, phoneVerified: v, verifiedBy: v ? (fstr(d, "verifiedBy") || "whatsapp") : null, pending: !v && exp > Date.now(), otpOpen: exp > Date.now(), mismatch: fstr(d, "otpMismatch") || null,
     vouches: vouches.n, vouchers: vouches.names, needed: VOUCH_NEEDED };
 }
 /* ---------- C304) \u0631\u0645\u0632 SMS \u0644\u0644\u0645\u062f\u064a\u0631 \u0641\u0642\u0637 (Twilio Verify) ----------
@@ -3904,7 +3904,6 @@ async function opSmsStart(uid, payload, env, claims) {
   const p = await profileOf(token, uid);
   const phone = cleanPhone(p.phone);
   if (!phone) throw new Error("no_phone");
-  if (p.phoneVerified) return { enabled: true, already: true };
   await twilioVerify(env, "Verifications", { To: phone, Channel: "sms" });
   const exp = Date.now() + 10 * 60 * 1000;
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields: { smsPhone: { stringValue: phone }, smsExp: { integerValue: String(exp) } } }, updateMask: { fieldPaths: ["smsPhone", "smsExp"] } }]);
