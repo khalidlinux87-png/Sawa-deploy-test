@@ -1,5 +1,8 @@
-name = "sawa-api"
+name = "sawa-deploy-test"
 main = "worker-3.js"
 compatibility_date = "2025-06-01"
+[vars]
+TURN_PROVIDER = "pair"
+
 [triggers]
 crons = ["*/5 * * * *"]

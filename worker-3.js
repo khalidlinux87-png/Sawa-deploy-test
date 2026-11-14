@@ -1,4 +1,5 @@
 import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u0648\u0633\u0637\u0627\u0621 TURN \u0628\u0637\u0644\u0628 STUN \u0639\u0628\u0631 TCP (\u0645\u0631\u0627\u0642\u0628\u0629 \u0627\u0644\u062e\u062f\u0645\u0627\u062a)
+import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worker.mjs";   // C263: \u0627\u0644\u0645\u062d\u0627\u0633\u0628 \u0627\u0644\u0634\u062e\u0635\u064a\u0651 (pfm/DESIGN.md)
 /* ============================================================
    worker.js \u2014 \u0633\u0648\u0627 \u00b7 applyEdit (v2: \u0627\u0644\u062a\u062d\u0642\u0651\u0642 + \u0627\u0644\u0643\u062a\u0627\u0628\u0629 \u0625\u0644\u0649 Firestore)
    ------------------------------------------------------------
@@ -12,7 +13,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u06
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v117-sms";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
+const VER = "v127-otp";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -558,6 +559,16 @@ function indexWrite(uid, gid, name, role, now) {
 }
 
 /* ---------- 7) \u0627\u0644\u0639\u0645\u0644\u064a\u0651\u0629: person.set (\u062d\u0642\u0644\u064a\u0651 \u2014 \u0627\u0644\u0623\u062d\u062f\u062b \u064a\u0641\u0648\u0632) ---------- */
+/* C271 (v126): \u0642\u0627\u0639\u062f\u0629 \u00ab\u0627\u0644\u062d\u064a\u0651\u00bb \u2014 \u0646\u0642\u064a\u0651\u0629 (\u062a\u064f\u062e\u062a\u0628\u064e\u0631 \u0641\u064a self-alive.test.js).
+   f = { kinship, alive, claimedByCaller } \u21d2 \u0633\u0628\u0628\u064c \u064a\u062d\u0648\u064a \u00abnot allowed\u00bb (\u0631\u0641\u0636\u064c \u0646\u0647\u0627\u0626\u064a\u0651 \u0641\u064a \u0637\u0627\u0628\u0648\u0631 sawa-sync) \u0623\u0648 null.
+   \u00ab\u0646\u0641\u0633\u064a\u00bb \u0627\u0644\u0645\u062e\u0632\u064e\u0651\u0646\u0629 = \u0635\u0627\u062d\u0628 \u0627\u0644\u0634\u062c\u0631\u0629 \u00b7 claimedByCaller = \u0627\u0644\u0634\u062e\u0635 \u0627\u0644\u0630\u064a \u0631\u0628\u0637 \u0628\u0647 \u0627\u0644\u0645\u062a\u0651\u0635\u0644\u064f \u062d\u0633\u0627\u0628\u0647 (members/{uid}.personId). */
+const SELF_KIN = "\u0646\u0641\u0633\u064a";
+function selfDeceasedRule(f) {
+  if (!f || f.alive !== false) return null;
+  if (f.kinship === SELF_KIN) return "not allowed: the tree owner's own profile cannot be marked deceased";
+  if (f.claimedByCaller) return "not allowed: you cannot mark your own profile as deceased";
+  return null;
+}
 async function opPersonSet(uid, payload, env) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
@@ -593,6 +604,18 @@ async function opPersonSet(uid, payload, env) {
     }
   } else { pid = crypto.randomUUID(); creating = true; }
 
+  // C271 (v126): \u0645\u0644\u0641\u0651 \u0635\u0627\u062d\u0628 \u0627\u0644\u062d\u0633\u0627\u0628 \u0644\u0627 \u064a\u064f\u0633\u062c\u064e\u0651\u0644 \u0645\u062a\u0648\u0641\u0651\u0649 \u2014 \u0646\u0633\u062e\u0629 \u0627\u0644\u062e\u0627\u062f\u0645 \u0645\u0646 selfDeceasedBlock \u0641\u064a app.p2.js
+  if ((("alive" in fields) && fields.alive === false) || (("kinship" in fields) && fields.kinship === SELF_KIN)) {
+    const cur = creating ? null : await fsGet(token, "groups/" + groupId + "/persons/" + pid).catch(() => null);
+    const mem = creating ? null : await fsGet(token, "groups/" + groupId + "/members/" + uid).catch(() => null);
+    const why = selfDeceasedRule({
+      kinship: ("kinship" in fields) ? String(fields.kinship || "") : (fstr(cur, "kinship") || ""),
+      alive: ("alive" in fields) ? fields.alive : !(cur && cur.fields && cur.fields.alive && cur.fields.alive.booleanValue === false),
+      claimedByCaller: !!mem && fstr(mem, "personId") === pid,
+    });
+    if (why) throw new Error(why);
+  }
+
   // v39: \u00ab\u0627\u0644\u0623\u062d\u062f\u062b \u064a\u0641\u0648\u0632\u00bb \u0644\u0643\u0644\u0651 \u062d\u0642\u0644 \u2014 \u0627\u0644\u0639\u0645\u064a\u0644 \u064a\u0631\u0633\u0644 \u0648\u0642\u062a \u062a\u0639\u062f\u064a\u0644\u0647 (ts)\u061b \u062d\u0642\u0644\u064c \u0643\u064f\u062a\u0628 \u0641\u064a \u0627\u0644\u062e\u0627\u062f\u0645 \u0628\u0639\u062f\u0647 \u064a\u064f\u062a\u0631\u0643 \u0643\u0645\u0627 \u0647\u0648 (\u0643\u0627\u0646 \u0627\u0644\u0645\u062a\u0623\u062e\u0651\u0631 \u0648\u0635\u0648\u0644\u0627\u064b \u064a\u0645\u0633\u062d \u0627\u0644\u0623\u062d\u062f\u062b)
   const editTs = Number(payload && payload.ts) || 0, exFts = (!creating && (await fsGet(token, "groups/" + groupId + "/persons/" + pid).catch(() => null)) || null);
   const srvTs = (k) => { try { const v = exFts.fields.fts.mapValue.fields[k].timestampValue; return Date.parse(v) || 0; } catch (e) { return 0; } };
@@ -626,6 +649,55 @@ async function opPersonSet(uid, payload, env) {
 }
 
 /* ---------- 8) \u0627\u0644\u0639\u0645\u0644\u064a\u0651\u0629: relation.add (\u0628\u0646\u064a\u0648\u064a\u0651 \u2014 \u062d\u0627\u0631\u0633\u064c \u062b\u0645 \u0645\u0631\u0627\u062c\u0639\u0629) ---------- */
+/* C203 (v120): \u0642\u0648\u0627\u0639\u062f \u0627\u0644\u0632\u0648\u0627\u062c \u0639\u0644\u0649 \u0627\u0644\u062e\u0627\u062f\u0645 \u2014 \u0646\u0633\u062e\u0629\u064c \u0645\u0646 marriageCheck \u0641\u064a app.p3.js\u060c \u0641\u0644\u0627 \u064a\u062a\u062c\u0627\u0648\u0632\u0647\u0627 \u0639\u0645\u064a\u0644\u064c \u0642\u062f\u064a\u0645 \u0623\u0648 \u0645\u0639\u0637\u0648\u0628.
+   \u0646\u0642\u064a\u0651\u0629: \u062a\u0623\u062e\u0630 \u0627\u0644\u062d\u0642\u0627\u0626\u0642 \u0627\u0644\u0645\u062c\u0645\u0648\u0639\u0629 \u0648\u062a\u0639\u064a\u062f \u0627\u0644\u0633\u0628\u0628 (\u0646\u0635\u0651\u0627\u064b \u0625\u0646\u062c\u0644\u064a\u0632\u064a\u0651\u0627\u064b \u064a\u062d\u0648\u064a \u00abnot allowed\u00bb \u21d0 \u0631\u0641\u0636\u064c \u0646\u0647\u0627\u0626\u064a\u0651 \u0641\u064a \u0637\u0627\u0628\u0648\u0631 sawa-sync) \u0623\u0648 null. */
+const MARRIAGE_MAX_WIVES = 4;
+function marriageRule(f) {
+  // f = { type, gFrom, gTo, directKin, wifeOtherHusbands, husbandOtherWives }
+  if (f.type !== "spouse" && f.type !== "ex_spouse") return null;
+  const ok = (g) => g === "male" || g === "female";
+  if (!ok(f.gFrom) || !ok(f.gTo)) return "both genders must be set";
+  if (f.gFrom === f.gTo) return "same gender";
+  if (f.directKin) return "direct kin (ancestor, descendant, sibling, aunt/uncle or niece/nephew)";
+  if (f.type === "spouse") {
+    if (f.wifeOtherHusbands > 0) return "wife already has a current husband";
+    if (f.husbandOtherWives >= MARRIAGE_MAX_WIVES) return "husband already has four current wives";
+  }
+  return null;
+}
+// \u064a\u062c\u0645\u0639 \u062d\u0642\u0627\u0626\u0642 marriageRule \u0645\u0646 Firestore: \u0627\u0644\u0623\u0632\u0648\u0627\u062c \u0627\u0644\u062d\u0627\u0644\u064a\u0651\u0648\u0646 \u0644\u0644\u0637\u0631\u0641\u064a\u0646\u060c \u0648\u0627\u0644\u0642\u0631\u0627\u0628\u0629 \u0627\u0644\u0645\u0628\u0627\u0634\u0631\u0629 (\u0623\u0635\u0644/\u0641\u0631\u0639 \u062d\u062a\u0649 \u0661\u0662 \u062c\u064a\u0644\u0627\u064b\u060c \u0623\u0648 \u0625\u062e\u0648\u0629)
+async function marriageFacts(type, from, to, gFrom, gTo, q, parentsOf) {
+  const curSp = async (id) => {
+    const a = await q([["type", "EQUAL", "spouse"], ["from", "EQUAL", id]], 50, A => A.filter(r => r.type === "spouse" && r.from === id));
+    const b = await q([["type", "EQUAL", "spouse"], ["to", "EQUAL", id]], 50, A => A.filter(r => r.type === "spouse" && r.to === id));
+    return [...new Set(a.map(r => r.to).concat(b.map(r => r.from)))];
+  };
+  const ancestors = async (id) => {
+    const seen = new Set(); let gen = [id];
+    for (let d = 0; d < 12 && gen.length; d++) {
+      const next = [];
+      for (const p of (await parentsOf(gen)).map(r => r.from)) if (!seen.has(p)) { seen.add(p); next.push(p); }
+      gen = next.slice(0, 30);
+    }
+    return seen;
+  };
+  const [aF, aT] = await Promise.all([ancestors(from), ancestors(to)]);
+  const [pF, pT] = await Promise.all([parentsOf([from]), parentsOf([to])]);
+  const shareParent = pF.some(r => pT.some(x => x.from === r.from));
+  const sib = await q([["type", "EQUAL", "sibling"], ["from", "IN", [from, to]]], 50, A => A.filter(r => r.type === "sibling" && (r.from === from || r.from === to)));
+  // \u0648\u0627\u0644\u062f\u064f \u0623\u062d\u062f\u0647\u0645\u0627 \u0645\u0646 \u0623\u0635\u0648\u0644 \u0627\u0644\u0622\u062e\u0631 \u21d2 \u0625\u062e\u0648\u0629 \u0623\u0648 \u0639\u0645\u0651/\u062e\u0627\u0644 \u0648\u0627\u0628\u0646 \u0623\u062e\u064a\u0647 (\u0644\u0627 \u0623\u0628\u0646\u0627\u0621 \u0627\u0644\u0639\u0645\u0651)
+  const auntNiece = pT.some(r => aF.has(r.from)) || pF.some(r => aT.has(r.from));
+  const directKin = aF.has(to) || aT.has(from) || shareParent || auntNiece || sib.some(r => (r.from === from && r.to === to) || (r.from === to && r.to === from));
+  const facts = { type, gFrom, gTo, directKin, wifeOtherHusbands: 0, husbandOtherWives: 0 };
+  if (type === "spouse" && (gFrom === "male" || gFrom === "female") && gTo && gFrom !== gTo) {
+    const wife = gFrom === "female" ? from : to, husband = wife === from ? to : from;
+    const [hs, ws] = await Promise.all([curSp(wife), curSp(husband)]);
+    facts.wifeOtherHusbands = hs.filter(x => x !== husband).length;
+    facts.husbandOtherWives = ws.filter(x => x !== wife).length;
+  }
+  return facts;
+}
+
 async function opRelationAdd(uid, payload, env) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
@@ -658,6 +730,12 @@ async function opRelationAdd(uid, payload, env) {
   if (same.some(r => r.type === type)) return { applied: false, reason: "exists" };
   const parentsOf = (ids) => { const set = ids.slice(0, 30);
     return q([["type", "EQUAL", "parent"], ["to", "IN", set]], 200, A => A.filter(r => r.type === "parent" && set.indexOf(r.to) >= 0)); };
+
+  // C203 (v120): \u0627\u0644\u0632\u0648\u0627\u062c \u0642\u0627\u0639\u062f\u0629\u064c \u0644\u0627 \u0645\u0631\u0627\u062c\u0639\u0629 \u2014 \u064a\u064f\u0631\u0641\u0636 \u0646\u0647\u0627\u0626\u064a\u0651\u0627\u064b \u0648\u0644\u0627 \u064a\u062f\u062e\u0644 reviewQueue
+  if (type === "spouse" || type === "ex_spouse") {
+    const why = marriageRule(await marriageFacts(type, from, to, fstr(pf, "gender"), fstr(pt, "gender"), q, parentsOf));
+    if (why) throw new Error("marriage not allowed: " + why);
+  }
 
   let conflict = null;
   if (type === "parent") {
@@ -821,6 +899,7 @@ async function opBulkImport(uid, payload, env, claims) {
     const lid = (p.localId && segOk(String(p.localId))) ? String(p.localId) : crypto.randomUUID();
     const fid = lid; map[p.localId || lid] = fid;
     if (p.kinship === "\u0646\u0641\u0633\u064a") selfCount++;
+    if (selfDeceasedRule({ kinship: p.kinship, alive: p.alive })) { p.alive = true; delete p.death_date; delete p.deathYear; }   // C271: \u00ab\u0646\u0641\u0633\u064a\u00bb \u062d\u064a\u064c\u0651 \u062f\u0627\u0626\u0645\u0627\u064b (\u0627\u0644\u0631\u0641\u0639 \u0627\u0644\u0643\u0627\u0645\u0644 \u0644\u0627 \u064a\u0641\u0634\u0644 \u0628\u0633\u0628\u0628\u0647)
     const f = { deleted: { booleanValue: false }, createdTs: { timestampValue: now }, updatedTs: { timestampValue: now } };
     const ftsSub = {};
     for (const k of ALLOWED) if (k in p) { f[k] = toFsValue(capVal(k === "locations" ? cleanLocations(p[k]) : p[k])); ftsSub[k] = { timestampValue: now }; }
@@ -829,15 +908,30 @@ async function opBulkImport(uid, payload, env, claims) {
     personWrites.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/persons/" + fid, fields: f } });
   }
 
+  // C203 (v120): \u0642\u0648\u0627\u0639\u062f \u0627\u0644\u0632\u0648\u0627\u062c \u0641\u064a \u0627\u0644\u0631\u0641\u0639 \u0627\u0644\u0643\u0627\u0645\u0644 \u2014 \u062c\u0646\u0633\u064c \u0648\u0627\u062d\u062f \u064a\u064f\u0633\u0642\u0637\u060c \u0648\u0627\u0644\u0632\u0648\u062c \u0627\u0644\u062b\u0627\u0646\u064a \u0644\u0644\u0645\u0631\u0623\u0629 (\u0623\u0648 \u0627\u0644\u062e\u0627\u0645\u0633\u0629 \u0644\u0644\u0631\u062c\u0644) \u064a\u064f\u062d\u0641\u0638 \u00ab\u0633\u0627\u0628\u0642\u0627\u064b\u00bb
+  const genderOfLocal = {};
+  for (const p of persons) genderOfLocal[p.localId] = p.gender;
+  const curHusbands = {}, curWives = {};
+  let marriageSkipped = 0, marriageDowngraded = 0;
   // \u0625\u0639\u0627\u062f\u0629 \u062a\u0623\u0635\u064a\u0644 \u0627\u0644\u0635\u0644\u0627\u062a\u061b \u0645\u0627 \u0633\u0642\u0637 \u0637\u0631\u0641\u0647 \u064a\u064f\u062a\u062e\u0637\u0651\u0649
   let orphans = 0; const relWrites = [];
   for (const r of relations) {
     const from = map[r.fromLocalId], to = map[r.toLocalId];
     if (!from || !to) { orphans++; continue; }
     if (["parent", "spouse", "ex_spouse", "sibling"].indexOf(r.type) < 0 || from === to) { orphans++; continue; }   // v39
+    let rtype = r.type;
+    if (rtype === "spouse" || rtype === "ex_spouse") {   // C203 (v120)
+      const gA = genderOfLocal[r.fromLocalId], gB = genderOfLocal[r.toLocalId];
+      if (gA && gB && gA === gB) { marriageSkipped++; continue; }
+      if (rtype === "spouse" && gA && gB) {
+        const wife = gA === "female" ? from : to, husband = wife === from ? to : from;
+        if ((curHusbands[wife] || 0) >= 1 || (curWives[husband] || 0) >= MARRIAGE_MAX_WIVES) { rtype = "ex_spouse"; marriageDowngraded++; }
+        else { curHusbands[wife] = (curHusbands[wife] || 0) + 1; curWives[husband] = (curWives[husband] || 0) + 1; }
+      }
+    }
     const rid = (r.localId && segOk(String(r.localId))) ? String(r.localId) : crypto.randomUUID();
     relWrites.push({ update: { name: DOC_ROOT + "/groups/" + gid + "/relations/" + rid,
-      fields: Object.assign({ type: { stringValue: r.type }, from: { stringValue: from }, to: { stringValue: to },
+      fields: Object.assign({ type: { stringValue: rtype }, from: { stringValue: from }, to: { stringValue: to },
                 createdTs: { timestampValue: now }, deleted: { booleanValue: false } },
                 r.inferred ? { inferred: { stringValue: String(r.inferred).slice(0, 60) } } : {},
                 (r.type === "sibling" && (r.half === "father" || r.half === "mother")) ? { half: { stringValue: r.half } } : {}) } });
@@ -892,7 +986,7 @@ async function opBulkImport(uid, payload, env, claims) {
   }
 
   return { groupId: gid, personsImported: personWrites.length,
-           relationsImported: relWrites.length, orphansSkipped: orphans, selfDuplicate: selfDuplicate,
+           relationsImported: relWrites.length, orphansSkipped: orphans, marriageSkipped: marriageSkipped, marriageDowngraded: marriageDowngraded, selfDuplicate: selfDuplicate,
            replaced: replace, existing: existing, removedPersons: removedPersons, removedRelations: removedRelations };
 }
 
@@ -963,6 +1057,22 @@ async function opRelationUpdate(uid, payload, env) {
   const ex = await fsGet(token, "groups/" + groupId + "/relations/" + relId);
   if (!ex) throw new Error("relation not found");
   if (fbool(ex, "deleted")) throw new Error("relation is deleted");
+  // C203 (v120): \u00ab\u0633\u0627\u0628\u0642\u00bb \u21d0 \u00ab\u0642\u0627\u0626\u0645\u00bb (\u062a\u0631\u0627\u062c\u0639\u064c \u0639\u0646 \u0625\u0646\u0647\u0627\u0621 \u0632\u0648\u0627\u062c \u0645\u062b\u0644\u0627\u064b) \u064a\u0645\u0631\u0651 \u0628\u0642\u0648\u0627\u0639\u062f \u0627\u0644\u0632\u0648\u0627\u062c \u0643\u0627\u0644\u0625\u0636\u0627\u0641\u0629
+  if ((type === "spouse" || type === "ex_spouse") && fstr(ex, "type") !== type) {
+    const from = fstr(ex, "from"), to = fstr(ex, "to"), gPath = "groups/" + groupId;
+    const [pf, pt] = await Promise.all([fsGet(token, gPath + "/persons/" + from), fsGet(token, gPath + "/persons/" + to)]);
+    const live = docs => docs.filter(d => !fbool(d, "deleted") && d.name.split("/").pop() !== relId).map(d => ({ type: fstr(d, "type"), from: fstr(d, "from"), to: fstr(d, "to") }));
+    let all = null;
+    const q = async (filters, lim, fallback) => {
+      if (all) return fallback(all);
+      try { return live(await fsQuerySub(token, gPath, "relations", filters, lim)); }
+      catch (e) { all = live(await fsList(token, gPath + "/relations")); return fallback(all); }
+    };
+    const parentsOf = (ids) => { const set = ids.slice(0, 30);
+      return q([["type", "EQUAL", "parent"], ["to", "IN", set]], 200, A => A.filter(r => r.type === "parent" && set.indexOf(r.to) >= 0)); };
+    const why = marriageRule(await marriageFacts(type, from, to, fstr(pf, "gender"), fstr(pt, "gender"), q, parentsOf));
+    if (why) throw new Error("marriage not allowed: " + why);
+  }
   const now = new Date().toISOString();
   await fsCommit(token, [
     { update: { name: DOC_ROOT + "/groups/" + groupId + "/relations/" + relId,
@@ -1956,12 +2066,17 @@ async function opChatSend(uid, payload, env, ctx) {
   }
   return { ts, day, id: msg.id };
 }
-async function dayMsg(token, cid, day, id) {
+// Same read as dayMsg, plus the day document's updateTime so a later write can be
+// made conditional on it (optimistic concurrency for read-check-write ops).
+async function dayMsgAt(token, cid, day, id) {
   if (!DAY_REF.test(String(day || "")) || !MSG_ID.test(String(id || ""))) throw new Error("bad message ref");
   const d = await fsGet(token, "chats/" + cid + "/days/" + day);
   const v = d && d.fields && d.fields.msgs && d.fields.msgs.mapValue.fields && d.fields.msgs.mapValue.fields[id];
   if (!v) throw new Error("message not found");
-  return fsToJs(v);
+  return { m: fsToJs(v), updateTime: (d && d.updateTime) || null };
+}
+async function dayMsg(token, cid, day, id) {
+  return (await dayMsgAt(token, cid, day, id)).m;
 }
 // v33: \u0642\u0631\u0627\u0621\u0629 \u0631\u0633\u0627\u0626\u0644 \u0628\u0639\u064a\u0646\u0647\u0627 \u0645\u0646 \u0648\u062b\u064a\u0642\u0629 \u064a\u0648\u0645 (\u0642\u0646\u0627\u0639 \u062d\u0642\u0648\u0644 \u2014 \u0644\u0627 \u062a\u064f\u0646\u0632\u064e\u0651\u0644 \u0627\u0644\u0648\u062b\u064a\u0642\u0629 \u0643\u0644\u0651\u0647\u0627)
 async function dayPeek(token, cid, day, ids) {
@@ -2338,7 +2453,7 @@ async function opGroupUpdate(uid, payload, env) {
   const c = await requireChatMember(token, cid, uid);
   // C159: \u0645\u062d\u0627\u062f\u062b\u0629 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u2014 \u0635\u0648\u0631\u062a\u0647\u0627 \u0648\u062d\u062f\u0647\u0627\u060c \u0644\u0645\u0627\u0644\u0643 \u0627\u0644\u0639\u0627\u0626\u0644\u0629 \u0648\u0645\u062d\u0631\u0651\u0631\u064a\u0647\u0627 (\u0627\u0644\u0627\u0633\u0645 \u0648\u0627\u0644\u0623\u0639\u0636\u0627\u0621 \u064a\u062a\u0628\u0639\u0627\u0646 \u0627\u0644\u0639\u0627\u0626\u0644\u0629)
   if (fstr(c, "type") === "family") {
-    if (payload.photo == null || Object.keys(payload).some(k => k !== "cid" && k !== "photo")) throw new Error("family chat follows the family");
+    if (payload.photo == null || Object.keys(payload).some(k => k !== "cid" && k !== "photo" && k !== "photoHd")) throw new Error("family chat follows the family");
     const fm = await fsGet(token, "groups/" + fstr(c, "familyGroupId") + "/members/" + uid).catch(() => null);
     const fr = fstr(fm, "role");
     if (fr !== "owner" && fr !== "editor") throw new Error("only admins can do this");
@@ -2364,7 +2479,7 @@ async function opGroupUpdate(uid, payload, env) {
   }
   if (!mask.length) return { ok: true };
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields }, updateMask: { fieldPaths: mask } }].concat(gphoto === undefined ? [] :
-    [gphoto ? { update: { name: DOC_ROOT + "/avatars/" + cid, fields: { d: { stringValue: gphoto }, ts: { integerValue: String(Date.now()) } } } } : { delete: DOC_ROOT + "/avatars/" + cid }]));
+    [gphoto ? { update: { name: DOC_ROOT + "/avatars/" + cid, fields: { d: { stringValue: gphoto }, ts: { integerValue: String(Date.now()) } } } } : { delete: DOC_ROOT + "/avatars/" + cid }, photoHdWrite(cid, gphoto, payload.photoHd)]));
   if (gphoto !== undefined) await sysMsg(token, cid, uid, "photo", { on: !!gphoto });
   if (fields.name) await sysMsg(token, cid, uid, "renamed", { name: fields.name.stringValue });
   if (fields.desc) await sysMsg(token, cid, uid, "desc", {});
@@ -2456,10 +2571,10 @@ async function opGroupJoin(uid, payload, env, claims) {
 async function toolMsg(token, payload, uid, wantType) {
   const { cid, day, id } = payload || {};
   const c = await requireChatMember(token, cid, uid);
-  const m = await dayMsg(token, cid, day, id);
+  const { m, updateTime } = await dayMsgAt(token, cid, day, id);
   if (m.type !== wantType) throw new Error("wrong message type");
   if (m.del) throw new Error("message deleted");
-  return { c, m, cid, day, id };
+  return { c, m, cid, day, id, updateTime };
 }
 const setPath = (cid, day, fieldPath, value) => ({ update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + day,
   fields: value === undefined ? {} : nestFields(fieldPath, value) }, updateMask: { fieldPaths: [fieldPath.map(s => "`" + s + "`").join(".")] } });
@@ -2510,6 +2625,14 @@ async function deviceAck(request, env) {
     const c = await rtdbGet(token, "calls/" + call).catch(() => null);
     if (c && c.to === to && c.state === "ringing" && !c.acc) await rtdbPatch(token, { ["calls/" + call + "/state"]: "declined" });
     stat("ack:decline");
+    return json({ ok: true });
+  }
+  if (k === "a") {   // C229: «ردّ» من شاشة النظام والتطبيق ما زال يُفتح — المتّصل يمدّ الانتظار بدل «لم يُجب»
+    const call = String(b.call || "");
+    if (!/^[A-Za-z0-9_-]{6,40}$/.test(call) || !ctEq(sg, await ackSig(env, "r|" + call + "|" + to))) return json({ ok: false }, 403);
+    const c = await rtdbGet(token, "calls/" + call).catch(() => null);
+    if (c && c.to === to && c.state === "ringing" && !c.acc && !c.answering) await rtdbPatch(token, { ["calls/" + call + "/answering"]: Date.now() });
+    stat("ack:answering");
     return json({ ok: true });
   }
   if (k === "d") {   // \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0648\u0635\u0644\u062a \u062c\u0647\u0627\u0632\u0647
@@ -2594,9 +2717,23 @@ async function opChatFund(uid, payload, env) {
   await fsCommit(token, [setPath(cid, day, ["msgs", id, "contrib", uid], { amount: prev + amount, ts: Date.now() })]);
   return { total: prev + amount };
 }
+// Claim / reassign / status / pct / note all read the task state, decide, then write.
+// Two members acting at once used to both pass the "already assigned" check and both
+// end up as owner. The write is now conditional on the day document's updateTime that
+// was read, and a lost race (FAILED_PRECONDITION) re-runs the whole read-check-write.
 async function opChatTask(uid, payload, env, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
-  const { c, m, cid, day, id } = await toolMsg(token, payload, uid, "tasks");
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await chatTaskOnce(uid, payload, env, ctx, token);
+    } catch (e) {
+      if (attempt < 4 && /FAILED_PRECONDITION/.test(String((e && e.message) || ""))) continue;
+      throw e;
+    }
+  }
+}
+async function chatTaskOnce(uid, payload, env, ctx, token) {
+  const { c, m, cid, day, id, updateTime } = await toolMsg(token, payload, uid, "tasks");
   const taskId = String(payload.taskId || "");
   // C164: \u0641\u064a \u0627\u0644\u0633\u0631\u0651\u064a\u0651\u0629 \u0644\u0627 \u064a\u0631\u0649 \u0627\u0644\u062e\u0627\u062f\u0645 \u0627\u0644\u0645\u0647\u0627\u0645\u0651 (\u062f\u0627\u062e\u0644 enc) \u2014 \u0645\u0639\u0631\u0651\u0641\u064c \u0633\u0644\u064a\u0645 \u0641\u0642\u0637\u060c \u0648\u0627\u0644\u062d\u0627\u0644\u0629 \u0648\u062d\u062f\u0647\u0627 (\u0644\u0627 \u0645\u0644\u0627\u062d\u0638\u0627\u062a \u0646\u0635\u0651\u064a\u0651\u0629 \u0638\u0627\u0647\u0631\u0629)
   let task = null;
@@ -2623,9 +2760,12 @@ async function opChatTask(uid, payload, env, ctx) {
     if (!m.enc && eff0 && eff0 !== uid && !boss) throw new Error("only the assignee can change this task");
     next.status = payload.status;
     if (payload.status === "done") { next.doneBy = uid; next.doneAt = Date.now(); if (!eff0 && !m.enc && payload.owner === undefined) next.owner = uid; }
-    else { delete next.doneBy; delete next.doneAt; }
+    else { delete next.doneBy; delete next.doneAt; if (next.pct === 100 && payload.pct === undefined) delete next.pct; }   // C232: «غير منجزة» لا تبقى ١٠٠٪ (كانت تُحسب منجزةً في نسبة القائمة)
   }
-  if (payload.note != null) next.note = String(payload.note).slice(0, 300);
+  if (payload.note != null) {   // C233: كان أيّ عضوٍ يكتب فوق ملاحظة مهمّةٍ ليست له — الآن كالحالة والنسبة: المسؤول · المنشئ/المشرف · أو أيٌّ كان إن لم يكن لها مسؤول
+    if (!m.enc && eff0 && eff0 !== uid && !boss) throw new Error("only the assignee can change this task");
+    next.note = String(payload.note).slice(0, 300);
+  }
   if (payload.pct !== undefined) {   // C188: \u0646\u0633\u0628\u0629 \u0625\u0646\u062c\u0627\u0632 \u0627\u0644\u0645\u0647\u0645\u0651\u0629 0\u2013100 \u2014 \u064a\u064f\u063a\u064a\u0651\u0631\u0647\u0627 \u0627\u0644\u0645\u0633\u0624\u0648\u0644 (\u0623\u0648 \u0627\u0644\u0645\u0646\u0634\u0626/\u0627\u0644\u0645\u0634\u0631\u0641)
     if (!m.enc && eff0 && eff0 !== uid && !boss) throw new Error("only the assignee can change this task");
     const v = Math.round(Number(payload.pct));
@@ -2636,7 +2776,9 @@ async function opChatTask(uid, payload, env, ctx) {
     else if (v < 100 && next.status === "done" && payload.status === undefined) { next.status = "pending"; delete next.doneBy; delete next.doneAt; }
   }
   const m2 = Object.assign({}, m, { tstate: Object.assign({}, m.tstate, { [taskId]: next }) });
-  await fsCommit(token, [setPath(cid, day, ["msgs", id, "tstate", taskId], next)].concat(m.enc ? [] : [taskIdxWrite(c, cid, day, id, m2)]));
+  const tw = setPath(cid, day, ["msgs", id, "tstate", taskId], next);
+  if (updateTime) tw.currentDocument = { updateTime: updateTime };   // lost race ⇒ FAILED_PRECONDITION ⇒ retry above
+  await fsCommit(token, [tw].concat(m.enc ? [] : [taskIdxWrite(c, cid, day, id, m2)]));
   // \u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062a \u0628\u0639\u062f \u0627\u0644\u0631\u062f\u0651
   const job = (async () => {
     const names = chatNames(c), who = names[uid] || "\u0633\u0648\u0627", gname = fstr(c, "name") || "\u0633\u0648\u0627";
@@ -2744,6 +2886,91 @@ async function opChatMyTasks(uid, payload, env) {
   const lists = rows.filter(r => chats[r.cid]).map(r => ({ cid: r.cid, chat: chats[r.cid].name, admin: chats[r.cid].admin, day: r.day, id: r.id, by: r.by, title: r.title, ts: r.ts,
     tasks: (r.tasks || []).map(t => ({ id: t.id, text: t.text, assigneeId: t.a || null, dueAt: t.due || null, status: t.st, note: t.note || "", doneBy: t.db || null, doneAt: t.da || null })) }));
   return { lists };
+}
+
+/* ---------- C271 (v126): \u0645\u0648\u0627\u0639\u064a\u062f \u0635\u0644\u0629 \u0627\u0644\u0631\u062d\u0645 \u0627\u0644\u0645\u0631\u0646\u0629 \u2014 kin.remind.set + \u0627\u0644\u0645\u062c\u062f\u0648\u0650\u0644 ----------
+   kinrem/{uid} = { on, hour (0\u201323, \u0628\u062a\u0648\u0642\u064a\u062a \u0627\u0644\u0645\u0633\u062a\u062e\u062f\u0645), tz (getTimezoneOffset \u0628\u0627\u0644\u062f\u0642\u0627\u0626\u0642), lang, items: [{ id, n: \u0627\u0644\u0627\u0633\u0645 \u0627\u0644\u0623\u0648\u0651\u0644, e: \u0627\u0644\u0645\u062f\u0651\u0629 \u0628\u0627\u0644\u0623\u064a\u0651\u0627\u0645 1\u2013365, l: \u0645\u0631\u062c\u0639 \u0622\u062e\u0631 \u062a\u0648\u0627\u0635\u0644 (ms) }],
+                    sent: { id: \u0622\u062e\u0631 \u062a\u0630\u0643\u064a\u0631\u064d \u0644\u0647 }, last: \u0622\u062e\u0631 \u0625\u0634\u0639\u0627\u0631, rq: \u0645\u0648\u0639\u062f \u0627\u0644\u062a\u0634\u063a\u064a\u0644 \u0627\u0644\u0642\u0627\u062f\u0645 (ms\u060c 0 = \u0644\u0627 \u0634\u064a\u0621) }
+   \u0627\u0644\u0642\u0627\u0639\u062f\u0629: \u064a\u062d\u064a\u0646 \u0627\u0644\u0642\u0631\u064a\u0628 \u064a\u0648\u0645 (max(l, sent) + e) \u0641\u064a \u00ab\u0627\u0644\u0633\u0627\u0639\u0629\u00bb \u0627\u0644\u0645\u062e\u062a\u0627\u0631\u0629. \u0627\u0644\u0645\u062a\u0623\u062e\u0651\u0631 \u0623\u0635\u0644\u0627\u064b \u21d0 \u0623\u0648\u0651\u0644 \u00ab\u0633\u0627\u0639\u0629\u00bb \u0642\u0627\u062f\u0645\u0629.
+   \u0625\u0634\u0639\u0627\u0631\u064c \u0648\u0627\u062d\u062f \u064a\u062c\u0645\u0639 \u0643\u0644\u0651 \u0645\u0646 \u062d\u0627\u0646 (\u0644\u0627 \u0625\u0634\u0639\u0627\u0631 \u0644\u0643\u0644\u0651 \u0642\u0631\u064a\u0628)\u060c \u0648\u0644\u0627 \u0623\u0643\u062b\u0631 \u0645\u0646 \u0625\u0634\u0639\u0627\u0631\u064d \u0643\u0644\u0651 \u0661\u0662 \u0633\u0627\u0639\u0629. \u0648\u0627\u0644\u0645\u062f\u0651\u0629 \u0628\u0639\u062f \u0627\u0644\u062a\u0630\u0643\u064a\u0631 \u062a\u0628\u062f\u0623 \u0645\u0646 \u062c\u062f\u064a\u062f
+   (\u064a\u0648\u0645\u064a\u0651\u0627\u064b \u21d0 \u063a\u062f\u0627\u064b\u060c \u0623\u0633\u0628\u0648\u0639\u064a\u0651\u0627\u064b \u21d0 \u0628\u0639\u062f \u0623\u0633\u0628\u0648\u0639) \u0625\u0644\u0649 \u0623\u0646 \u064a\u0633\u062c\u0651\u0644 \u0627\u0644\u0645\u0633\u062a\u062e\u062f\u0645 \u062a\u0648\u0627\u0635\u0644\u0647 \u0641\u064a\u062a\u063a\u064a\u0651\u0631 l. */
+const KIN_DAY = 86400000, KIN_MIN_GAP = 12 * 3600000, KIN_MAX_ITEMS = 300;
+function kinHour(h) { const x = Math.round(Number(h)); return x >= 0 && x <= 23 ? x : 18; }
+function kinTz(z) { const x = Math.round(Number(z)); return x >= -840 && x <= 840 ? x : 0; }
+function kinDayStart(t, tz) { const off = -kinTz(tz) * 60000; return Math.floor((t + off) / KIN_DAY) * KIN_DAY - off; }
+// \u0623\u0648\u0651\u0644 \u00ab\u0633\u0627\u0639\u0629 \u062a\u0630\u0643\u064a\u0631\u00bb \u0628\u0639\u062f t
+function kinSlot(t, hour, tz) { let x = kinDayStart(t, tz) + kinHour(hour) * 3600000; if (x <= t) x += KIN_DAY; return x; }
+// \u0646\u0642\u064a\u0651\u0629: \u0645\u0646 \u062d\u0627\u0646 \u0627\u0644\u0622\u0646\u061f \u0648\u0645\u062a\u0649 \u0627\u0644\u062a\u0634\u063a\u064a\u0644 \u0627\u0644\u0642\u0627\u062f\u0645\u061f
+function kinPlan(doc, now) {
+  const due = [];
+  if (!doc || doc.on === false || !Array.isArray(doc.items) || !doc.items.length) return { due, rq: 0 };
+  const sent = doc.sent || {}, nowSlot = kinSlot(now, doc.hour, doc.tz);
+  let rq = 0;
+  for (const it of doc.items) {
+    const e = Math.round(Number(it.e));
+    if (!(e >= 1 && e <= 365)) continue;
+    const base = Math.max(Number(it.l) || 0, Number(sent[it.id]) || 0);
+    const fireAt = kinDayStart(base + e * KIN_DAY, doc.tz) + kinHour(doc.hour) * 3600000;
+    if (fireAt <= now) due.push(it);
+    const eff = fireAt > now ? fireAt : nowSlot;
+    if (!rq || eff < rq) rq = eff;
+  }
+  return { due, rq };
+}
+function kinItems(list, now) {
+  const seen = {}, out = [];
+  for (const x of (Array.isArray(list) ? list : []).slice(0, KIN_MAX_ITEMS)) {
+    const id = String((x && x.id) || "").slice(0, 80), e = Math.round(Number(x && x.e)), l = Math.round(Number(x && x.l));
+    if (!id || seen[id] || !(e >= 1 && e <= 365)) continue;
+    seen[id] = 1;
+    out.push({ id, n: String((x && x.n) || "").replace(/[\u0000-\u001f<>]/g, "").slice(0, 40), e, l: l > 0 && l <= now + KIN_DAY ? l : now });
+  }
+  return out;
+}
+function kinBody(due, lang) {
+  const en = lang === "en", names = due.map((x) => x.n).filter(Boolean);
+  if (!names.length) return en ? "It's time to check in with your relatives" : "\u062d\u0627\u0646 \u0645\u0648\u0639\u062f \u0627\u0644\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0623\u0642\u0627\u0631\u0628\u0643";
+  if (names.length === 1) return en ? "Time to reach out to " + names[0] : "\u062d\u0627\u0646 \u0645\u0648\u0639\u062f \u0627\u0644\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 " + names[0];
+  if (names.length === 2) return en ? "Time to reach out to " + names[0] + " and " + names[1] : "\u062d\u0627\u0646 \u0645\u0648\u0639\u062f \u0627\u0644\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 " + names[0] + " \u0648" + names[1];
+  return en ? "Time to reach out to " + names.slice(0, 2).join(", ") + " and " + (names.length - 2) + " more"
+            : "\u062d\u0627\u0646 \u0645\u0648\u0639\u062f \u0627\u0644\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 " + names.slice(0, 2).join("\u060c ") + " \u0648" + (names.length - 2) + " \u063a\u064a\u0631\u0647\u0645\u0627";
+}
+function kinDocJs(d) { return d ? fsToJs({ mapValue: { fields: d.fields || {} } }) || {} : {}; }
+async function opKinRemindSet(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const now = Date.now(), p = payload || {};
+  const on = p.on !== false, items = on ? kinItems(p.items, now) : [];
+  const name = DOC_ROOT + "/kinrem/" + uid;
+  if (!items.length) { await fsCommit(token, [{ delete: name }]); return { kin: 0, next: 0 }; }
+  const prev = kinDocJs(await fsGet(token, "kinrem/" + uid).catch(() => null));
+  const sent = {}, ps = (prev && prev.sent) || {};
+  for (const it of items) if (Number(ps[it.id]) > 0) sent[it.id] = Number(ps[it.id]);
+  const doc = { on: true, hour: kinHour(p.hour), tz: kinTz(p.tz), lang: p.lang === "en" ? "en" : "ar", items, sent, last: Number(prev && prev.last) || 0 };
+  const { rq } = kinPlan(doc, now);
+  await fsCommit(token, [{ update: { name, fields: toFsValue(Object.assign({}, doc, { rq, ts: now })).mapValue.fields } }]);
+  return { kin: items.length, next: rq };
+}
+async function kinReminders(env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const now = Date.now(), L = LIM(env);
+  const res = await gfetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "kinrem" }], where: { compositeFilter: { op: "AND", filters: [
+      { fieldFilter: { field: { fieldPath: "rq" }, op: "GREATER_THAN", value: { integerValue: "0" } } },
+      { fieldFilter: { field: { fieldPath: "rq" }, op: "LESS_THAN_OR_EQUAL", value: { integerValue: String(now) } } }] } }, limit: L.rem + 1 } }) });
+  const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+  let sent = 0;
+  for (const d of rows.slice(0, L.rem)) {
+    const uid = d.name.split("/").pop(), x = kinDocJs(d);
+    const doc = { on: x.on !== false, hour: kinHour(x.hour), tz: kinTz(x.tz), lang: x.lang === "en" ? "en" : "ar", items: Array.isArray(x.items) ? x.items : [], sent: Object.assign({}, x.sent || {}), last: Number(x.last) || 0 };
+    const { due } = kinPlan(doc, now);
+    const send = due.length > 0 && now - doc.last >= KIN_MIN_GAP;
+    if (send) { for (const it of due) doc.sent[it.id] = now; doc.last = now; }
+    const { rq } = kinPlan(doc, now);
+    // \u0623\u0648\u0651\u0644\u0627\u064b: \u0627\u0644\u0645\u0648\u0639\u062f \u0627\u0644\u0642\u0627\u062f\u0645 (\u0644\u0627 \u062a\u0643\u0631\u0627\u0631 \u0644\u0648 \u062a\u0639\u062b\u0651\u0631 \u0627\u0644\u0625\u0631\u0633\u0627\u0644)
+    await fsCommit(token, [{ update: { name: d.name, fields: { rq: { integerValue: String(rq) }, sent: toFsValue(doc.sent), last: { integerValue: String(doc.last) } } }, updateMask: { fieldPaths: ["rq", "sent", "last"] } }]).catch(e => slog("warn", "kinrem", { err: e && e.message }));
+    if (send) sent += await pushTo(token, [uid], strData({ t: "kin", title: doc.lang === "en" ? "\ud83e\udd32 Family ties" : "\ud83e\udd32 \u0635\u0644\u0629 \u0627\u0644\u0631\u062d\u0645", body: kinBody(due, doc.lang), n: due.length, ts: now }));
+  }
+  return { reminders: rows.length, sent };
 }
 
 // \u0627\u0644\u062a\u0630\u0643\u064a\u0631 (\u0645\u0646 \u0627\u0644\u0645\u062c\u062f\u0648\u0650\u0644): \u0642\u0627\u0626\u0645\u0629\u064c \u0648\u0627\u062d\u062f\u0629 \u0641\u064a \u0643\u0644\u0651 \u062a\u0634\u063a\u064a\u0644
@@ -3907,6 +4134,16 @@ async function opFindBy(uid, payload, env, kind, claims) {
     fsGet(token, "accounts/" + uid + "/creqout/" + t.uid), fsGet(token, "accounts/" + uid + "/creq/" + t.uid)]);
   return { found: true, name: t.name, code: t.code, contact: !!contact, pending: inR ? "in" : outR ? "out" : null, uid: (contact || inR || outR) ? t.uid : undefined };
 }
+// C204 (v121): \u0646\u0633\u062e\u0629\u064c \u0639\u0627\u0644\u064a\u0629 \u0627\u0644\u062f\u0642\u0651\u0629 \u0644\u0644\u0635\u0648\u0631\u0629 (\u2264 400 \u0623\u0644\u0641 \u062d\u0631\u0641) \u0641\u064a avatars/{id}_hd \u2014 \u062a\u064f\u0642\u0631\u0623 \u0639\u0646\u062f \u0641\u062a\u062d \u0627\u0644\u0635\u0648\u0631\u0629 \u0648\u062d\u062f\u0647\u0627.
+// \u0627\u0644\u0645\u0635\u063a\u0651\u0631\u0629 avatars/{id} \u0643\u0645\u0627 \u0647\u064a (\u2264 20 \u0623\u0644\u0641) \u0644\u0644\u0642\u0648\u0627\u0626\u0645. \u0635\u0648\u0631\u0629\u064c \u062c\u062f\u064a\u062f\u0629 \u0628\u0644\u0627 \u0646\u0633\u062e\u0629\u064d \u0639\u0627\u0644\u064a\u0629 \u0623\u0648 \u0625\u0632\u0627\u0644\u0629 \u21d2 \u062a\u064f\u062d\u0630\u0641 \u0627\u0644\u0639\u0627\u0644\u064a\u0629 \u0627\u0644\u0642\u062f\u064a\u0645\u0629.
+function photoHdWrite(id, photo, photoHd) {
+  if (photo && photoHd) {
+    const hd = String(photoHd);
+    if (!/^data:image\/(jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(hd) || hd.length > 400000) throw new Error("bad photo");
+    return { update: { name: DOC_ROOT + "/avatars/" + id + "_hd", fields: { d: { stringValue: hd }, ts: { integerValue: String(Date.now()) } } } };
+  }
+  return { delete: DOC_ROOT + "/avatars/" + id + "_hd" };
+}
 async function opProfileSet(uid, payload, env, claims) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   payload = payload || {};
@@ -3940,6 +4177,7 @@ async function opProfileSet(uid, payload, env, claims) {
     if (pv0.phone === phone && pv0.phoneVerified) { delete fields.phoneVerified; const i = mask.indexOf("phoneVerified"); if (i >= 0) mask.splice(i, 1); }   // \u0627\u0644\u0631\u0642\u0645 \u0646\u0641\u0633\u0647 \u21d2 \u064a\u0628\u0642\u0649 \u0645\u0648\u062b\u064e\u0651\u0642\u0627\u064b
   }
   if (photo !== undefined) pw.push(photo ? { update: { name: DOC_ROOT + "/avatars/" + uid, fields: { d: { stringValue: photo }, ts: { integerValue: String(Date.now()) } } } } : { delete: DOC_ROOT + "/avatars/" + uid });
+  if (photo !== undefined) pw.push(photoHdWrite(uid, photo, payload.photoHd));   // C204
   await fsCommit(token, pw);
   if (name === undefined && phone === undefined) { const pv = PROFILE_CACHE.get(uid) || {}; return { profile: { name: pv.name || null, phone: pv.phone || null, phoneVerified: false, photo: !!photo }, propagated: 0 }; }
   const prev = PROFILE_CACHE.get(uid) || {};
@@ -4127,13 +4365,13 @@ async function opAdminRelay(uid, payload, env, claims) {
   if (!role) return { admin: false };
   if (payload && payload.primary !== undefined) {
     if (ADM_RANK[role] < ADM_RANK.admin) throw new Error("view only");
-    const v = payload.primary === "m" || payload.primary === "cf" ? payload.primary : "";
+    const v = payload.primary === "m" || payload.primary === "cf" || payload.primary === "p" ? payload.primary : "";   // C228: p = \u0627\u0644\u0623\u0642\u0631\u0628 \u0644\u0644\u0637\u0631\u0641\u064a\u0646
     const token = await getAccessToken(JSON.parse(env.SA_JSON));
     await fsCommit(token, [{ update: { name: DOC_ROOT + "/config/relay", fields: { primary: { stringValue: v }, by: { stringValue: uid }, ts: { integerValue: String(Date.now()) } } } }]);
     RELAY_CFG = v; RELAY_AT = Date.now();
     await adminLog(env, uid, claims, role, "relay", v || "auto");
   }
-  return { admin: true, role, primary: await relayPref(env), envDefault: env.TURN_PROVIDER === "cloudflare" ? "cf" : "m",
+  return { admin: true, role, primary: await relayPref(env), envDefault: env.TURN_PROVIDER === "cloudflare" ? "cf" : env.TURN_PROVIDER === "pair" ? "p" : "m",
     has: { m: !!((env.METERED_USER && env.METERED_PASS) || (env.METERED_KEY && env.METERED_APP)), cf: !!(env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN) } };
 }
 const HAS_CONTACT = new Map();
@@ -4202,7 +4440,13 @@ async function opRtcIce(uid, payload, env, claims, request) {
     } catch (e) { slog("warn", "TURN_EXTRA", { err: String(e.message || e) }); }
   }
   // C165: Metered \u0647\u0648 \u0627\u0644\u0648\u0633\u064a\u0637 \u0627\u0644\u0623\u0633\u0627\u0633\u064a\u0651 \u0648 Cloudflare \u0627\u062d\u062a\u064a\u0627\u0637\u064c \u0625\u0646 \u0641\u0634\u0644 (\u0644\u0644\u0645\u0642\u0627\u0631\u0646\u0629) \u00b7 TURN_PROVIDER = "cloudflare" \u064a\u0639\u0643\u0633 \u0627\u0644\u062a\u0631\u062a\u064a\u0628
-  const want = (await relayPref(env).catch(() => "")) || (env.TURN_PROVIDER === "cloudflare" ? "cf" : "m");   // C175: \u0627\u062e\u062a\u064a\u0627\u0631 \u0627\u0644\u0645\u062f\u064a\u0631 \u064a\u063a\u0644\u0628
+  const want = (await relayPref(env).catch(() => "")) || (env.TURN_PROVIDER === "cloudflare" ? "cf" : env.TURN_PROVIDER === "pair" ? "p" : "m");   // C175: \u0627\u062e\u062a\u064a\u0627\u0631 \u0627\u0644\u0645\u062f\u064a\u0631 \u064a\u063a\u0644\u0628
+  // C228: \u00abp\u00bb = \u0627\u0644\u0623\u0642\u0631\u0628 \u0644\u0644\u0637\u0631\u0641\u064a\u0646 \u2014 \u0644\u0627 \u0648\u0633\u064a\u0637 \u0645\u0641\u0636\u064e\u0651\u0644\u061b \u0627\u0644\u0647\u0627\u062a\u0641\u0627\u0646 \u064a\u062e\u062a\u0627\u0631\u0627\u0646 \u0645\u0639\u0627\u064b \u0628\u0642\u064a\u0627\u0633\u0627\u062a\u0647\u0645\u0627 (rtc.peer)
+  if (want === "p" && relays.length) {
+    stat("turn:pair");
+    const all0 = []; relays.slice(0, 2).forEach(r => r.iceServers.forEach(x => all0.push(x)));
+    return Object.assign({ turn: true, provider: "pair", primary: "p", iceServers: stun.concat(all0), relays }, cfErr ? { cfErr } : {});
+  }
   const hasM = relays.some(r => /^m/.test(r.id)), hasCf = relays.some(r => r.id === "cf");
   const primary = (want === "cf" && hasCf) || !hasM ? "cf" : "m";
   const isP = (r) => primary === "cf" ? r.id === "cf" : /^m/.test(r.id);
@@ -4214,6 +4458,46 @@ async function opRtcIce(uid, payload, env, claims, request) {
   const prim = relays.filter(isP), base = prim.length ? prim : relays;
   const bl = []; base.forEach(r => r.iceServers.forEach(x => bl.push(x)));
   return Object.assign({ turn: true, provider: relays[0].id === "cf" ? "cloudflare" : "metered", primary: primary === "cf" ? "cf" : "m", iceServers: stun.concat(bl), relays }, cfErr ? { cfErr } : {});
+}
+// ---------- C228: \u0642\u064a\u0627\u0633 \u0627\u0644\u0648\u0633\u0637\u0627\u0621 \u0645\u0646 \u0647\u0627\u062a\u0641 \u0643\u0644\u0651 \u0645\u0633\u062a\u062e\u062f\u0645 + \u0627\u062e\u062a\u064a\u0627\u0631 \u0648\u0633\u064a\u0637\u064d \u0648\u0627\u062d\u062f \u064a\u0646\u0627\u0633\u0628 \u0627\u0644\u0637\u0631\u0641\u064a\u0646 ----------
+// \u0627\u0644\u0647\u0627\u062a\u0641 \u064a\u0642\u064a\u0633 \u0632\u0645\u0646 \u062d\u062c\u0632 \u0645\u0646\u0641\u0630\u064d \u0641\u064a \u0643\u0644\u0651 \u0648\u0633\u064a\u0637 (\u0645\u0648\u062c\u0648\u062f\u064c \u0645\u0646\u0630 C94) \u0648\u064a\u0631\u0633\u0644\u0647 \u0647\u0646\u0627 (rtc.probe) \u21d2 \u064a\u064f\u062d\u0641\u0638 \u0641\u064a RTDB rly/{uid} \u0645\u0639 \u062f\u0648\u0644\u0629 \u0627\u0644\u0634\u0628\u0643\u0629
+// \u0648\u0646\u0642\u0637\u0629 Cloudflare (request.cf) \u2014 \u0645\u0633\u0627\u0631\u064c \u0644\u0627 \u064a\u0642\u0631\u0624\u0647 \u0623\u064a\u0651 \u0647\u0627\u062a\u0641 \u0645\u0628\u0627\u0634\u0631\u0629\u064b (\u0644\u0627 \u0642\u0648\u0627\u0639\u062f \u0644\u0647 \u21d2 \u0645\u0645\u0646\u0648\u0639)\u060c \u0648\u0627\u0644\u062e\u0627\u062f\u0645 \u0648\u062d\u062f\u0647 \u064a\u0643\u062a\u0628 \u0648\u064a\u0642\u0631\u0623.
+// \u0627\u0644\u0645\u062a\u0651\u0635\u0644 \u064a\u0637\u0644\u0628 \u0642\u064a\u0627\u0633\u0627\u062a \u0627\u0644\u0637\u0631\u0641 \u0627\u0644\u0622\u062e\u0631 (rtc.peer) \u0644\u062d\u0638\u0629 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u2014 \u0641\u0642\u0637 \u0625\u0646 \u0643\u0627\u0646 \u0645\u0633\u0645\u0648\u062d\u0627\u064b \u0644\u0647 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u0628\u0647 (acl/{peer}/{me}).
+const RLY_ID = /^(cf|metered|m:[a-z0-9.-]{3,80}|x[0-5])$/;
+const RLY_LAST = new Map();
+function rlyClean(ms) {
+  const o = {}; let n = 0;
+  for (const k of Object.keys(ms || {}).slice(0, 12)) {
+    if (!RLY_ID.test(k)) continue;
+    const v = ms[k];
+    if (v === false) o[k] = -1; else if (typeof v === "number" && Number.isFinite(v) && v >= 0) o[k] = Math.min(15000, Math.round(v)); else continue;
+    n++;
+  }
+  return n ? o : null;
+}
+function cfGeo(request) { const cf = (request && request.cf) || {}; return { cc: /^[A-Z]{2}$/.test(String(cf.country || "")) ? cf.country : "", colo: /^[A-Z]{3}$/.test(String(cf.colo || "")) ? cf.colo : "" }; }
+async function opRtcProbe(uid, payload, env, request) {
+  const ms = rlyClean(payload && payload.ms);
+  const geo = cfGeo(request);
+  if (!ms) return { saved: false, ...geo };
+  const last = RLY_LAST.get(uid); if (last && Date.now() - last < 60000) return { saved: false, limited: true, ...geo };
+  RLY_LAST.set(uid, Date.now()); if (RLY_LAST.size > 5000) RLY_LAST.clear();
+  const nat = TEL_NAT.has(payload && payload.nat) ? payload.nat : "";
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  await rtdbPatch(token, { ["rly/" + uid]: { j: JSON.stringify(ms), cc: geo.cc, colo: geo.colo, nat, at: Date.now() } });
+  return { saved: true, ...geo };
+}
+async function opRtcPeer(uid, payload, env, request) {
+  const peer = String((payload && payload.peer) || "");
+  if (!/^[A-Za-z0-9_-]{6,64}$/.test(peer) || peer === uid) throw new Error("bad peer");
+  if (!codeRate(uid, "rpeer", 120)) return { ok: false, limited: true };
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const [allow, r] = await Promise.all([rtdbGet(token, "acl/" + peer + "/" + uid).catch(() => null), rtdbGet(token, "rly/" + peer).catch(() => null)]);
+  const me = cfGeo(request);
+  if (allow !== true) return { ok: false, me };
+  if (!r || !r.at || Date.now() - r.at > 24 * 3600000) return { ok: true, ms: null, me };
+  let ms = null; try { ms = rlyClean(JSON.parse(r.j || "{}")); } catch (e) { }
+  return { ok: true, ms, cc: r.cc || "", colo: r.colo || "", nat: r.nat || "", age: Math.round((Date.now() - r.at) / 1000), me };
 }
 const RING_REPEATS = 3, RING_GAP_MS = (typeof globalThis !== "undefined" && globalThis.__RING_GAP_MS) || 8000;
 async function opCallRing(uid, payload, env, claims, ctx) {
@@ -4259,7 +4543,7 @@ async function telWrite(token, cid, side, uid, d) {
   const id = (cid + "~" + side).replace(/[^A-Za-z0-9_~-]/g, "").slice(0, 120);
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/tel/" + id, fields: { cid: { stringValue: cid }, side: { stringValue: side }, by: { stringValue: uid }, ts: { integerValue: String(Date.now()) }, d: { stringValue: JSON.stringify(d).slice(0, 3000) } } } }]);
 }
-async function opCallTel(uid, payload, env) {
+async function opCallTel(uid, payload, env, request) {
   if (!codeRate(uid, "tel", 80)) return { ok: false };
   const p = payload || {}, cid = String(p.id || "");
   if (!TEL_ID.test(cid)) throw new Error("bad id");
@@ -4272,7 +4556,10 @@ async function opCallTel(uid, payload, env) {
     nat: TEL_NAT.has(p.nat) ? p.nat : "", nsx: num(p.nsx, 0, 20), v6: p.v6 ? 1 : 0,
     lct: TEL_CAND.has(p.lct) ? p.lct : "", rct: TEL_CAND.has(p.rct) ? p.rct : "", fam: p.fam === "4" || p.fam === "6" ? p.fam : "",
     qd: num(p.qd, 0, 4320),
-    v6l: p.v6l ? 1 : 0, v6r: p.v6r ? 1 : 0, pw: p.pw ? 1 : 0 };   // C218: pw = \u0627\u0644\u0645\u0633\u062a\u0642\u0628\u0650\u0644 \u0627\u0633\u062a\u0639\u0645\u0644 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u0627\u0644\u0645\u064f\u062c\u0647\u064e\u0651\u0632 \u0623\u062b\u0646\u0627\u0621 \u0627\u0644\u0631\u0646\u064a\u0646   // C217: \u0639\u0631\u0636 \u0647\u0630\u0627 \u0627\u0644\u0637\u0631\u0641 / \u0627\u0644\u0637\u0631\u0641 \u0627\u0644\u0622\u062e\u0631 \u0639\u0646\u0648\u0627\u0646 IPv6 \u0639\u0627\u0645\u0651\u0627\u064b \u0641\u064a \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629   // C216: \u062f\u0642\u0627\u0626\u0642 \u062a\u0623\u062e\u0651\u0631 \u0627\u0644\u0633\u062c\u0644\u0651 \u0641\u064a \u0637\u0627\u0628\u0648\u0631 \u0627\u0644\u0647\u0627\u062a\u0641 (\u0623\u064f\u0639\u064a\u062f \u0625\u0631\u0633\u0627\u0644\u0647 \u0644\u0627\u062d\u0642\u0627\u064b)
+    cs: str(p.cs, 40), r0: str(p.r0, 8),   // C292: مرشّحات كلّ طرف (hNsNpNrNvNmN) · المسار الأوّل
+    v6l: p.v6l ? 1 : 0, v6r: p.v6r ? 1 : 0, pw: p.pw ? 1 : 0,
+    // C228: \u0627\u0644\u062f\u0648\u0644\u0629 \u0648\u0646\u0642\u0637\u0629 Cloudflare (\u0645\u0646 \u0627\u0644\u062e\u0627\u062f\u0645 \u0644\u0627 \u0645\u0646 \u0627\u0644\u0647\u0627\u062a\u0641) \u00b7 \u0627\u0644\u0648\u0633\u064a\u0637 \u0627\u0644\u0645\u062e\u062a\u0627\u0631 \u0648\u0643\u064a\u0641 \u0627\u062e\u062a\u064a\u0631 (p = \u0644\u0644\u0637\u0631\u0641\u064a\u0646 \u00b7 h = \u0628\u062a\u0648\u062c\u064a\u0647 \u0627\u0644\u0645\u062a\u0651\u0635\u0644 \u00b7 o = \u0642\u064a\u0627\u0633 \u0647\u0627\u062a\u0641\u064a \u0648\u062d\u062f\u0647) \u0648\u0632\u0645\u0646\u0647 \u0639\u0646\u062f \u0627\u0644\u0637\u0631\u0641\u064a\u0646
+    ...cfGeo(request), rsel: RLY_ID.test(String(p.rsel || "")) ? String(p.rsel) : "", psel: /^[pho]$/.test(String(p.psel || "")) ? p.psel : "", rms: num(p.rms, 0, 15000), pms: num(p.pms, 0, 15000) };   // C218: pw = \u0627\u0644\u0645\u0633\u062a\u0642\u0628\u0650\u0644 \u0627\u0633\u062a\u0639\u0645\u0644 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u0627\u0644\u0645\u064f\u062c\u0647\u064e\u0651\u0632 \u0623\u062b\u0646\u0627\u0621 \u0627\u0644\u0631\u0646\u064a\u0646   // C217: \u0639\u0631\u0636 \u0647\u0630\u0627 \u0627\u0644\u0637\u0631\u0641 / \u0627\u0644\u0637\u0631\u0641 \u0627\u0644\u0622\u062e\u0631 \u0639\u0646\u0648\u0627\u0646 IPv6 \u0639\u0627\u0645\u0651\u0627\u064b \u0641\u064a \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629   // C216: \u062f\u0642\u0627\u0626\u0642 \u062a\u0623\u062e\u0651\u0631 \u0627\u0644\u0633\u062c\u0644\u0651 \u0641\u064a \u0637\u0627\u0628\u0648\u0631 \u0627\u0644\u0647\u0627\u062a\u0641 (\u0623\u064f\u0639\u064a\u062f \u0625\u0631\u0633\u0627\u0644\u0647 \u0644\u0627\u062d\u0642\u0627\u064b)
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   await telWrite(token, cid, uid.slice(0, 10), uid, d);
   stat("tel:" + (d.ok ? (d.route || "ok") : "fail"));
@@ -4334,7 +4621,20 @@ async function telAnalyze(token, since) {
   const plats = {}; one.forEach(c => c.sides.forEach(x => { const k = x.plat || "?"; (plats[k] = plats[k] || []).push(c); }));
   const byPlat = {}; for (const k in plats) byPlat[k] = sum(Array.from(new Set(plats[k])));
   const groups = calls.filter(c => !/^(audio|video)$/.test(c.sides[0].k));
-  return { all: sum(one), byPlat, groups: { n: groups.length, sfu: groups.filter(c => c.sides.some(x => x.mode === "sfu")).length, conn: groups.filter(c => c.sides.some(x => x.ok)).length },
+  // C228: \u0627\u0644\u062c\u0648\u062f\u0629 \u062d\u0633\u0628 \u0627\u0644\u0645\u0633\u0627\u0631 (\u062f\u0648\u0644\u062a\u0627 \u0627\u0644\u0637\u0631\u0641\u064a\u0646) \u0648\u062d\u0633\u0628 \u0627\u0644\u0648\u0633\u064a\u0637 \u0627\u0644\u0645\u0633\u062a\u0639\u0645\u064e\u0644 \u2014 \u0645\u0646 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062a \u0627\u0644\u0645\u062a\u0651\u0635\u0644\u0629
+  const routeOf = (c) => { const cc = c.sides.map(x => x.cc || "").filter(Boolean); if (!cc.length) return "?"; if (cc.length === 1) cc.push("?"); return cc.sort().join("-"); };
+  const relayOf = (c) => { const x = c.sides.find(y => y.ok && (y.rsel || y.relay)); return x ? (x.rsel || x.relay) : (c.sides.some(y => y.route === "direct") ? "direct" : "?"); };
+  const qOf = (list) => {
+    const conn = list.filter(c => c.sides.some(x => x.ok)), sv = (k) => conn.map(c => med(c.sides.map(x => x[k] && x[k].med)));
+    const rel = {}; conn.forEach(c => { const r = relayOf(c); rel[r] = (rel[r] || 0) + 1; });
+    const rt = sv("rtt");
+    return { n: list.length, conn: conn.length, rtt: med(rt), rtt90: p90(rt), loss: med(sv("loss")), jit: med(sv("jit")), slow: rt.filter(x => typeof x === "number" && x > 300).length,
+      pair: conn.filter(c => c.sides.some(x => x.psel === "p" || x.psel === "h")).length, relays: rel };
+  };
+  const byKey = (fn) => { const g = {}; one.forEach(c => { const k = fn(c); (g[k] = g[k] || []).push(c); }); const out = {}; Object.keys(g).sort((a, b) => g[b].length - g[a].length).slice(0, 20).forEach(k => { out[k] = qOf(g[k]); }); return out; };
+  const routes = byKey(routeOf);
+  const byRelay = {}; { const g = {}; one.filter(c => c.sides.some(x => x.ok)).forEach(c => { const k = relayOf(c); (g[k] = g[k] || []).push(c); }); Object.keys(g).forEach(k => { byRelay[k] = qOf(g[k]); }); }
+  return { all: sum(one), byPlat, routes, byRelay, groups: { n: groups.length, sfu: groups.filter(c => c.sides.some(x => x.mode === "sfu")).length, conn: groups.filter(c => c.sides.some(x => x.ok)).length },
     recent: calls.slice(0, 40) };
 }
 // C181: \u0645\u0644\u062e\u0651\u0635 \u0627\u0644\u062c\u0648\u062f\u0629 \u0627\u0644\u064a\u0648\u0645\u064a\u0651 \u0644\u0644\u0645\u062f\u064a\u0631 (\u0667 \u0635\u0628\u0627\u062d\u0627\u064b \u0628\u062a\u0648\u0642\u064a\u062a \u0627\u0644\u0633\u0648\u062f\u0627\u0646\u060c \u0639\u0646 \u0622\u062e\u0631 \u0662\u0664 \u0633\u0627\u0639\u0629) + \u062a\u0646\u0628\u064a\u0647\u064c \u0641\u0648\u0631\u064a\u0651 \u0625\u0646 \u0627\u0646\u0647\u0627\u0631\u062a \u0627\u0644\u062c\u0648\u062f\u0629 \u0641\u064a \u0622\u062e\u0631 \u0633\u0627\u0639\u062a\u064a\u0646.
@@ -5421,9 +5721,9 @@ async function opAccountDelete(uid, payload, env, claims) {
   const ph = fstr(acc, "phone"), eh = fstr(acc, "emailHash");
   if (ph && fstr(await fsGet(token, "phones/" + ph).catch(() => null), "uid") === uid) writes.push({ delete: P("phones/" + ph) });
   if (eh && fstr(await fsGet(token, "emails/" + eh).catch(() => null), "uid") === uid) writes.push({ delete: P("emails/" + eh) });
-  for (const k of ["mset", "quota", "turncred", "stories"]) writes.push({ delete: P(k + "/" + uid) });
+  for (const k of ["mset", "quota", "turncred", "stories", "kinrem"]) writes.push({ delete: P(k + "/" + uid) });
   for (const q of [{ uid: uid }, { by: uid }]) for (const d of await fsQueryEq(token, "famreq", q, 100).catch(() => [])) writes.push({ delete: d.name });
-  purge.push({ id: "story_" + uid, kind: "story" }, { id: "moments_" + uid, kind: "moments" });
+  purge.push({ id: "story_" + uid, kind: "story" }, { id: "moments_" + uid, kind: "moments" }, { id: "pfm_" + uid, kind: "pfm" });   // C263: + pfm
   // \u0644\u062d\u0638\u0627\u062a\u064a \u062a\u062e\u062a\u0641\u064a \u0641\u0648\u0631\u0627\u064b (\u062c\u0645\u0647\u0648\u0631\u064c \u0641\u0627\u0631\u063a) \u062b\u0645\u0651 \u062a\u064f\u062d\u0630\u0641 \u0643\u0627\u0645\u0644\u0629\u064b \u0645\u0639 \u0648\u0633\u0627\u0626\u0637\u0647\u0627 \u0648\u062a\u0639\u0644\u064a\u0642\u0627\u062a\u0647\u0627 \u0628\u0627\u0644\u0645\u062c\u062f\u0648\u0650\u0644
   try {
     const res = await gfetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
@@ -5503,6 +5803,7 @@ async function purgeWork(env, budget) {
       else if (kind === "chat") finished = await purgeChat(token, fstr(j, "cid"), spend);
       else if (kind === "moments") finished = await purgeMoments(token, uid, spend);   // C210
       else if (kind === "story") finished = await purgeStory(token, uid, spend);
+      else if (kind === "pfm") finished = segOk(String(uid)) ? await purgePfm(PFM_DEPS, token, uid, spend, purgeColl) : true;   // C263
       else finished = true;
     } catch (e) { slog("warn", "purge", { kind, err: e && e.message }); }
     if (finished && spend()) { await fsCommit(token, [{ delete: j.name }]).catch(() => {}); done++; }
@@ -5882,12 +6183,28 @@ function rateOk(uid) {
 }
 // \u0643\u0644\u0651 \u0645\u0639\u0631\u0651\u0641\u064d \u064a\u062f\u062e\u0644 \u0645\u0633\u0627\u0631 Firestore: \u0628\u0644\u0627 \u00ab/\u00bb \u0648\u0644\u0627 \u00ab..\u00bb \u0648\u0644\u0627 \u0637\u0648\u0644\u064d \u0645\u0641\u0631\u0637
 const ID_KEYS = ["groupId", "personId", "eventId", "relationId", "reviewId", "token", "uid", "from", "to", "cid", "for"];   // C198: + for (vouch.respond)
-function badIds(p) {
+// push.*: الـtoken رمز FCM/APNs (فيه «:») ويُجزَّأ بـtokenId قبل أيّ مسار — لا يُفحص كمعرّف
+const RAW_TOKEN_OPS = new Set(["push.register", "push.check", "push.unregister"]);
+function badIds(p, op) {
   if (!p || typeof p !== "object") return null;
-  for (const k of ID_KEYS) if (k in p && p[k] != null && !segOk(String(p[k]))) return k;
+  for (const k of ID_KEYS) {
+    if (k === "token" && RAW_TOKEN_OPS.has(op)) continue;
+    if (k in p && p[k] != null && !segOk(String(p[k]))) return k;
+  }
   if (Array.isArray(p.groupIds) && p.groupIds.some(x => !segOk(String(x)))) return "groupIds";
   return null;
 }
+
+/* C263: Personal Accountant — pfm/pfm-worker.mjs gets the Worker's own Firestore helpers. */
+const PFM_DEPS = { DOC_ROOT, toFsValue, fsToJs, fsGet, fsList, fsQuerySub, fsCommit, getToken: (env) => getAccessToken(JSON.parse(env.SA_JSON)),
+  // C263 P2: range query for the due-recurring cron, and budget / reminder pushes (data-only, shown by sw.js / the native shells)
+  runQuery: async (token, sq) => {
+    const res = await gfetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ structuredQuery: sq }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error("firestore query: " + JSON.stringify(data));
+    return (data || []).filter(r => r.document).map(r => r.document);
+  },
+  push: (token, uid, title, body) => pushTo(token, [uid], strData({ t: "pfm", title, body: String(body || "").slice(0, 300), ts: Date.now() })) };
 
 async function handleRequest(request, env, ctx, meta) {
     PUSH_ENV = env;   // C151
@@ -5897,6 +6214,19 @@ async function handleRequest(request, env, ctx, meta) {
   try { if (new URL(request.url).pathname === "/wa/webhook") return await waWebhook(request, env, ctx); } catch (e) { return new Response("webhook error", { status: 500 }); }
   try { if (request.method === "POST" && new URL(request.url).pathname === "/ack") return await deviceAck(request, env); } catch (e) { slog("error", "ack.fail", { err: String(e && e.message || e).slice(0, 300) }); return json({ ok: false, error: publicErr(e) }, 500); }
   try { if (request.method === "GET" && new URL(request.url).pathname === "/av") return await avatarImg(request, env); } catch (e) { return new Response("", { status: 500 }); }   // C152
+  // C267 (P4): the public pay page — no Authorization; the unguessable link token picks the invoice and its issuer.
+  if (request.method === "POST" && new URL(request.url).pathname === "/pfm/pay") {
+    try {
+      let b = {}; try { b = await request.json(); } catch (e) {}
+      meta.op = "pfm.pay"; stat("ops:pfm.pay");
+      const r = await handlePfmPublic(String(b.op || ""), b.payload, env, PFM_DEPS, request.headers.get("CF-Connecting-IP") || "?");
+      return json({ ok: true, ...r });
+    } catch (e) {
+      const pub = publicErr(e);
+      if (isTransientErr(e)) return json({ ok: false, error: "server_error: busy", retry: true }, 503);
+      return json({ ok: false, error: pub }, /^rate_limited/.test(pub) ? 429 : /^not_found/.test(pub) ? 404 : 400);
+    }
+  }
   let statOp = null;
   try {
     const auth = request.headers.get("Authorization") || "";
@@ -5915,7 +6245,7 @@ async function handleRequest(request, env, ctx, meta) {
     meta.op = statOp; stat("ops:" + statOp); stat("req");
     // \u0627\u0644\u0639\u0645\u0644\u064a\u0651\u0627\u062a \u0627\u0644\u062b\u0642\u064a\u0644\u0629 \u0642\u0631\u064a\u0628\u0629 \u0645\u0646 \u062d\u062f\u0651 \u0665\u0660 \u0637\u0644\u0628\u0627\u064b \u0641\u0631\u0639\u064a\u0651\u0627\u064b \u2014 \u0644\u0627 \u0646\u0636\u064a\u0641 \u0625\u0644\u064a\u0647\u0627 \u0627\u0644\u0625\u0631\u0633\u0627\u0644
     if (ctx && ctx.waitUntil && !HEAVY_OPS.has(statOp)) ctx.waitUntil(flushStats(env));
-    const bad = badIds(body.payload);
+    const bad = badIds(body.payload, op);
     if (bad) return json({ ok: false, error: "bad id: " + bad }, 400);
 
     // \u0627\u0633\u0645 \u00ab\u0633\u0648\u0627\u00bb \u0627\u0644\u0645\u062d\u0641\u0648\u0638 \u064a\u0633\u0628\u0642 \u0627\u0633\u0645 Google \u0641\u064a \u0643\u0644\u0651 \u0627\u0644\u0639\u0645\u0644\u064a\u0651\u0627\u062a (\u0630\u0627\u0643\u0631\u0629 \u0645\u0624\u0642\u0651\u062a\u0629 \u2014 \u0644\u0627 \u0642\u0631\u0627\u0621\u0629 \u0641\u064a \u0643\u0644\u0651 \u0637\u0644\u0628)
@@ -6042,6 +6372,7 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "gcall.start") { const r = await opGcallStart(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
     if (op === "gcall.room") { const r = await opGcallRoom(uid, body.payload, env); return json({ ok: true, ...r }); }   // C178
     if (op === "gcall.add") { const r = await opGcallAdd(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+    if (op === "kin.remind.set") { const r = await opKinRemindSet(uid, body.payload, env); return json({ ok: true, ...r }); }   // C271
     if (op === "sched.set") { const r = await opSchedSet(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
     if (op === "sched.join") { const r = await opSchedJoin(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "sched.list") { const r = await opSchedList(uid, body.payload, env); return json({ ok: true, ...r }); }
@@ -6095,7 +6426,9 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "moment.edit") { const r = await opMomentEdit(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
     if (op === "moment.seen") { const r = await opMomentSeen(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "moment.prefs") { const r = await opMomentPrefs(uid, body.payload, env); return json({ ok: true, ...r }); }
-    if (op === "call.tel") { const r = await opCallTel(uid, body.payload, env); return json({ ok: true, ...r }); }   // C179
+    if (op === "rtc.probe") { const r = await opRtcProbe(uid, body.payload, env, request); return json({ ok: true, ...r }); }   // C228
+    if (op === "rtc.peer") { const r = await opRtcPeer(uid, body.payload, env, request); return json({ ok: true, ...r }); }   // C228
+    if (op === "call.tel") { const r = await opCallTel(uid, body.payload, env, request); return json({ ok: true, ...r }); }   // C179
     if (op === "admin.qcfg") { const r = await opAdminQcfg(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C181
     if (op === "admin.tel") { const r = await opAdminTel(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C179
     if (op === "qa.rate") { const r = await opQaRate(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
@@ -6117,6 +6450,7 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "member.remove") { const r = await opMemberRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "member.transferOwner") { const r = await opMemberTransferOwner(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }   // C206
     if (op === "group.settings") { const r = await opGroupSettings(uid, body.payload, env); return json({ ok: true, ...r }); }
+    if (statOp.startsWith("pfm.") || statOp.startsWith("inv.")) { const r = await handlePfmOp(op, uid, body.payload, env, PFM_DEPS); return json({ ok: true, ...r }); }   // C263
     return json({ ok: false, error: "unknown op: " + op }, 400);
   } catch (e) {
     if (statOp) { stat("err:" + statOp); if (ctx && ctx.waitUntil) ctx.waitUntil(flushStats(env)); }
@@ -6140,6 +6474,7 @@ export default {
       let r = { reminders: 0 };
       try { r = await schedReminders(env); } catch (e) { slog("warn", "reminders", { err: e && e.message }); }
       try { await taskReminders(env); } catch (e) { slog("warn", "taskrem", { err: e && e.message }); }   // C173
+      try { await kinReminders(env); } catch (e) { slog("warn", "kinrem", { err: e && e.message }); }   // C271
       const job = (name, f) => f().catch(e => slog("warn", "job", { job: name, err: e && e.message }));
       if (L.free) {   // \u0627\u0644\u0645\u062c\u0651\u0627\u0646\u064a\u0651\u0629: \u0665\u0660 \u0637\u0644\u0628\u0627\u064b \u0641\u0631\u0639\u064a\u0651\u0627\u064b \u21d2 \u0645\u0647\u0645\u0651\u0629\u064c \u0648\u0627\u062d\u062f\u0629 \u0641\u064a \u0643\u0644\u0651 \u062a\u0634\u063a\u064a\u0644 (\u0643\u0645\u0627 \u0641\u064a C178)
         if (r.reminders) return;
@@ -6147,13 +6482,14 @@ export default {
         if (slot === 3) return job("health", () => healthRun(env));
         if (slot === 0) { await job("cleanup", () => cleanupDisappearing(env)); await job("tel gc", () => telGc(env, 100)); await job("rl gc", () => rlGc(env, 100)); }
         else if (slot === 1) { await job("calls cleanup", () => cleanupCalls(env)); await job("media gc", () => mediaGc(env, L.media)); await job("story gc", () => storyGc(env, L.story)); await job("storyq gc", () => storyqGc(env, L.q)); await job("momentq gc", () => momentqGc(env, L.q)); }
-        else await job("purge", () => purgeWork(env, L.purge));
+        else { await job("pfm", () => pfmCron(env, PFM_DEPS, 10)); await job("purge", () => purgeWork(env, L.purge)); }   // C263 P2
         return;
       }
       // C180: \u0627\u0644\u062e\u0637\u0651\u0629 \u0627\u0644\u0645\u062f\u0641\u0648\u0639\u0629 \u2014 \u0643\u0644\u0651 \u0627\u0644\u0645\u0647\u0627\u0645\u0651 \u0641\u064a \u0643\u0644\u0651 \u062a\u0634\u063a\u064a\u0644 (\u0627\u0644\u0645\u0631\u0627\u0642\u0628\u0629 \u0643\u0644\u0651 \u0665 \u062f\u0642\u0627\u0626\u0642)
       await Promise.all([job("health", () => healthRun(env)), job("cleanup", () => cleanupDisappearing(env)), job("calls cleanup", () => cleanupCalls(env)), job("quality", () => qualityWatch(env))]);   // C181: \u0645\u0644\u062e\u0651\u0635 \u0627\u0644\u062c\u0648\u062f\u0629
       await job("media gc", () => mediaGc(env, L.media)); await job("story gc", () => storyGc(env, L.story));
       await job("storyq gc", () => storyqGc(env, L.q)); await job("momentq gc", () => momentqGc(env, L.q)); await job("tel gc", () => telGc(env, 200)); await job("rl gc", () => rlGc(env, 300));
+      await job("pfm", () => pfmCron(env, PFM_DEPS, 40));   // C263 P2: recurring entries due + reminders
       await job("purge", () => purgeWork(env, L.purge));   // \u062d\u0630\u0641 \u0627\u0644\u062d\u0633\u0627\u0628\u0627\u062a: \u0645\u0627 \u062a\u0628\u0642\u0651\u0649 \u0645\u0646 \u0639\u0627\u0626\u0644\u0627\u062a\u064d \u0648\u0645\u062d\u0627\u062f\u062b\u0627\u062a
     })());
   },
