@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v131-smscfg";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
+const VER = "v132-smsgate";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -3836,9 +3836,11 @@ function verifyConfig(env, mgr) {
   // C306: للمدير فقط — أسماء الأسرار (لا القيم) الناقصة والموجودة، ليعرف لماذا «قيد التجهيز»
   if (mgr) {
     const t = twilioCfg(env);
-    r.smsMissing = [!t.sid && "TWILIO_SID", !t.token && "TWILIO_TOKEN", !t.vsid && "TWILIO_VERIFY_SID"].filter(Boolean);
+    const g = gateCfg(env);
+    r.smsMissing = smsReady(env) ? [] : [!g.user && "SMSGATE_USER", !g.pass && "SMSGATE_PASS"].filter(Boolean);   // C312
+    r.smsVia = smsProv(env);
     r.waMissing = ["WA_NUMBER", "WA_VERIFY_TOKEN", "WA_APP_SECRET"].filter(k => !env[k]);
-    try { r.envSeen = Object.keys(env).filter(k => /twilio|^wa_/i.test(k)).sort(); } catch (e) { r.envSeen = []; }
+    try { r.envSeen = Object.keys(env).filter(k => /twilio|smsgate|^wa_/i.test(k)).sort(); } catch (e) { r.envSeen = []; }
   }
   return r;
 }
@@ -3897,7 +3899,33 @@ function twilioCfg(env) {
   return { sid: v("TWILIO_SID", "TWILIO_ACCOUNT_SID"), token: v("TWILIO_TOKEN", "TWILIO_AUTH_TOKEN"),
     vsid: v("TWILIO_VERIFY_SID", "TWILIO_VERIFY_SERVICE_SID", "TWILIO_SERVICE_SID", "TWILIO_VERIFY_SERVICE") };
 }
-function smsReady(env) { const t = twilioCfg(env); return !!(t.sid && t.token && t.vsid); }
+function smsReady(env) { return !!smsProv(env); }
+/* C312: \u0628\u0648\u0651\u0627\u0628\u0629 SMS \u0628\u0647\u0627\u062a\u0641 \u0623\u0646\u062f\u0631\u0648\u064a\u062f \u2014 \u062a\u0637\u0628\u064a\u0642 \xabSMS Gateway for Android\xbb (\u0645\u0641\u062a\u0648\u062d \u0627\u0644\u0645\u0635\u062f\u0631\u060c sms-gate.app) \u0641\u064a \u0648\u0636\u0639 \u0627\u0644\u0633\u062d\u0627\u0628\u0629.
+   \u0627\u0644\u062e\u0627\u062f\u0645 \u064a\u0648\u0644\u0651\u062f \u0627\u0644\u0631\u0645\u0632 \u0648\u064a\u062d\u0641\u0638 \u0628\u0635\u0645\u062a\u0647 \u0641\u0642\u0637 (SHA-256 \u0645\u0639 uid)\u060c \u0648\u064a\u0637\u0644\u0628 \u0645\u0646 \u0627\u0644\u0647\u0627\u062a\u0641 \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0645\u0646 \u0634\u0631\u064a\u062d\u062a\u0647.
+   \u0627\u0644\u0623\u0633\u0631\u0627\u0631: SMSGATE_USER \xb7 SMSGATE_PASS (\u0645\u0646 \u0627\u0644\u062a\u0637\u0628\u064a\u0642 \u2190 Cloud Server) \xb7 \u0627\u062e\u062a\u064a\u0627\u0631\u064a\u0651\u0627\u064b SMSGATE_URL (\u062e\u0627\u062f\u0645\u064c \u062e\u0627\u0635\u0651). Twilio \u064a\u064f\u0642\u062f\u064e\u0651\u0645 \u0625\u0646 \u0648\u064f\u062c\u062f. */
+function gateCfg(env) {
+  const v = (k) => (typeof env[k] === "string" ? env[k].trim() : "");
+  return { user: v("SMSGATE_USER"), pass: v("SMSGATE_PASS"), url: (v("SMSGATE_URL") || "https://api.sms-gate.app/3rdparty/v1").replace(/\/+$/, "") };
+}
+function smsProv(env) {
+  const t = twilioCfg(env); if (t.sid && t.token && t.vsid) return "twilio";
+  const g = gateCfg(env); if (g.user && g.pass) return "gate";
+  return null;
+}
+async function gateSend(env, phone, text) {
+  const g = gateCfg(env);
+  let r;
+  try {
+    r = await fetch(g.url + "/message", { method: "POST", headers: { Authorization: "Basic " + btoa(g.user + ":" + g.pass), "Content-Type": "application/json" },
+      body: JSON.stringify({ textMessage: { text }, phoneNumbers: [phone] }) });
+  } catch (e) { slog("warn", "sms.gate", { err: e && e.message }); throw new Error("sms_failed:net"); }
+  if (r.status === 401 || r.status === 403) throw new Error("sms_auth");
+  if (r.status === 429) throw new Error("rate_limited");
+  if (!r.ok) { let t = ""; try { t = (await r.text()).slice(0, 120); } catch (e) {} slog("warn", "sms.gate", { st: r.status, body: t }); throw new Error("sms_failed:" + r.status); }
+  let b = {}; try { b = await r.json(); } catch (e) {}
+  return { id: b.id || null, state: b.state || null };
+}
+const smsHash = (uid, code) => sha256Hex("sawa-sms|" + uid + "|" + code);
 async function twilioVerify(env, path, form) {
   const t = twilioCfg(env);
   const r = await fetch("https://verify.twilio.com/v2/Services/" + encodeURIComponent(t.vsid) + "/" + path, {
@@ -3920,9 +3948,17 @@ async function opSmsStart(uid, payload, env, claims) {
   const p = await profileOf(token, uid);
   const phone = cleanPhone(p.phone);
   if (!phone) throw new Error("no_phone");
+  const exp = Date.now() + 10 * 60 * 1000, prov = smsProv(env);
+  const f = { smsPhone: { stringValue: phone }, smsExp: { integerValue: String(exp) } }, mask = ["smsPhone", "smsExp"];
+  if (prov === "gate") {   // C312
+    const code = otpCode();
+    f.smsHash = { stringValue: await smsHash(uid, code) }; f.smsTries = { integerValue: "0" }; mask.push("smsHash", "smsTries");
+    await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields: f }, updateMask: { fieldPaths: mask } }]);   // \u064a\u064f\u062d\u0641\u0638 \u0642\u0628\u0644 \u0627\u0644\u0625\u0631\u0633\u0627\u0644 \u0643\u064a \u0644\u0627 \u062a\u0635\u0644 \u0631\u0633\u0627\u0644\u0629\u064c \u0628\u0631\u0645\u0632\u064d \u063a\u064a\u0631 \u0645\u062d\u0641\u0648\u0638
+    await gateSend(env, phone, "\u0631\u0645\u0632 \u0633\u0648\u0627: " + code + " \u2014 \u0644\u0627 \u062a\u0634\u0627\u0631\u0643\u0647 \u0645\u0639 \u0623\u062d\u062f. \u0635\u0627\u0644\u062d \u0661\u0660 \u062f\u0642\u0627\u0626\u0642.");
+    return { enabled: true, phone, exp, via: "gate" };
+  }
   await twilioVerify(env, "Verifications", { To: phone, Channel: "sms" });
-  const exp = Date.now() + 10 * 60 * 1000;
-  await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields: { smsPhone: { stringValue: phone }, smsExp: { integerValue: String(exp) } } }, updateMask: { fieldPaths: ["smsPhone", "smsExp"] } }]);
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields: f }, updateMask: { fieldPaths: mask } }]);
   return { enabled: true, phone, exp };
 }
 async function opSmsCheck(uid, payload, env, claims) {
@@ -3937,8 +3973,18 @@ async function opSmsCheck(uid, payload, env, claims) {
   const phone = fstr(acc, "smsPhone"), exp = Number(acc && acc.fields && acc.fields.smsExp && acc.fields.smsExp.integerValue || 0);
   if (!phone || exp < Date.now()) throw new Error("sms_expired");
   if (cleanPhone(fstr(acc, "phone")) !== phone) throw new Error("sms_expired");   // \u062a\u063a\u064a\u0651\u0631 \u0627\u0644\u0631\u0642\u0645 \u0628\u0639\u062f \u0627\u0644\u0625\u0631\u0633\u0627\u0644
-  const r = await twilioVerify(env, "VerificationCheck", { To: phone, Code: code });
-  if (r.status !== "approved") return { enabled: true, verified: false };
+  if (smsProv(env) === "gate") {   // C312: \u0645\u0642\u0627\u0631\u0646\u0629 \u0627\u0644\u0628\u0635\u0645\u0629 \xb7 \u0665 \u0645\u062d\u0627\u0648\u0644\u0627\u062a \u062b\u0645\u0651 \u064a\u0644\u0632\u0645 \u0631\u0645\u0632\u064c \u062c\u062f\u064a\u062f
+    const want = fstr(acc, "smsHash"), tries = Number(acc && acc.fields && acc.fields.smsTries && acc.fields.smsTries.integerValue || 0);
+    if (!want || tries >= 5) throw new Error("sms_expired");
+    const got = await smsHash(uid, code);
+    if (!(got.length === want.length && timingEq(got, want))) {
+      await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields: { smsTries: { integerValue: String(tries + 1) } } }, updateMask: { fieldPaths: ["smsTries"] } }]);
+      return { enabled: true, verified: false, left: 4 - tries };
+    }
+  } else {
+    const r = await twilioVerify(env, "VerificationCheck", { To: phone, Code: code });
+    if (r.status !== "approved") return { enabled: true, verified: false };
+  }
   await markPhoneVerified(token, uid, phone, "sms");
   return { enabled: true, verified: true, phone };
 }
@@ -3946,8 +3992,8 @@ async function opSmsCheck(uid, payload, env, claims) {
 async function markPhoneVerified(token, uid, phone, by) {
   const prevOwner = fstr(await fsGet(token, "phones/" + phone).catch(() => null), "uid"), now = String(Date.now());
   const writes = [
-    { update: { name: DOC_ROOT + "/accounts/" + uid, fields: { phone: { stringValue: phone }, phoneVerified: { booleanValue: true }, verifiedBy: { stringValue: by }, phoneVerifiedAt: { integerValue: now }, smsPhone: { nullValue: null }, smsExp: { nullValue: null } } },
-      updateMask: { fieldPaths: ["phone", "phoneVerified", "verifiedBy", "phoneVerifiedAt", "smsPhone", "smsExp"] } },
+    { update: { name: DOC_ROOT + "/accounts/" + uid, fields: { phone: { stringValue: phone }, phoneVerified: { booleanValue: true }, verifiedBy: { stringValue: by }, phoneVerifiedAt: { integerValue: now }, smsPhone: { nullValue: null }, smsExp: { nullValue: null }, smsHash: { nullValue: null }, smsTries: { nullValue: null } } },
+      updateMask: { fieldPaths: ["phone", "phoneVerified", "verifiedBy", "phoneVerifiedAt", "smsPhone", "smsExp", "smsHash", "smsTries"] } },
     { update: { name: DOC_ROOT + "/phones/" + phone, fields: { uid: { stringValue: uid }, by: { stringValue: by }, ts: { integerValue: now } } } }];
   // \u0631\u0642\u0645\u064c \u0648\u0627\u062d\u062f \u0644\u062d\u0633\u0627\u0628\u064d \u0648\u0627\u062d\u062f (\u0643\u0645\u0627 \u0641\u064a waVerify)
   if (prevOwner && prevOwner !== uid) writes.push({ update: { name: DOC_ROOT + "/accounts/" + prevOwner, fields: { phoneVerified: { booleanValue: false } } }, updateMask: { fieldPaths: ["phoneVerified"] } });
