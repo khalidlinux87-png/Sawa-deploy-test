@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v130-fbsms";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
+const VER = "v131-smscfg";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -3957,6 +3957,20 @@ async function markPhoneVerified(token, uid, phone, by) {
 /* C308: SMS \u0639\u0628\u0631 Firebase Phone Auth (\u062e\u0637\u0651\u0629 Blaze) \u2014 \u0628\u0644\u0627 Twilio \u0648\u0644\u0627 \u0623\u0633\u0631\u0627\u0631.
    \u0627\u0644\u062a\u0637\u0628\u064a\u0642 \u064a\u0631\u0633\u0644 \u0627\u0644\u0631\u0645\u0632 \u0648\u064a\u0631\u0628\u0637 \u0627\u0644\u0631\u0642\u0645 \u0628\u062d\u0633\u0627\u0628 Firebase \u0644\u0644\u0645\u0633\u062a\u062e\u062f\u0645 (linkWithCredential / updatePhoneNumber)\u060c
    \u062b\u0645\u0651 \u064a\u0637\u0644\u0628 phone.fbCheck \u0628\u0631\u0645\u0632\u064d \u0645\u062d\u062f\u064e\u0651\u062b. \u0646\u062b\u0642 \u0641\u0642\u0637 \u0628\u0640 phone_number \u062f\u0627\u062e\u0644 \u0631\u0645\u0632 Firebase \u0627\u0644\u0645\u0648\u0642\u064e\u0651\u0639 (claims) \u2014 \u0644\u0627 \u0628\u0634\u064a\u0621\u064d \u064a\u0631\u0633\u0644\u0647 \u0627\u0644\u0639\u0645\u064a\u0644. */
+/* C311: \u0644\u0644\u0645\u062f\u064a\u0631 \u2014 \u0642\u0631\u0627\u0621\u0629 \u0625\u0639\u062f\u0627\u062f \u0627\u0644\u0645\u0635\u0627\u062f\u0642\u0629 \u0627\u0644\u0641\u0639\u0644\u064a\u0651 \u0645\u0646 Firebase (\u0642\u0631\u0627\u0621\u0629\u064c \u0641\u0642\u0637): \u0647\u0644 Phone \u0645\u0641\u0639\u064e\u0651\u0644\u060c \u0648\u0633\u064a\u0627\u0633\u0629 \u0645\u0646\u0627\u0637\u0642 SMS\u060c \u0648\u0639\u062f\u062f \u0623\u0631\u0642\u0627\u0645 \u0627\u0644\u062a\u062c\u0631\u0628\u0629.
+   \u064a\u0641\u0633\u0651\u0631 \xaboperation-not-allowed\xbb \u0628\u0645\u0627 \u0647\u0648 \u0645\u062d\u0641\u0648\u0638\u064c \u0641\u0639\u0644\u0627\u064b \u0628\u062f\u0644 \u0627\u0644\u062a\u062e\u0645\u064a\u0646. */
+async function opSmsConfig(uid, payload, env, claims) {
+  if (!(await otpManager(env, claims))) throw new Error("manager_only");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const r = await gfetch("https://identitytoolkit.googleapis.com/admin/v2/projects/" + PROJECT_ID + "/config", { headers: { Authorization: "Bearer " + token } });
+  let b = {}; try { b = await r.json(); } catch (e) {}
+  if (!r.ok) return { ok2: false, status: r.status, err: (b.error && (b.error.status || b.error.message)) || null };
+  const ph = (b.signIn && b.signIn.phoneNumber) || {}, rc = b.smsRegionConfig || null;
+  let region = "default";
+  if (rc && rc.allowlistOnly) region = "allow:" + ((rc.allowlistOnly.allowedRegions || []).join(",") || "-");
+  else if (rc && rc.allowByDefault) region = "deny:" + ((rc.allowByDefault.disallowedRegions || []).join(",") || "-");
+  return { ok2: true, phone: !!ph.enabled, tests: Object.keys(ph.testPhoneNumbers || {}).length, region, project: PROJECT_ID };
+}
 async function opFbPhoneCheck(uid, payload, env, claims) {
   if (!(await otpManager(env, claims))) throw new Error("manager_only");
   const phone = cleanPhone(claims && claims.phone_number);
@@ -6287,6 +6301,7 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "profile.set") { const r = await opProfileSet(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "phone.start") { const r = await opPhoneStart(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "phone.smsStart") { const r = await opSmsStart(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C304
+    if (op === "phone.smsConfig") { const r = await opSmsConfig(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C311
     if (op === "phone.fbCheck") { const r = await opFbPhoneCheck(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C308
     if (op === "phone.smsCheck") { const r = await opSmsCheck(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "phone.status") { const r = await opPhoneStatus(uid, body.payload, env); return json({ ok: true, ...r }); }
