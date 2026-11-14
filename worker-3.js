@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v129-twl";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
+const VER = "v130-fbsms";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -3939,16 +3939,32 @@ async function opSmsCheck(uid, payload, env, claims) {
   if (cleanPhone(fstr(acc, "phone")) !== phone) throw new Error("sms_expired");   // \u062a\u063a\u064a\u0651\u0631 \u0627\u0644\u0631\u0642\u0645 \u0628\u0639\u062f \u0627\u0644\u0625\u0631\u0633\u0627\u0644
   const r = await twilioVerify(env, "VerificationCheck", { To: phone, Code: code });
   if (r.status !== "approved") return { enabled: true, verified: false };
+  await markPhoneVerified(token, uid, phone, "sms");
+  return { enabled: true, verified: true, phone };
+}
+// C304/C308: \u062a\u0648\u062b\u064a\u0642 \u0627\u0644\u0631\u0642\u0645 \u0628\u0639\u062f \u0646\u062c\u0627\u062d \u0627\u0644\u0631\u0645\u0632
+async function markPhoneVerified(token, uid, phone, by) {
   const prevOwner = fstr(await fsGet(token, "phones/" + phone).catch(() => null), "uid"), now = String(Date.now());
   const writes = [
-    { update: { name: DOC_ROOT + "/accounts/" + uid, fields: { phone: { stringValue: phone }, phoneVerified: { booleanValue: true }, verifiedBy: { stringValue: "sms" }, phoneVerifiedAt: { integerValue: now }, smsPhone: { nullValue: null }, smsExp: { nullValue: null } } },
+    { update: { name: DOC_ROOT + "/accounts/" + uid, fields: { phone: { stringValue: phone }, phoneVerified: { booleanValue: true }, verifiedBy: { stringValue: by }, phoneVerifiedAt: { integerValue: now }, smsPhone: { nullValue: null }, smsExp: { nullValue: null } } },
       updateMask: { fieldPaths: ["phone", "phoneVerified", "verifiedBy", "phoneVerifiedAt", "smsPhone", "smsExp"] } },
-    { update: { name: DOC_ROOT + "/phones/" + phone, fields: { uid: { stringValue: uid }, by: { stringValue: "sms" }, ts: { integerValue: now } } } }];
+    { update: { name: DOC_ROOT + "/phones/" + phone, fields: { uid: { stringValue: uid }, by: { stringValue: by }, ts: { integerValue: now } } } }];
   // \u0631\u0642\u0645\u064c \u0648\u0627\u062d\u062f \u0644\u062d\u0633\u0627\u0628\u064d \u0648\u0627\u062d\u062f (\u0643\u0645\u0627 \u0641\u064a waVerify)
   if (prevOwner && prevOwner !== uid) writes.push({ update: { name: DOC_ROOT + "/accounts/" + prevOwner, fields: { phoneVerified: { booleanValue: false } } }, updateMask: { fieldPaths: ["phoneVerified"] } });
   await fsCommit(token, writes);
   PROFILE_CACHE.delete(uid); if (prevOwner) PROFILE_CACHE.delete(prevOwner);
-  return { enabled: true, verified: true, phone };
+}
+/* C308: SMS \u0639\u0628\u0631 Firebase Phone Auth (\u062e\u0637\u0651\u0629 Blaze) \u2014 \u0628\u0644\u0627 Twilio \u0648\u0644\u0627 \u0623\u0633\u0631\u0627\u0631.
+   \u0627\u0644\u062a\u0637\u0628\u064a\u0642 \u064a\u0631\u0633\u0644 \u0627\u0644\u0631\u0645\u0632 \u0648\u064a\u0631\u0628\u0637 \u0627\u0644\u0631\u0642\u0645 \u0628\u062d\u0633\u0627\u0628 Firebase \u0644\u0644\u0645\u0633\u062a\u062e\u062f\u0645 (linkWithCredential / updatePhoneNumber)\u060c
+   \u062b\u0645\u0651 \u064a\u0637\u0644\u0628 phone.fbCheck \u0628\u0631\u0645\u0632\u064d \u0645\u062d\u062f\u064e\u0651\u062b. \u0646\u062b\u0642 \u0641\u0642\u0637 \u0628\u0640 phone_number \u062f\u0627\u062e\u0644 \u0631\u0645\u0632 Firebase \u0627\u0644\u0645\u0648\u0642\u064e\u0651\u0639 (claims) \u2014 \u0644\u0627 \u0628\u0634\u064a\u0621\u064d \u064a\u0631\u0633\u0644\u0647 \u0627\u0644\u0639\u0645\u064a\u0644. */
+async function opFbPhoneCheck(uid, payload, env, claims) {
+  if (!(await otpManager(env, claims))) throw new Error("manager_only");
+  const phone = cleanPhone(claims && claims.phone_number);
+  if (!phone) throw new Error("no_fb_phone");
+  if (!codeRate(uid, "fbchk", 6)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  await markPhoneVerified(token, uid, phone, "sms");
+  return { verified: true, phone };
 }
 /* ---------- 44) \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u0631\u0642\u0645 \u0639\u0628\u0631 \u0627\u0644\u0645\u0639\u0627\u0631\u0641 (C44) ----------
    \u0628\u0644\u0627 Meta \u0648\u0644\u0627 SMS: \u0635\u0627\u062d\u0628 \u0627\u0644\u0631\u0642\u0645 \u064a\u0637\u0644\u0628 \u0645\u0646 \u0645\u0639\u0627\u0631\u0641\u0647 (\u062c\u0647\u0627\u062a \u0627\u062a\u0651\u0635\u0627\u0644 \u0645\u062a\u0628\u0627\u062f\u0644\u0629) \u062a\u0623\u0643\u064a\u062f \u0623\u0646\u0651 \u0647\u0630\u0627 \u0631\u0642\u0645\u0647. \u0643\u0644\u0651 \u0645\u0624\u0643\u0650\u0651\u062f\u064d \u064a\u062c\u0628 \u0623\u0646 \u064a\u0643\u0648\u0646
@@ -6271,6 +6287,7 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "profile.set") { const r = await opProfileSet(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "phone.start") { const r = await opPhoneStart(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "phone.smsStart") { const r = await opSmsStart(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C304
+    if (op === "phone.fbCheck") { const r = await opFbPhoneCheck(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C308
     if (op === "phone.smsCheck") { const r = await opSmsCheck(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "phone.status") { const r = await opPhoneStatus(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "find.phone") { const r = await opFindBy(uid, body.payload, env, "phone", claims); return json({ ok: true, ...r }); }
