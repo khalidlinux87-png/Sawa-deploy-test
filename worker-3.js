@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v132-smsgate";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
+const VER = "v133-smsfix";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -3921,7 +3921,13 @@ async function gateSend(env, phone, text) {
   } catch (e) { slog("warn", "sms.gate", { err: e && e.message }); throw new Error("sms_failed:net"); }
   if (r.status === 401 || r.status === 403) throw new Error("sms_auth");
   if (r.status === 429) throw new Error("rate_limited");
-  if (!r.ok) { let t = ""; try { t = (await r.text()).slice(0, 120); } catch (e) {} slog("warn", "sms.gate", { st: r.status, body: t }); throw new Error("sms_failed:" + r.status); }
+  if (!r.ok) {
+    let t = ""; try { t = await r.text(); } catch (e) {}
+    let why = ""; try { const j = JSON.parse(t); why = j.message || j.error || ""; } catch (e) { why = t; }
+    why = String(why).replace(/[^\x20-\x7e]/g, "").slice(0, 100);   // C313: \u0633\u0628\u0628 \u0627\u0644\u0628\u0648\u0651\u0627\u0628\u0629 \u064a\u0635\u0644 \u0625\u0644\u0649 \u0627\u0644\u0645\u062f\u064a\u0631
+    slog("warn", "sms.gate", { st: r.status, body: why });
+    throw new Error("sms_failed:" + r.status + (why ? ":" + why : ""));
+  }
   let b = {}; try { b = await r.json(); } catch (e) {}
   return { id: b.id || null, state: b.state || null };
 }
@@ -3948,6 +3954,7 @@ async function opSmsStart(uid, payload, env, claims) {
   const p = await profileOf(token, uid);
   const phone = cleanPhone(p.phone);
   if (!phone) throw new Error("no_phone");
+  if (/^\+249/.test(phone) && !/^\+249\d{9}$/.test(phone)) throw new Error("bad_phone_sd");   // C313: \u0631\u0642\u0645 \u0633\u0648\u062f\u0627\u0646\u064a\u0651 = 249 \u062b\u0645\u0651 \u0669 \u0623\u0631\u0642\u0627\u0645
   const exp = Date.now() + 10 * 60 * 1000, prov = smsProv(env);
   const f = { smsPhone: { stringValue: phone }, smsExp: { integerValue: String(exp) } }, mask = ["smsPhone", "smsExp"];
   if (prov === "gate") {   // C312
