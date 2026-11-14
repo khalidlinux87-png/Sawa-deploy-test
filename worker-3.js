@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v128-otp";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
+const VER = "v129-twl";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -3832,7 +3832,15 @@ async function opProfileGet(uid, payload, env, claims) {
 async function otpManager(env, claims) { return adminCan(env, claims, "admin").catch(() => null); }
 function verifyConfig(env, mgr) {
   const wa = !!(env.WA_NUMBER && env.WA_VERIFY_TOKEN && env.WA_APP_SECRET) && !!mgr;
-  return { whatsapp: wa, waNumber: wa ? String(env.WA_NUMBER).replace(/\D/g, "") : null, sms: smsReady(env) && !!mgr, mgr: !!mgr };
+  const r = { whatsapp: wa, waNumber: wa ? String(env.WA_NUMBER).replace(/\D/g, "") : null, sms: smsReady(env) && !!mgr, mgr: !!mgr };
+  // C306: للمدير فقط — أسماء الأسرار (لا القيم) الناقصة والموجودة، ليعرف لماذا «قيد التجهيز»
+  if (mgr) {
+    const t = twilioCfg(env);
+    r.smsMissing = [!t.sid && "TWILIO_SID", !t.token && "TWILIO_TOKEN", !t.vsid && "TWILIO_VERIFY_SID"].filter(Boolean);
+    r.waMissing = ["WA_NUMBER", "WA_VERIFY_TOKEN", "WA_APP_SECRET"].filter(k => !env[k]);
+    try { r.envSeen = Object.keys(env).filter(k => /twilio|^wa_/i.test(k)).sort(); } catch (e) { r.envSeen = []; }
+  }
+  return r;
 }
 async function sha256Hex(t) {
   const h = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t)));
@@ -3883,16 +3891,24 @@ async function opPhoneStatus(uid, payload, env) {
    Twilio \u064a\u0648\u0644\u0651\u062f \u0627\u0644\u0631\u0645\u0632 \u0648\u064a\u0631\u0633\u0644\u0647 \u0648\u064a\u062a\u062d\u0642\u0651\u0642 \u0645\u0646\u0647 \u2014 \u0644\u0627 \u0646\u062e\u0632\u0651\u0646 \u0627\u0644\u0631\u0645\u0632. \u0646\u062e\u0632\u0651\u0646 \u0641\u0642\u0637 smsPhone/smsExp \u0641\u064a accounts/{uid}.
    \u0627\u0644\u0623\u0633\u0631\u0627\u0631 (Secret): TWILIO_SID \xb7 TWILIO_TOKEN \xb7 TWILIO_VERIFY_SID. \u0628\u0644\u0627 \u0623\u062d\u062f\u0647\u0627 \u21d2 \xab\u0642\u064a\u062f \u0627\u0644\u062a\u062c\u0647\u064a\u0632\xbb.
    phone.smsStart \u21d2 \u0631\u0633\u0627\u0644\u0629 \u0625\u0644\u0649 \u0631\u0642\u0645 \u0627\u0644\u062d\u0633\u0627\u0628 \xb7 phone.smsCheck { code } \u21d2 phoneVerified (verifiedBy = "sms"). */
-function smsReady(env) { return !!(env.TWILIO_SID && env.TWILIO_TOKEN && env.TWILIO_VERIFY_SID); }
+// C306: يقبل أيضاً أسماء Twilio الشائعة، ويزيل المسافات/الأسطر الملصوقة مع القيم
+function twilioCfg(env) {
+  const v = (...ks) => { for (const k of ks) { const x = env[k]; if (typeof x === "string" && x.trim()) return x.trim(); } return ""; };
+  return { sid: v("TWILIO_SID", "TWILIO_ACCOUNT_SID"), token: v("TWILIO_TOKEN", "TWILIO_AUTH_TOKEN"),
+    vsid: v("TWILIO_VERIFY_SID", "TWILIO_VERIFY_SERVICE_SID", "TWILIO_SERVICE_SID", "TWILIO_VERIFY_SERVICE") };
+}
+function smsReady(env) { const t = twilioCfg(env); return !!(t.sid && t.token && t.vsid); }
 async function twilioVerify(env, path, form) {
-  const r = await fetch("https://verify.twilio.com/v2/Services/" + encodeURIComponent(env.TWILIO_VERIFY_SID) + "/" + path, {
-    method: "POST", headers: { Authorization: "Basic " + btoa(env.TWILIO_SID + ":" + env.TWILIO_TOKEN), "Content-Type": "application/x-www-form-urlencoded" },
+  const t = twilioCfg(env);
+  const r = await fetch("https://verify.twilio.com/v2/Services/" + encodeURIComponent(t.vsid) + "/" + path, {
+    method: "POST", headers: { Authorization: "Basic " + btoa(t.sid + ":" + t.token), "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(form).toString() });
   let b = {}; try { b = await r.json(); } catch (e) {}
   if (r.status === 429 || b.code === 60203 || b.code === 20429) throw new Error("rate_limited");
   if (r.status === 404 || b.code === 20404) throw new Error("sms_expired");
   if (b.code === 60200 || b.code === 21211 || b.code === 60205 || b.code === 21408) throw new Error("bad_phone");
-  if (!r.ok) { slog("warn", "sms.twilio", { st: r.status, code: b.code || null }); throw new Error("sms_failed"); }
+  if (r.status === 401 || b.code === 20003) throw new Error("sms_auth");   // C306: SID/Token خاطئان
+  if (!r.ok) { slog("warn", "sms.twilio", { st: r.status, code: b.code || null }); throw new Error("sms_failed:" + (b.code || r.status)); }
   return b;
 }
 async function opSmsStart(uid, payload, env, claims) {
