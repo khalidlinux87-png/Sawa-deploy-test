@@ -12,7 +12,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u06
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v115-pins";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
+const VER = "v116-otpmgr";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -3592,7 +3592,7 @@ async function opProfileGet(uid, payload, env, claims) {
   const cd = p.code ? { code: p.code, findable: p.findable } : await ensureCode(token, uid, claims, false).catch(() => ({ code: null, findable: true }));
   const emailVerified = await ensureEmailIndex(token, uid, claims, p).catch(() => false);
   return { profile: { name: p.name, phone: p.phone, phoneVerified: !!p.phoneVerified, verifiedBy: p.phoneVerified ? (p.verifiedBy || "whatsapp") : null, emailVerified, email: emailVerified ? claims.email : null, googleName: claims.name || null, code: cd.code, findable: cd.findable,
-    anon: !!(claims.firebase && claims.firebase.sign_in_provider === "anonymous") }, verify: verifyConfig(env) };
+    anon: !!(claims.firebase && claims.firebase.sign_in_provider === "anonymous") }, verify: verifyConfig(env, !!(await otpManager(env, claims))) };
 }
 /* ---------- 43) \u0627\u0644\u062a\u062d\u0642\u0651\u0642 \u0645\u0646 \u0627\u0644\u0647\u0648\u064a\u0651\u0629 (C43) ----------
    \u2022 \u0627\u0644\u0628\u0631\u064a\u062f: Google \u064a\u0648\u062b\u0651\u0642\u0647\u060c \u0648\u062d\u0633\u0627\u0628 \u0627\u0644\u0628\u0631\u064a\u062f \u064a\u0648\u062b\u064e\u0651\u0642 \u0628\u0631\u0627\u0628\u0637 Firebase (email_verified \u0641\u064a \u0627\u0644\u0631\u0645\u0632). \u0646\u0641\u0647\u0631\u0633\u0647 emails/{sha256(\u0627\u0644\u0628\u0631\u064a\u062f)} = { uid } \u0644\u064a\u064f\u0639\u062b\u0631 \u0639\u0644\u064a\u0643 \u0628\u0647.
@@ -3600,9 +3600,12 @@ async function opProfileGet(uid, payload, env, claims) {
      \u0648Meta \u062a\u0633\u062a\u062f\u0639\u064a /wa/webhook \u0641\u0646\u0642\u0631\u0623 \u0631\u0642\u0645 \u0627\u0644\u0645\u0631\u0633\u0644 \u0627\u0644\u0645\u0648\u062b\u064e\u0651\u0642 \u0639\u0646\u062f \u0648\u0627\u062a\u0633\u0627\u0628 \u0648\u0646\u0637\u0627\u0628\u0642 \u0627\u0644\u0631\u0645\u0632. \u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u0630\u064a \u0623\u0631\u0633\u0644 \u0627\u0644\u0631\u0645\u0632 \u0647\u0648 \u0627\u0644\u0630\u064a \u064a\u064f\u0648\u062b\u064e\u0651\u0642 (\u0648\u064a\u062d\u0644\u0651 \u0645\u062d\u0644\u0651 \u0627\u0644\u0645\u0643\u062a\u0648\u0628).
      \u0627\u0644\u0623\u0633\u0631\u0627\u0631: WA_NUMBER (\u0631\u0642\u0645 \u0633\u0648\u0627 \u0628\u0635\u064a\u063a\u0629 \u0623\u0631\u0642\u0627\u0645\u064d \u062f\u0648\u0644\u064a\u0651\u0629 \u0628\u0644\u0627 +) \u00b7 WA_VERIFY_TOKEN (\u0643\u0644\u0645\u0629 \u062a\u062d\u0642\u0651\u0642 \u0627\u0644\u0640webhook) \u00b7 WA_APP_SECRET (\u062a\u0648\u0642\u064a\u0639 Meta)
      \u00b7 \u0627\u062e\u062a\u064a\u0627\u0631\u064a\u0651\u0627\u0646 \u0644\u0644\u0631\u062f\u0651: WA_TOKEN \u0648 WA_PHONE_ID. */
-function verifyConfig(env) {
-  const wa = !!(env.WA_NUMBER && env.WA_VERIFY_TOKEN && env.WA_APP_SECRET);
-  return { whatsapp: wa, waNumber: wa ? String(env.WA_NUMBER).replace(/\D/g, "") : null };
+/* C303: \u0627\u0644\u062a\u062d\u0642\u0651\u0642 \u0628\u0627\u0644\u0631\u0645\u0632 (OTP \u0639\u0628\u0631 \u0648\u0627\u062a\u0633\u0627\u0628) \u0644\u0644\u0645\u062f\u064a\u0631 \u0641\u0642\u0637 \u2014 \u0627\u0644\u0645\u0627\u0644\u0643 (ADMIN_EMAIL) \u0623\u0648 \u0645\u062f\u064a\u0631\u064c \u0641\u064a \u0627\u0644\u0641\u0631\u064a\u0642.
+   \u0627\u0644\u0628\u0627\u0642\u0648\u0646: \u00ab\u0639\u0628\u0631 \u0645\u0639\u0627\u0631\u0641\u0643\u00bb \u0648\u062d\u062f\u0647. \u0627\u0644\u062e\u0627\u062f\u0645 \u064a\u0631\u0641\u0636 phone.start \u0644\u063a\u064a\u0631\u0647\u0645\u060c \u0641\u0644\u0627 \u064a\u064f\u0646\u0634\u0623 \u0631\u0645\u0632\u064c \u064a\u0642\u0628\u0644\u0647 /wa/webhook. */
+async function otpManager(env, claims) { return adminCan(env, claims, "admin").catch(() => null); }
+function verifyConfig(env, mgr) {
+  const wa = !!(env.WA_NUMBER && env.WA_VERIFY_TOKEN && env.WA_APP_SECRET) && !!mgr;
+  return { whatsapp: wa, waNumber: wa ? String(env.WA_NUMBER).replace(/\D/g, "") : null, mgr: !!mgr };
 }
 async function sha256Hex(t) {
   const h = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t)));
@@ -3622,7 +3625,9 @@ async function ensureEmailIndex(token, uid, claims, p) {
 }
 function otpCode() { const a = new Uint32Array(1); crypto.getRandomValues(a); return String(100000 + (a[0] % 900000)); }
 async function opPhoneStart(uid, payload, env, claims) {
-  const cfg = verifyConfig(env);
+  const mgr = !!(await otpManager(env, claims));
+  if (!mgr) throw new Error("manager_only");   // C303
+  const cfg = verifyConfig(env, mgr);
   if (!cfg.whatsapp) return { enabled: false };
   if (!codeRate(uid, "otp", 6)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
