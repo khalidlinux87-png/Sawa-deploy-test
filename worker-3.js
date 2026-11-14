@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v126-kin";      // C263 P1 + C264 P2 + C266 P3 + C267 P4 (pay page)
+const VER = "v127-otp";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -3819,7 +3819,7 @@ async function opProfileGet(uid, payload, env, claims) {
   const cd = p.code ? { code: p.code, findable: p.findable } : await ensureCode(token, uid, claims, false).catch(() => ({ code: null, findable: true }));
   const emailVerified = await ensureEmailIndex(token, uid, claims, p).catch(() => false);
   return { profile: { name: p.name, phone: p.phone, phoneVerified: !!p.phoneVerified, verifiedBy: p.phoneVerified ? (p.verifiedBy || "whatsapp") : null, emailVerified, email: emailVerified ? claims.email : null, googleName: claims.name || null, code: cd.code, findable: cd.findable,
-    anon: !!(claims.firebase && claims.firebase.sign_in_provider === "anonymous") }, verify: verifyConfig(env) };
+    anon: !!(claims.firebase && claims.firebase.sign_in_provider === "anonymous") }, verify: verifyConfig(env, !!(await otpManager(env, claims))) };
 }
 /* ---------- 43) \u0627\u0644\u062a\u062d\u0642\u0651\u0642 \u0645\u0646 \u0627\u0644\u0647\u0648\u064a\u0651\u0629 (C43) ----------
    \u2022 \u0627\u0644\u0628\u0631\u064a\u062f: Google \u064a\u0648\u062b\u0651\u0642\u0647\u060c \u0648\u062d\u0633\u0627\u0628 \u0627\u0644\u0628\u0631\u064a\u062f \u064a\u0648\u062b\u064e\u0651\u0642 \u0628\u0631\u0627\u0628\u0637 Firebase (email_verified \u0641\u064a \u0627\u0644\u0631\u0645\u0632). \u0646\u0641\u0647\u0631\u0633\u0647 emails/{sha256(\u0627\u0644\u0628\u0631\u064a\u062f)} = { uid } \u0644\u064a\u064f\u0639\u062b\u0631 \u0639\u0644\u064a\u0643 \u0628\u0647.
@@ -3827,9 +3827,12 @@ async function opProfileGet(uid, payload, env, claims) {
      \u0648Meta \u062a\u0633\u062a\u062f\u0639\u064a /wa/webhook \u0641\u0646\u0642\u0631\u0623 \u0631\u0642\u0645 \u0627\u0644\u0645\u0631\u0633\u0644 \u0627\u0644\u0645\u0648\u062b\u064e\u0651\u0642 \u0639\u0646\u062f \u0648\u0627\u062a\u0633\u0627\u0628 \u0648\u0646\u0637\u0627\u0628\u0642 \u0627\u0644\u0631\u0645\u0632. \u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u0630\u064a \u0623\u0631\u0633\u0644 \u0627\u0644\u0631\u0645\u0632 \u0647\u0648 \u0627\u0644\u0630\u064a \u064a\u064f\u0648\u062b\u064e\u0651\u0642 (\u0648\u064a\u062d\u0644\u0651 \u0645\u062d\u0644\u0651 \u0627\u0644\u0645\u0643\u062a\u0648\u0628).
      \u0627\u0644\u0623\u0633\u0631\u0627\u0631: WA_NUMBER (\u0631\u0642\u0645 \u0633\u0648\u0627 \u0628\u0635\u064a\u063a\u0629 \u0623\u0631\u0642\u0627\u0645\u064d \u062f\u0648\u0644\u064a\u0651\u0629 \u0628\u0644\u0627 +) \u00b7 WA_VERIFY_TOKEN (\u0643\u0644\u0645\u0629 \u062a\u062d\u0642\u0651\u0642 \u0627\u0644\u0640webhook) \u00b7 WA_APP_SECRET (\u062a\u0648\u0642\u064a\u0639 Meta)
      \u00b7 \u0627\u062e\u062a\u064a\u0627\u0631\u064a\u0651\u0627\u0646 \u0644\u0644\u0631\u062f\u0651: WA_TOKEN \u0648 WA_PHONE_ID. */
-function verifyConfig(env) {
-  const wa = !!(env.WA_NUMBER && env.WA_VERIFY_TOKEN && env.WA_APP_SECRET);
-  return { whatsapp: wa, waNumber: wa ? String(env.WA_NUMBER).replace(/\D/g, "") : null };
+/* C303: \u0627\u0644\u062a\u062d\u0642\u0651\u0642 \u0628\u0627\u0644\u0631\u0645\u0632 (OTP \u0639\u0628\u0631 \u0648\u0627\u062a\u0633\u0627\u0628) \u0644\u0644\u0645\u062f\u064a\u0631 \u0641\u0642\u0637 \u2014 \u0627\u0644\u0645\u0627\u0644\u0643 (ADMIN_EMAIL) \u0623\u0648 \u0645\u062f\u064a\u0631\u064c \u0641\u064a \u0627\u0644\u0641\u0631\u064a\u0642.
+   \u0627\u0644\u0628\u0627\u0642\u0648\u0646: \u00ab\u0639\u0628\u0631 \u0645\u0639\u0627\u0631\u0641\u0643\u00bb \u0648\u062d\u062f\u0647. \u0627\u0644\u062e\u0627\u062f\u0645 \u064a\u0631\u0641\u0636 phone.start \u0644\u063a\u064a\u0631\u0647\u0645\u060c \u0641\u0644\u0627 \u064a\u064f\u0646\u0634\u0623 \u0631\u0645\u0632\u064c \u064a\u0642\u0628\u0644\u0647 /wa/webhook. */
+async function otpManager(env, claims) { return adminCan(env, claims, "admin").catch(() => null); }
+function verifyConfig(env, mgr) {
+  const wa = !!(env.WA_NUMBER && env.WA_VERIFY_TOKEN && env.WA_APP_SECRET) && !!mgr;
+  return { whatsapp: wa, waNumber: wa ? String(env.WA_NUMBER).replace(/\D/g, "") : null, sms: smsReady(env) && !!mgr, mgr: !!mgr };
 }
 async function sha256Hex(t) {
   const h = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t)));
@@ -3849,7 +3852,9 @@ async function ensureEmailIndex(token, uid, claims, p) {
 }
 function otpCode() { const a = new Uint32Array(1); crypto.getRandomValues(a); return String(100000 + (a[0] % 900000)); }
 async function opPhoneStart(uid, payload, env, claims) {
-  const cfg = verifyConfig(env);
+  const mgr = !!(await otpManager(env, claims));
+  if (!mgr) throw new Error("manager_only");   // C303
+  const cfg = verifyConfig(env, mgr);
   if (!cfg.whatsapp) return { enabled: false };
   if (!codeRate(uid, "otp", 6)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -3873,6 +3878,62 @@ async function opPhoneStatus(uid, payload, env) {
   const vouches = phone ? await vouchCount(token, uid, phone) : { n: 0, names: [] };
   return { phone, phoneVerified: v, verifiedBy: v ? (fstr(d, "verifiedBy") || "whatsapp") : null, pending: !v && exp > Date.now(), mismatch: fstr(d, "otpMismatch") || null,
     vouches: vouches.n, vouchers: vouches.names, needed: VOUCH_NEEDED };
+}
+/* ---------- C304) \u0631\u0645\u0632 SMS \u0644\u0644\u0645\u062f\u064a\u0631 \u0641\u0642\u0637 (Twilio Verify) ----------
+   Twilio \u064a\u0648\u0644\u0651\u062f \u0627\u0644\u0631\u0645\u0632 \u0648\u064a\u0631\u0633\u0644\u0647 \u0648\u064a\u062a\u062d\u0642\u0651\u0642 \u0645\u0646\u0647 \u2014 \u0644\u0627 \u0646\u062e\u0632\u0651\u0646 \u0627\u0644\u0631\u0645\u0632. \u0646\u062e\u0632\u0651\u0646 \u0641\u0642\u0637 smsPhone/smsExp \u0641\u064a accounts/{uid}.
+   \u0627\u0644\u0623\u0633\u0631\u0627\u0631 (Secret): TWILIO_SID \xb7 TWILIO_TOKEN \xb7 TWILIO_VERIFY_SID. \u0628\u0644\u0627 \u0623\u062d\u062f\u0647\u0627 \u21d2 \xab\u0642\u064a\u062f \u0627\u0644\u062a\u062c\u0647\u064a\u0632\xbb.
+   phone.smsStart \u21d2 \u0631\u0633\u0627\u0644\u0629 \u0625\u0644\u0649 \u0631\u0642\u0645 \u0627\u0644\u062d\u0633\u0627\u0628 \xb7 phone.smsCheck { code } \u21d2 phoneVerified (verifiedBy = "sms"). */
+function smsReady(env) { return !!(env.TWILIO_SID && env.TWILIO_TOKEN && env.TWILIO_VERIFY_SID); }
+async function twilioVerify(env, path, form) {
+  const r = await fetch("https://verify.twilio.com/v2/Services/" + encodeURIComponent(env.TWILIO_VERIFY_SID) + "/" + path, {
+    method: "POST", headers: { Authorization: "Basic " + btoa(env.TWILIO_SID + ":" + env.TWILIO_TOKEN), "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(form).toString() });
+  let b = {}; try { b = await r.json(); } catch (e) {}
+  if (r.status === 429 || b.code === 60203 || b.code === 20429) throw new Error("rate_limited");
+  if (r.status === 404 || b.code === 20404) throw new Error("sms_expired");
+  if (b.code === 60200 || b.code === 21211 || b.code === 60205 || b.code === 21408) throw new Error("bad_phone");
+  if (!r.ok) { slog("warn", "sms.twilio", { st: r.status, code: b.code || null }); throw new Error("sms_failed"); }
+  return b;
+}
+async function opSmsStart(uid, payload, env, claims) {
+  if (!(await otpManager(env, claims))) throw new Error("manager_only");
+  if (!smsReady(env)) return { enabled: false };
+  if (!codeRate(uid, "sms", 3)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  if (!(await rateGate(token, [["sms:u:" + uid, 5, 3600], ["sms:ud:" + uid, 10, 86400]]))) throw new Error("rate_limited");
+  const p = await profileOf(token, uid);
+  const phone = cleanPhone(p.phone);
+  if (!phone) throw new Error("no_phone");
+  if (p.phoneVerified) return { enabled: true, already: true };
+  await twilioVerify(env, "Verifications", { To: phone, Channel: "sms" });
+  const exp = Date.now() + 10 * 60 * 1000;
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields: { smsPhone: { stringValue: phone }, smsExp: { integerValue: String(exp) } } }, updateMask: { fieldPaths: ["smsPhone", "smsExp"] } }]);
+  return { enabled: true, phone, exp };
+}
+async function opSmsCheck(uid, payload, env, claims) {
+  if (!(await otpManager(env, claims))) throw new Error("manager_only");
+  if (!smsReady(env)) return { enabled: false };
+  const code = String((payload && payload.code) || "").replace(/[\u0660-\u0669]/g, d => "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669".indexOf(d)).replace(/\D/g, "");
+  if (!/^\d{4,10}$/.test(code)) throw new Error("bad_code");
+  if (!codeRate(uid, "smschk", 6)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  if (!(await rateGate(token, [["smschk:u:" + uid, 10, 3600]]))) throw new Error("rate_limited");
+  const acc = await fsGet(token, "accounts/" + uid).catch(() => null);
+  const phone = fstr(acc, "smsPhone"), exp = Number(acc && acc.fields && acc.fields.smsExp && acc.fields.smsExp.integerValue || 0);
+  if (!phone || exp < Date.now()) throw new Error("sms_expired");
+  if (cleanPhone(fstr(acc, "phone")) !== phone) throw new Error("sms_expired");   // \u062a\u063a\u064a\u0651\u0631 \u0627\u0644\u0631\u0642\u0645 \u0628\u0639\u062f \u0627\u0644\u0625\u0631\u0633\u0627\u0644
+  const r = await twilioVerify(env, "VerificationCheck", { To: phone, Code: code });
+  if (r.status !== "approved") return { enabled: true, verified: false };
+  const prevOwner = fstr(await fsGet(token, "phones/" + phone).catch(() => null), "uid"), now = String(Date.now());
+  const writes = [
+    { update: { name: DOC_ROOT + "/accounts/" + uid, fields: { phone: { stringValue: phone }, phoneVerified: { booleanValue: true }, verifiedBy: { stringValue: "sms" }, phoneVerifiedAt: { integerValue: now }, smsPhone: { nullValue: null }, smsExp: { nullValue: null } } },
+      updateMask: { fieldPaths: ["phone", "phoneVerified", "verifiedBy", "phoneVerifiedAt", "smsPhone", "smsExp"] } },
+    { update: { name: DOC_ROOT + "/phones/" + phone, fields: { uid: { stringValue: uid }, by: { stringValue: "sms" }, ts: { integerValue: now } } } }];
+  // \u0631\u0642\u0645\u064c \u0648\u0627\u062d\u062f \u0644\u062d\u0633\u0627\u0628\u064d \u0648\u0627\u062d\u062f (\u0643\u0645\u0627 \u0641\u064a waVerify)
+  if (prevOwner && prevOwner !== uid) writes.push({ update: { name: DOC_ROOT + "/accounts/" + prevOwner, fields: { phoneVerified: { booleanValue: false } } }, updateMask: { fieldPaths: ["phoneVerified"] } });
+  await fsCommit(token, writes);
+  PROFILE_CACHE.delete(uid); if (prevOwner) PROFILE_CACHE.delete(prevOwner);
+  return { enabled: true, verified: true, phone };
 }
 /* ---------- 44) \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u0631\u0642\u0645 \u0639\u0628\u0631 \u0627\u0644\u0645\u0639\u0627\u0631\u0641 (C44) ----------
    \u0628\u0644\u0627 Meta \u0648\u0644\u0627 SMS: \u0635\u0627\u062d\u0628 \u0627\u0644\u0631\u0642\u0645 \u064a\u0637\u0644\u0628 \u0645\u0646 \u0645\u0639\u0627\u0631\u0641\u0647 (\u062c\u0647\u0627\u062a \u0627\u062a\u0651\u0635\u0627\u0644 \u0645\u062a\u0628\u0627\u062f\u0644\u0629) \u062a\u0623\u0643\u064a\u062f \u0623\u0646\u0651 \u0647\u0630\u0627 \u0631\u0642\u0645\u0647. \u0643\u0644\u0651 \u0645\u0624\u0643\u0650\u0651\u062f\u064d \u064a\u062c\u0628 \u0623\u0646 \u064a\u0643\u0648\u0646
@@ -6194,6 +6255,8 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "profile.get") { const r = await opProfileGet(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "profile.set") { const r = await opProfileSet(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "phone.start") { const r = await opPhoneStart(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+    if (op === "phone.smsStart") { const r = await opSmsStart(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C304
+    if (op === "phone.smsCheck") { const r = await opSmsCheck(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "phone.status") { const r = await opPhoneStatus(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "find.phone") { const r = await opFindBy(uid, body.payload, env, "phone", claims); return json({ ok: true, ...r }); }
     // C53: \u0637\u0644\u0628\u064c \u0648\u0627\u062d\u062f \u0639\u0646\u062f \u0627\u0644\u0625\u0642\u0644\u0627\u0639 \u0628\u062f\u0644 \u062b\u0644\u0627\u062b\u0629 (people.list + chat.prefs + code.requests) \u2014 \u064a\u0648\u0641\u0651\u0631 \u0631\u062d\u0644\u062a\u064a\u0646 \u0625\u0644\u0649 \u0627\u0644\u062e\u0627\u062f\u0645 \u0639\u0644\u0649 \u0627\u0644\u0634\u0628\u0643\u0627\u062a \u0627\u0644\u0628\u0637\u064a\u0626\u0629
