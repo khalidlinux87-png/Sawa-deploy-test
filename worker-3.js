@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v134-tasks";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
+const VER = "v135-dis3m";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -2036,7 +2036,7 @@ async function opChatSend(uid, payload, env, ctx) {
     else if (payload.msg.reply.day) msg.reply = { id: msg.reply.id, by: null, text: "", day: rday, missing: true };
     else msg.reply.unv = true;   // \u0639\u0645\u064a\u0644\u064c \u0642\u062f\u064a\u0645 \u0644\u0645 \u064a\u0631\u0633\u0644 \u064a\u0648\u0645 \u0627\u0644\u0623\u0635\u0644 \u21d2 \u064a\u0628\u0642\u0649 \u0646\u0635\u0651\u0647 \u0645\u0648\u0633\u0648\u0645\u0627\u064b \u00ab\u063a\u064a\u0631 \u0645\u062a\u062d\u0642\u064e\u0651\u0642\u00bb (\u0627\u0644\u0639\u0645\u064a\u0644 \u0627\u0644\u062c\u062f\u064a\u062f \u064a\u0631\u0633\u0644 \u0627\u0644\u064a\u0648\u0645 \u062f\u0627\u0626\u0645\u0627\u064b)
   }
-  const dis = fsInt(c, "disappear");
+  const dis = fsInt(c, "disappear") > 0 ? Math.max(fsInt(c, "disappear"), DIS_MIN_S) : 0;   // C315: never under 3 months
   // C314: group tools (tasks, poll, bill, fund) are working records and do not expire with disappearing messages (a task list was being deleted)
   if (dis > 0 && ["tasks", "poll", "bill", "fund"].indexOf(msg.type) < 0) msg.exp = ts + dis * 1000;
   const sendWrites = (sh) => (msg.extra && msg.extra.mid ? [{ delete: DOC_ROOT + "/mediaq/" + cid + "~" + msg.extra.mid }] : []).concat([
@@ -2278,9 +2278,11 @@ async function opChatSettings(uid, payload, env) {
     const mem = await fsGet(token, "groups/" + cid.slice(4) + "/members/" + uid).catch(() => null);
     if (["owner", "editor"].indexOf(fstr(mem, "role")) < 0) throw new Error("only family editors can change this");
   }
-  const allowed = [0, 3600, 86400, 604800, 7776000];
-  const dis = Number(payload.disappear || 0);
+  // C315: disappearing messages last at least 3 months (older apps that still send 1 h / 24 h / 7 days get 3 months)
+  const allowed = [0, 3600, 86400, 604800, DIS_MIN_S, 15552000, 31536000];
+  let dis = Number(payload.disappear || 0);
   if (allowed.indexOf(dis) < 0) throw new Error("bad value");
+  if (dis > 0 && dis < DIS_MIN_S) dis = DIS_MIN_S;
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { disappear: { integerValue: String(dis) }, disappearBy: { stringValue: uid }, disOn: { booleanValue: true } } }, updateMask: { fieldPaths: ["disappear", "disappearBy", "disOn"] } }]);
   return { disappear: dis };
 }
@@ -2322,6 +2324,24 @@ async function opChatPrefs(uid, payload, env) {
   return { prefs: data };
 }
 /* \u062a\u0646\u0638\u064a\u0641 \u0627\u0644\u0631\u0633\u0627\u0626\u0644 \u0627\u0644\u0645\u0624\u0642\u0651\u062a\u0629 (Cron \u0643\u0644\u0651 \u0661\u0665 \u062f\u0642\u064a\u0642\u0629): \u0645\u062d\u0627\u062f\u062b\u0627\u062a\u064c \u0641\u064a\u0647\u0627 disappear > 0 \u21d2 \u064a\u064f\u062d\u0630\u0641 \u0645\u0627 \u0627\u0646\u062a\u0647\u0649 \u0623\u062c\u0644\u0647 */
+// C315: disappearing messages: at least 3 months, a push warning 3 days before they go, and starred messages are never deleted.
+const DIS_MIN_S = 7776000, DIS_MIN_MS = DIS_MIN_S * 1000, DIS_WARN_MS = 3 * 86400000;
+// Effective deletion time: messages sent with a shorter timer (before C315) still wait 3 months from when they were sent.
+function disExp(m) { return m && m.exp ? Math.max(Number(m.exp) || 0, (Number(m.ts) || 0) + DIS_MIN_MS) : 0; }
+// Ids of this chat's messages that any member starred (chat prefs "starred": [{ id, conversationId }]).
+async function disStarred(token, c, cid) {
+  const keep = new Set(), members = fsArr(c, "members").filter(u => segOk(String(u || ""))).slice(0, 100);
+  if (!members.length) return keep;
+  const res = await gfetch(FS_BASE + ":batchGet", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ documents: members.map(u => DOC_ROOT + "/accounts/" + u + "/chatprefs/main") }) });
+  if (!res.ok) throw new Error("starred lookup " + res.status);   // unknown => delete nothing this round
+  for (const r of (await res.json()) || []) {
+    if (!r.found) continue;
+    let d = {}; try { d = JSON.parse(fstr(r.found, "data") || "{}"); } catch (e) { d = {}; }
+    for (const x of Array.isArray(d.starred) ? d.starred : []) if (x && x.id && (!x.conversationId || x.conversationId === cid)) keep.add(String(x.id));
+  }
+  return keep;
+}
 async function cleanupDisappearing(env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   // v35: \u064a\u0645\u0631\u0651 \u0639\u0644\u0649 \u0643\u0644\u0651 \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0627\u062a \u0628\u0627\u0644\u062f\u0648\u0631 (\u0645\u0624\u0634\u0651\u0631\u064c \u0645\u062d\u0641\u0648\u0638 \u0641\u064a meta/cleanup) \u2014 \u0643\u0627\u0646 \u064a\u0639\u0627\u0644\u062c \u0623\u0648\u0651\u0644 \u0661\u0660 \u0645\u062d\u0627\u062f\u062b\u0627\u062a \u0641\u0642\u0637 \u0625\u0644\u0649 \u0627\u0644\u0623\u0628\u062f.
@@ -2356,12 +2376,26 @@ async function cleanupDisappearing(env) {
   for (const c of rows.concat(legacy)) {
     const cid = c.name.split("/").pop();
     const days = await fsList(token, "chats/" + cid + "/days");
-    let pending = 0;
+    let pending = 0, soonest = 0;
+    let keep = null;   // C315: starred ids, fetched only when something is due
     for (const d of days) {
       const msgs = (d.fields && d.fields.msgs && d.fields.msgs.mapValue.fields) || {};
       const ids = Object.keys(msgs);
-      const gone = ids.filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && m.exp < now; });
-      pending += ids.filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && m.exp >= now; }).length;
+      let gone = ids.filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && disExp(m) < now; });
+      const live = ids.filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && disExp(m) >= now; });
+      pending += live.length;
+      for (const id of live) { const e = disExp(fsToJs(msgs[id])); if (!soonest || e < soonest) soonest = e; }
+      if (gone.length || (live.length && soonest - now < DIS_WARN_MS)) {
+        if (!keep) { try { keep = await disStarred(token, c, cid); } catch (e) { slog("warn", "dis.starred", { cid, err: e && e.message }); keep = null; } }
+        if (!keep) { pending += gone.length; continue; }   // could not read stars: keep everything for now
+        // Starred messages lose their timer for good
+        const kept = ids.filter(id => keep.has(id) && (gone.indexOf(id) >= 0 || live.indexOf(id) >= 0));
+        if (kept.length) {
+          await fsCommit(token, [{ update: { name: d.name, fields: {} }, updateMask: { fieldPaths: kept.map(id => fp("msgs", id, "exp")) } }]).catch(() => {});
+          gone = gone.filter(id => !keep.has(id));
+          pending -= live.filter(id => keep.has(id)).length;
+        }
+      }
       if (!gone.length) continue;
       pending += gone.length;   // \u0645\u0627 \u0644\u0645 \u064a\u064f\u062d\u0630\u0641 \u0641\u064a \u0647\u0630\u0647 \u0627\u0644\u062f\u0648\u0631\u0629 \u064a\u064f\u062d\u0633\u0628 \u062d\u062a\u0651\u0649 \u064a\u064f\u062d\u0630\u0641
       let budget = LIM(env).dis; const ready = [];
@@ -2385,6 +2419,15 @@ async function cleanupDisappearing(env) {
         updateMask: { fieldPaths: ["last.del", "last.text"] } }]).catch(() => {});
     }
     // \u0627\u0644\u0645\u0624\u0642\u0651\u062a\u0629 \u0645\u0637\u0641\u0623\u0629 \u0648\u0644\u0645 \u064a\u0628\u0642\u064e \u0645\u0627 \u0644\u0647 \u0623\u062c\u0644 \u21d2 \u062a\u062e\u0631\u062c \u0645\u0646 \u0627\u0644\u062f\u0648\u0631
+    // C315: one push to the members 3 days before the next messages are deleted (at most once every 3 days per chat)
+    if (pending > 0 && soonest && soonest - now < DIS_WARN_MS && now - fsInt(c, "disWarnTs") > DIS_WARN_MS) {
+      const name = fstr(c, "name"), daysLeft = Math.max(1, Math.ceil((soonest - now) / 86400000));
+      const body = "\u0633\u062a\u064f\u062d\u0630\u0641 \u0631\u0633\u0627\u0626\u0644 \u0645\u0624\u0642\u0651\u062a\u0629 \u062e\u0644\u0627\u0644 " + daysLeft + " \u0623\u064a\u0651\u0627\u0645 \u2014 \u0627\u062d\u0641\u0638 \u0627\u0644\u0645\u0647\u0645\u0651 \u0628\u0627\u0644\u0646\u062c\u0645\u0629 \u2b50";
+      try {
+        await pushTo(token, fsArr(c, "members"), strData({ t: "msg", cid, title: name || "\u0633\u0648\u0627", body, ts: Date.now() }));
+        await fsCommit(token, [{ update: { name: c.name, fields: { disWarnTs: { integerValue: String(now) } } }, updateMask: { fieldPaths: ["disWarnTs"] } }]);
+      } catch (e) { slog("warn", "dis.warn", { cid, err: e && e.message }); }
+    }
     if (!fsInt(c, "disappear") && pending <= 0) await fsCommit(token, [{ update: { name: c.name, fields: {} }, updateMask: { fieldPaths: ["disOn"] } }]).catch(() => {});
   }
   return { chats: rows.length + legacy.length, removed };
