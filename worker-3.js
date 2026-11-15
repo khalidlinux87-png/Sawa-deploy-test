@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v133-smsfix";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
+const VER = "v134-tasks";      // C303 + C304: OTP (WhatsApp + SMS) for the manager only
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -2037,7 +2037,8 @@ async function opChatSend(uid, payload, env, ctx) {
     else msg.reply.unv = true;   // \u0639\u0645\u064a\u0644\u064c \u0642\u062f\u064a\u0645 \u0644\u0645 \u064a\u0631\u0633\u0644 \u064a\u0648\u0645 \u0627\u0644\u0623\u0635\u0644 \u21d2 \u064a\u0628\u0642\u0649 \u0646\u0635\u0651\u0647 \u0645\u0648\u0633\u0648\u0645\u0627\u064b \u00ab\u063a\u064a\u0631 \u0645\u062a\u062d\u0642\u064e\u0651\u0642\u00bb (\u0627\u0644\u0639\u0645\u064a\u0644 \u0627\u0644\u062c\u062f\u064a\u062f \u064a\u0631\u0633\u0644 \u0627\u0644\u064a\u0648\u0645 \u062f\u0627\u0626\u0645\u0627\u064b)
   }
   const dis = fsInt(c, "disappear");
-  if (dis > 0) msg.exp = ts + dis * 1000;
+  // C314: group tools (tasks, poll, bill, fund) are working records and do not expire with disappearing messages (a task list was being deleted)
+  if (dis > 0 && ["tasks", "poll", "bill", "fund"].indexOf(msg.type) < 0) msg.exp = ts + dis * 1000;
   const sendWrites = (sh) => (msg.extra && msg.extra.mid ? [{ delete: DOC_ROOT + "/mediaq/" + cid + "~" + msg.extra.mid }] : []).concat([
     { update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + sh.key, fields: { msgs: { mapValue: { fields: { [msg.id]: toFsValue(msg) } } } } },
       updateMask: { fieldPaths: [fp("msgs", msg.id)] } },
@@ -2284,7 +2285,7 @@ async function opChatSettings(uid, payload, env) {
   return { disappear: dis };
 }
 // \u0625\u0639\u062f\u0627\u062f\u0627\u062a\u064a \u0641\u064a \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0627\u062a \u062a\u062a\u0632\u0627\u0645\u0646 \u0628\u064a\u0646 \u0623\u062c\u0647\u0632\u062a\u064a: \u0623\u0631\u0634\u0641\u0629\u060c \u062a\u062b\u0628\u064a\u062a\u060c \u0643\u062a\u0645\u060c \u0642\u0641\u0644\u060c \u0645\u062c\u0644\u0651\u062f\u0627\u062a\u060c \u0633\u0645\u0627\u062a\u060c \u0646\u063a\u0645\u0627\u062a\u060c \u0645\u0645\u064a\u0651\u0632\u0629\u060c \u0645\u062d\u0630\u0648\u0641\u0629 \u0639\u0646\u062f\u064a\u060c \u0645\u062d\u0638\u0648\u0631\u0648\u0646
-const PREF_KEYS = ["archived", "pinned", "muted", "locked", "folders", "folderOf", "themes", "tones", "starred", "hidden", "blocked", "drafts", "cleared", "broadcasts", "nick"];
+const PREF_KEYS = ["archived", "pinned", "muted", "locked", "folders", "folderOf", "themes", "tones", "starred", "hidden", "blocked", "drafts", "cleared", "broadcasts", "nick", "hideSeen"];   // C314: hideSeen = hide my last seen
 // \u0627\u0644\u062a\u0633\u0645\u064a\u0627\u062a: \u062d\u062a\u0651\u0649 \u0663\u0660\u0660 \u062c\u0647\u0629 \u0627\u062a\u0651\u0635\u0627\u0644\u060c \u0643\u0644\u0651 \u0627\u0633\u0645 \u2264 \u0664\u0660 \u062d\u0631\u0641\u0627\u064b
 function capNick(v) {
   const o = {}; let n = 0;
@@ -2373,6 +2374,9 @@ async function cleanupDisappearing(env) {
       }
       if (!ready.length) continue;
       pending -= ready.length;
+      // C314: an expired task list (sent before the exemption) also leaves the My tasks index
+      const tdel = ready.filter(id => { const m = fsToJs(msgs[id]); return m && m.type === "tasks"; }).map(id => ({ delete: DOC_ROOT + "/tasklists/" + cid + "~" + id }));
+      if (tdel.length) await fsCommit(token, tdel).catch(() => {});
       if (ready.length === ids.length) await fsCommit(token, [{ delete: d.name }]);
       else await fsCommit(token, [{ update: { name: d.name, fields: {} }, updateMask: { fieldPaths: ready.map(id => fp("msgs", id)) } }]);
       removed += ready.length;
