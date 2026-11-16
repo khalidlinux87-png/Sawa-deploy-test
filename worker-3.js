@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v137-media70";    // media limit 16 → 70 MB (MEDIA_MAX, 140 chunks)
+const VER = "v138-quota1g";    // media 70 MB · daily quota 1 GB
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -2104,7 +2104,7 @@ async function deleteMedia(token, cid, mid) {
 }
 /* v35: \u062d\u062c\u0632 \u0627\u0644\u0631\u0641\u0639 \u2014 \u0627\u0644\u062c\u0647\u0627\u0632 \u064a\u0637\u0644\u0628 \u0627\u0644\u0625\u0630\u0646 \u0642\u0628\u0644 \u0631\u0641\u0639 \u0623\u064a\u0651 \u0648\u0633\u064a\u0637 (\u0627\u0644\u0642\u0648\u0627\u0639\u062f \u062a\u0631\u0641\u0636 \u0648\u0633\u064a\u0637\u0627\u064b \u0628\u0644\u0627 \u062d\u062c\u0632 \u0641\u064a mediaq).
    \u062d\u062f\u064c\u0651 \u064a\u0648\u0645\u064a\u0651 \u0644\u0643\u0644\u0651 \u0645\u0633\u062a\u062e\u062f\u0645\u060c \u0648\u0645\u0627 \u0644\u0645 \u064a\u064f\u0631\u0633\u064e\u0644 \u062e\u0644\u0627\u0644 \u0662\u0664 \u0633\u0627\u0639\u0629 \u064a\u062d\u0630\u0641\u0647 \u0627\u0644\u0640Cron (\u0643\u0627\u0646\u062a \u0627\u0644\u0631\u0641\u0639\u0627\u062a \u0627\u0644\u0645\u062a\u0631\u0648\u0643\u0629 \u062a\u0628\u0642\u0649 \u0625\u0644\u0649 \u0627\u0644\u0623\u0628\u062f = \u062a\u062e\u0632\u064a\u0646\u064c \u0645\u062c\u0651\u0627\u0646\u064a\u0651 \u0628\u0644\u0627 \u062d\u062f\u0651). */
-const MEDIA_DAY_MAX = 300 * 1024 * 1024;
+const MEDIA_DAY_MAX = 1024 * 1024 * 1024;   // 1 جيجابايت يومياً لكلّ مستخدم
 const MEDIA_MAX = 70 * 1024 * 1024, MEDIA_MAX_CHUNKS = 140;   // حدّ الوسيط الواحد (فيديو/ملفّ) — يطابق sawa-chat.js وقواعد Firestore (n ≤ 140)
 async function opMediaBegin(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
