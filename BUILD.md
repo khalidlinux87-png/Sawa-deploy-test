@@ -1409,3 +1409,7 @@ Decisions (owner, 2026-11-09): no tax on estimate lines (P11) · copy an expense
 - Projects schema v2 (no backfill): lines gain `priceDate`, `supplier`🔒, `pricedAt`, `priceLog`; `files/{fid}` + `parts/{n}`. Ops `pfm.proj.file.add|list|get|remove`, `pfm.proj.prices`. Variance lines and ledger rows carry file counts; ledger rows carry `unitPrice`. Deleting a project drains files.
 - Fixed while testing: the new ops required the caller's own accountant setup, which shared-project editors may not have (they now use UTC for "today").
 - Tests: pfm-worker 50 · projects-worker 23 · others unchanged and passing · both UI checks pass. Details: `Sawa-app/BUILD.md` § C287, `pfm/PROJECTS.md` §12.
+
+## ⏱ v136-boot — call telemetry for connect delay (C324 in Sawa-app/BUILD.md)
+- `opCallTel` keeps three new fields: `bt` (callee answered from the phone screen: ms from app start to answer), `aw` (caller: ms from accept to the callee's answer SDP), `ics` (ICE source on the callee: m memory · s stored on the phone · f fetched).
+- Deploy order: this Worker first, then Sawa-app.
