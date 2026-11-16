@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v136-boot";       // C324: call telemetry bt/aw/ics (connect delay after answering from the phone screen)
+const VER = "v137-media70";    // media limit 16 → 70 MB (MEDIA_MAX, 140 chunks)
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -2105,11 +2105,12 @@ async function deleteMedia(token, cid, mid) {
 /* v35: \u062d\u062c\u0632 \u0627\u0644\u0631\u0641\u0639 \u2014 \u0627\u0644\u062c\u0647\u0627\u0632 \u064a\u0637\u0644\u0628 \u0627\u0644\u0625\u0630\u0646 \u0642\u0628\u0644 \u0631\u0641\u0639 \u0623\u064a\u0651 \u0648\u0633\u064a\u0637 (\u0627\u0644\u0642\u0648\u0627\u0639\u062f \u062a\u0631\u0641\u0636 \u0648\u0633\u064a\u0637\u0627\u064b \u0628\u0644\u0627 \u062d\u062c\u0632 \u0641\u064a mediaq).
    \u062d\u062f\u064c\u0651 \u064a\u0648\u0645\u064a\u0651 \u0644\u0643\u0644\u0651 \u0645\u0633\u062a\u062e\u062f\u0645\u060c \u0648\u0645\u0627 \u0644\u0645 \u064a\u064f\u0631\u0633\u064e\u0644 \u062e\u0644\u0627\u0644 \u0662\u0664 \u0633\u0627\u0639\u0629 \u064a\u062d\u0630\u0641\u0647 \u0627\u0644\u0640Cron (\u0643\u0627\u0646\u062a \u0627\u0644\u0631\u0641\u0639\u0627\u062a \u0627\u0644\u0645\u062a\u0631\u0648\u0643\u0629 \u062a\u0628\u0642\u0649 \u0625\u0644\u0649 \u0627\u0644\u0623\u0628\u062f = \u062a\u062e\u0632\u064a\u0646\u064c \u0645\u062c\u0651\u0627\u0646\u064a\u0651 \u0628\u0644\u0627 \u062d\u062f\u0651). */
 const MEDIA_DAY_MAX = 300 * 1024 * 1024;
+const MEDIA_MAX = 70 * 1024 * 1024, MEDIA_MAX_CHUNKS = 140;   // حدّ الوسيط الواحد (فيديو/ملفّ) — يطابق sawa-chat.js وقواعد Firestore (n ≤ 140)
 async function opMediaBegin(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const { cid, mid } = payload || {}, size = Math.floor(Number((payload || {}).size) || 0);
   if (!MEDIA_ID.test(String(mid || ""))) throw new Error("bad media id");
-  if (!(size > 0 && size <= 16 * 1024 * 1024)) throw new Error("bad size");
+  if (!(size > 0 && size <= MEDIA_MAX)) throw new Error("bad size");
   await requireChatMember(token, cid, uid);
   const day = dayKey(Date.now()), q = await fsGet(token, "quota/" + uid).catch(() => null);
   const used = q && fstr(q, "d") === day ? fsInt(q, "bytes") : 0;
@@ -5177,7 +5178,7 @@ async function storyWrite(token, uid, name, aud, hide, items) {
 }
 async function storyDropMedia(token, owner, it) {
   if (!it || !it.mid || !/^[a-z0-9]{6,32}$/.test(String(it.mid))) return;
-  const base = DOC_ROOT + "/stories/" + owner + "/media/" + it.mid, n = Math.min(40, Number(it.n) || 33);
+  const base = DOC_ROOT + "/stories/" + owner + "/media/" + it.mid, n = Math.min(MEDIA_MAX_CHUNKS, Number(it.n) || MEDIA_MAX_CHUNKS);
   const w = [{ delete: base }]; for (let i = 0; i < n; i++) w.push({ delete: base + "/c/" + i });
   await fsCommit(token, w).catch(() => {});
 }
@@ -5187,7 +5188,7 @@ async function opStoryBegin(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const mid = String((payload || {}).mid || ""), size = Math.floor(Number((payload || {}).size) || 0);
   if (!/^[a-z0-9]{6,32}$/.test(mid)) throw new Error("bad media id");
-  if (!(size > 0 && size <= 16 * 1024 * 1024)) throw new Error("bad size");
+  if (!(size > 0 && size <= MEDIA_MAX)) throw new Error("bad size");
   const day = dayKey(Date.now()), q = await fsGet(token, "quota/" + uid).catch(() => null);
   const used = q && fstr(q, "d") === day ? fsInt(q, "bytes") : 0;
   if (used + size > MEDIA_DAY_MAX) throw new Error("media quota");
@@ -5205,7 +5206,7 @@ async function storyqGc(env, max) {
   let n = 0;
   for (const d of rows) {
     const u = fstr(d, "uid"), mid = fstr(d, "mid");
-    try { if (segOk(u)) await storyDropMedia(token, u, { mid, n: 40 }); await fsCommit(token, [{ delete: d.name }]); n++; } catch (e) { slog("warn", "storyqGc", { err: e && e.message }); }
+    try { if (segOk(u)) await storyDropMedia(token, u, { mid, n: MEDIA_MAX_CHUNKS }); await fsCommit(token, [{ delete: d.name }]); n++; } catch (e) { slog("warn", "storyqGc", { err: e && e.message }); }
   }
   return { gc: n };
 }
@@ -5319,7 +5320,7 @@ async function opMomentBegin(uid, payload, env) {
   if (!codeRate(uid, "momb", 60)) throw new Error("rate_limited");
   const p = payload || {}, pid = String(p.pid || ""), mid = String(p.mid || ""), size = Math.floor(Number(p.size) || 0);
   if (!momPidOk(pid) || !momMidOk(mid)) throw new Error("bad id");
-  if (!(size > 0 && size <= 16 * 1024 * 1024)) throw new Error("bad size");
+  if (!(size > 0 && size <= MEDIA_MAX)) throw new Error("bad size");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const ex = await momGet(token, pid);
   if (ex) throw new Error("exists");
@@ -5443,7 +5444,7 @@ async function momNewPush(token, env, uid, pid, me, au, men, media) {
 }
 async function momDropMedia(token, pid, it) {
   if (!it || !momMidOk(String(it.mid || ""))) return;
-  const base = DOC_ROOT + "/moments/" + pid + "/media/" + it.mid, n = Math.min(40, Number(it.n) || 33);
+  const base = DOC_ROOT + "/moments/" + pid + "/media/" + it.mid, n = Math.min(MEDIA_MAX_CHUNKS, Number(it.n) || MEDIA_MAX_CHUNKS);
   const w = [{ delete: base }]; for (let i = 0; i < n; i++) w.push({ delete: base + "/c/" + i });
   await fsCommit(token, w).catch(() => {});
 }
@@ -5694,7 +5695,7 @@ async function momentqGc(env, max) {
   let n = 0;
   for (const d of rows) {
     const pid = fstr(d, "pid"), mid = fstr(d, "mid");
-    try { if (momPidOk(pid) && !(await momGet(token, pid))) await momDropMedia(token, pid, { mid, n: 40 }); await fsCommit(token, [{ delete: d.name }]); n++; } catch (e) { slog("warn", "momentqGc", { err: e && e.message }); }
+    try { if (momPidOk(pid) && !(await momGet(token, pid))) await momDropMedia(token, pid, { mid, n: MEDIA_MAX_CHUNKS }); await fsCommit(token, [{ delete: d.name }]); n++; } catch (e) { slog("warn", "momentqGc", { err: e && e.message }); }
   }
   return { gc: n };
 }
