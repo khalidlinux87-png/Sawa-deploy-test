@@ -1,0 +1,108 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://www.sawaaap.com/schemas/pfm/import-batch.json",
+  "title": "SawaWalletBatchResponse",
+  "description": "Result of one import batch (IMPORT-DESIGN.md §7). Based on Khalid's schema of 2026-11-08, with the changes listed in §7.1.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "batch_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{6,80}$", "description": "Unique identifier for the bulk processing session." },
+    "total_processed": { "type": "integer", "minimum": 0, "description": "Input items read (photos, PDFs, messages). One item can hold several receipts." },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "receipts": { "type": "integer", "minimum": 0 },
+        "verified": { "type": "integer", "minimum": 0 },
+        "requires_verification": { "type": "integer", "minimum": 0 },
+        "duplicates": { "type": "integer", "minimum": 0 },
+        "failed_items": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["receipts", "verified", "requires_verification", "duplicates", "failed_items"]
+    },
+    "receipts": { "type": "array", "items": { "$ref": "#/definitions/ReceiptItem" } },
+    "failed_items": {
+      "type": "array",
+      "description": "Items that produced no receipt at all (blank photo, unreadable PDF). The rest of the batch is unaffected.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "item_no": { "type": "integer", "minimum": 1 },
+          "raw_source_type": { "$ref": "#/definitions/SourceType" },
+          "reason": { "type": "string" }
+        },
+        "required": ["item_no", "reason"]
+      }
+    }
+  },
+  "required": ["batch_id", "total_processed", "counts", "receipts", "failed_items"],
+  "definitions": {
+    "SourceType": { "type": "string", "enum": ["image_ocr", "pdf_document", "sms_notification", "email_forward"] },
+    "Party": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": ["string", "null"], "maxLength": 200, "description": "الاسم أو الجهة كما طُبع؛ null إن لم يُقرأ." },
+        "account_identifier": { "type": ["string", "null"], "maxLength": 64, "description": "رقم الحساب أو الهاتف أو المحفظة إن وُجد." },
+        "is_me": { "type": "boolean", "description": "true when this side is one of the user's own names, phones or accounts." }
+      },
+      "required": ["name"]
+    },
+    "Money": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "value": { "type": ["string", "null"], "pattern": "^[0-9]+(\\.[0-9]{1,3})?$", "description": "Decimal string (\"150000.00\"), never a float. null = unreadable." },
+        "minor": { "type": ["integer", "null"], "minimum": 1, "description": "What the ledger stores: integer minor units of the currency." },
+        "currency": { "type": ["string", "null"], "enum": ["SDG", "USD", "CNY", "QAR", "SAR", "AED", "GBP", "CAD", "OMR", "EGP", "KWD", "JPY", null] }
+      },
+      "required": ["value", "minor", "currency"]
+    },
+    "Verify": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "field": { "type": "string", "enum": ["transaction_id", "timestamp", "sender", "recipient", "amount", "currency", "kind", "service_type"] },
+        "reason": { "type": "string", "maxLength": 200 }
+      },
+      "required": ["field", "reason"]
+    },
+    "ReceiptItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "description": "Ledger row id (m_… with a reference, t_… without)." },
+        "item_no": { "type": "integer", "minimum": 1, "description": "Which input item it came from." },
+        "transaction_id": { "type": ["string", "null"], "maxLength": 100, "description": "رقم العمليّة أو كود المرجع؛ null إن لم يُقرأ." },
+        "timestamp": {
+          "type": ["string", "null"],
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(Z|[+-]\\d{2}:\\d{2})$",
+          "description": "ISO 8601 with the offset of the place it happened (2026-06-07T14:30:00+02:00). null if unreadable."
+        },
+        "time_known": { "type": "boolean", "description": "false when only the date was printed (time set to 00:00:00)." },
+        "sender": { "$ref": "#/definitions/Party" },
+        "recipient": { "$ref": "#/definitions/Party" },
+        "kind": { "type": ["string", "null"], "enum": ["income", "expense", "transfer", null] },
+        "amount": { "$ref": "#/definitions/Money" },
+        "fee": { "oneOf": [{ "$ref": "#/definitions/Money" }, { "type": "null" }] },
+        "service_type": {
+          "type": "string",
+          "enum": ["utility", "telecom", "commercial_supply", "retail", "logistics", "remittance", "bank_transfer", "salary", "rent",
+                   "government_fee", "education", "health", "fuel", "subscription", "cash", "other"]
+        },
+        "service_label": { "type": ["string", "null"], "maxLength": 100, "description": "The service as printed or as the user named it (\"تموين وقود تجاري\")." },
+        "project_id": { "type": "string" },
+        "project_name": { "type": "string", "description": "اسم المشروع (افتراضيّاً: عامّ / General)." },
+        "category_id": { "type": "string" },
+        "category": { "type": "string", "description": "The category's name in the user's language." },
+        "raw_source_type": { "$ref": "#/definitions/SourceType" },
+        "status": { "type": "string", "enum": ["verified", "requires_verification"], "description": "requires_verification exactly when verify is not empty." },
+        "verify": { "type": "array", "items": { "$ref": "#/definitions/Verify" } },
+        "duplicate_of": { "type": ["string", "null"], "description": "Id of an existing entry with the same reference; this row is not booked." }
+      },
+      "required": ["id", "item_no", "transaction_id", "timestamp", "sender", "recipient", "kind", "amount", "service_type",
+                   "project_id", "project_name", "category_id", "category", "raw_source_type", "status", "verify", "duplicate_of"]
+    }
+  }
+}

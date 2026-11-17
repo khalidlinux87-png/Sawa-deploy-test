@@ -1,0 +1,55 @@
+{
+  "batch_id": "imp_sawa_984125",
+  "total_processed": 2,
+  "counts": { "receipts": 2, "verified": 1, "requires_verification": 1, "duplicates": 0, "failed_items": 0 },
+  "receipts": [
+    {
+      "id": "m_3f9a0c41d2e87b5a19c6f0aa",
+      "item_no": 1,
+      "transaction_id": "TXN-88492031",
+      "timestamp": "2026-06-07T14:30:00+02:00",
+      "time_known": true,
+      "sender": { "name": "خالد", "account_identifier": "+249123456789", "is_me": true },
+      "recipient": { "name": "شركة النحلة للبترول", "account_identifier": "ACC-99281", "is_me": false },
+      "kind": "expense",
+      "amount": { "value": "150000.00", "minor": 15000000, "currency": "SDG" },
+      "fee": null,
+      "service_type": "fuel",
+      "service_label": "تموين وقود تجاري",
+      "project_id": "p_4d2b7e",
+      "project_name": "إمدادات اللوجستيات",
+      "category_id": "c_ops_supplies",
+      "category": "مؤن التشغيل",
+      "raw_source_type": "image_ocr",
+      "status": "verified",
+      "verify": [],
+      "duplicate_of": null
+    },
+    {
+      "id": "t_91b04e7a",
+      "item_no": 2,
+      "transaction_id": null,
+      "timestamp": "2026-06-08T09:15:00+02:00",
+      "time_known": true,
+      "sender": { "name": "خالد", "account_identifier": null, "is_me": true },
+      "recipient": { "name": "مؤسّسة الأمل لمواد البناء", "account_identifier": null, "is_me": false },
+      "kind": "expense",
+      "amount": { "value": null, "minor": null, "currency": "SDG" },
+      "fee": null,
+      "service_type": "commercial_supply",
+      "service_label": "توريد مواد بناء",
+      "project_id": "p_4d2b7e",
+      "project_name": "إمدادات اللوجستيات",
+      "category_id": "c_maintenance",
+      "category": "صيانة",
+      "raw_source_type": "image_ocr",
+      "status": "requires_verification",
+      "verify": [
+        { "field": "transaction_id", "reason": "لا يظهر رقم عمليّة على الإيصال" },
+        { "field": "amount", "reason": "الإجماليّ ممزّق في الصورة" }
+      ],
+      "duplicate_of": null
+    }
+  ],
+  "failed_items": []
+}

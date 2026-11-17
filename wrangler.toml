@@ -1,5 +1,10 @@
-name = "sawa-api"
+name = "sawa-deploy-test"
 main = "worker-3.js"
 compatibility_date = "2025-06-01"
+# C307: keep variables added in the Cloudflare dashboard (a deploy from GitHub used to wipe Text-type ones)
+keep_vars = true
+[vars]
+TURN_PROVIDER = "pair"
+
 [triggers]
 crons = ["*/5 * * * *"]

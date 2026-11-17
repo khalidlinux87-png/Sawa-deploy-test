@@ -1,4 +1,5 @@
 import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u0648\u0633\u0637\u0627\u0621 TURN \u0628\u0637\u0644\u0628 STUN \u0639\u0628\u0631 TCP (\u0645\u0631\u0627\u0642\u0628\u0629 \u0627\u0644\u062e\u062f\u0645\u0627\u062a)
+import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worker.mjs";   // C263: \u0627\u0644\u0645\u062d\u0627\u0633\u0628 \u0627\u0644\u0634\u062e\u0635\u064a\u0651 (pfm/DESIGN.md)
 /* ============================================================
    worker.js \u2014 \u0633\u0648\u0627 \u00b7 applyEdit (v2: \u0627\u0644\u062a\u062d\u0642\u0651\u0642 + \u0627\u0644\u0643\u062a\u0627\u0628\u0629 \u0625\u0644\u0649 Firestore)
    ------------------------------------------------------------
@@ -12,7 +13,7 @@ import { connect } from "cloudflare:sockets";   // C178: \u0641\u062d\u0635 \u06
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v122-callosr";      // \u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u2014 \u062a\u0638\u0647\u0631 \u0641\u064a \u0643\u0644\u0651 \u0631\u062f\u0651 (C218: \u062a\u0633\u0631\u064a\u0639 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u00b7 \u064a\u0634\u0645\u0644 C214\u2013C217)
+const VER = "v140-callosr";    // call telemetry keeps the iOS audio route/mode (osr) for groups and rooms
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -558,6 +559,16 @@ function indexWrite(uid, gid, name, role, now) {
 }
 
 /* ---------- 7) \u0627\u0644\u0639\u0645\u0644\u064a\u0651\u0629: person.set (\u062d\u0642\u0644\u064a\u0651 \u2014 \u0627\u0644\u0623\u062d\u062f\u062b \u064a\u0641\u0648\u0632) ---------- */
+/* C271 (v126): \u0642\u0627\u0639\u062f\u0629 \u00ab\u0627\u0644\u062d\u064a\u0651\u00bb \u2014 \u0646\u0642\u064a\u0651\u0629 (\u062a\u064f\u062e\u062a\u0628\u064e\u0631 \u0641\u064a self-alive.test.js).
+   f = { kinship, alive, claimedByCaller } \u21d2 \u0633\u0628\u0628\u064c \u064a\u062d\u0648\u064a \u00abnot allowed\u00bb (\u0631\u0641\u0636\u064c \u0646\u0647\u0627\u0626\u064a\u0651 \u0641\u064a \u0637\u0627\u0628\u0648\u0631 sawa-sync) \u0623\u0648 null.
+   \u00ab\u0646\u0641\u0633\u064a\u00bb \u0627\u0644\u0645\u062e\u0632\u064e\u0651\u0646\u0629 = \u0635\u0627\u062d\u0628 \u0627\u0644\u0634\u062c\u0631\u0629 \u00b7 claimedByCaller = \u0627\u0644\u0634\u062e\u0635 \u0627\u0644\u0630\u064a \u0631\u0628\u0637 \u0628\u0647 \u0627\u0644\u0645\u062a\u0651\u0635\u0644\u064f \u062d\u0633\u0627\u0628\u0647 (members/{uid}.personId). */
+const SELF_KIN = "\u0646\u0641\u0633\u064a";
+function selfDeceasedRule(f) {
+  if (!f || f.alive !== false) return null;
+  if (f.kinship === SELF_KIN) return "not allowed: the tree owner's own profile cannot be marked deceased";
+  if (f.claimedByCaller) return "not allowed: you cannot mark your own profile as deceased";
+  return null;
+}
 async function opPersonSet(uid, payload, env) {
   if (!env.SA_JSON) throw new Error("SA_JSON secret missing");
   const sa = JSON.parse(env.SA_JSON);
@@ -592,6 +603,18 @@ async function opPersonSet(uid, payload, env) {
       return { applied: false, queued: true, reviewId: rid, reason: "editing a deleted person" };
     }
   } else { pid = crypto.randomUUID(); creating = true; }
+
+  // C271 (v126): \u0645\u0644\u0641\u0651 \u0635\u0627\u062d\u0628 \u0627\u0644\u062d\u0633\u0627\u0628 \u0644\u0627 \u064a\u064f\u0633\u062c\u064e\u0651\u0644 \u0645\u062a\u0648\u0641\u0651\u0649 \u2014 \u0646\u0633\u062e\u0629 \u0627\u0644\u062e\u0627\u062f\u0645 \u0645\u0646 selfDeceasedBlock \u0641\u064a app.p2.js
+  if ((("alive" in fields) && fields.alive === false) || (("kinship" in fields) && fields.kinship === SELF_KIN)) {
+    const cur = creating ? null : await fsGet(token, "groups/" + groupId + "/persons/" + pid).catch(() => null);
+    const mem = creating ? null : await fsGet(token, "groups/" + groupId + "/members/" + uid).catch(() => null);
+    const why = selfDeceasedRule({
+      kinship: ("kinship" in fields) ? String(fields.kinship || "") : (fstr(cur, "kinship") || ""),
+      alive: ("alive" in fields) ? fields.alive : !(cur && cur.fields && cur.fields.alive && cur.fields.alive.booleanValue === false),
+      claimedByCaller: !!mem && fstr(mem, "personId") === pid,
+    });
+    if (why) throw new Error(why);
+  }
 
   // v39: \u00ab\u0627\u0644\u0623\u062d\u062f\u062b \u064a\u0641\u0648\u0632\u00bb \u0644\u0643\u0644\u0651 \u062d\u0642\u0644 \u2014 \u0627\u0644\u0639\u0645\u064a\u0644 \u064a\u0631\u0633\u0644 \u0648\u0642\u062a \u062a\u0639\u062f\u064a\u0644\u0647 (ts)\u061b \u062d\u0642\u0644\u064c \u0643\u064f\u062a\u0628 \u0641\u064a \u0627\u0644\u062e\u0627\u062f\u0645 \u0628\u0639\u062f\u0647 \u064a\u064f\u062a\u0631\u0643 \u0643\u0645\u0627 \u0647\u0648 (\u0643\u0627\u0646 \u0627\u0644\u0645\u062a\u0623\u062e\u0651\u0631 \u0648\u0635\u0648\u0644\u0627\u064b \u064a\u0645\u0633\u062d \u0627\u0644\u0623\u062d\u062f\u062b)
   const editTs = Number(payload && payload.ts) || 0, exFts = (!creating && (await fsGet(token, "groups/" + groupId + "/persons/" + pid).catch(() => null)) || null);
@@ -876,6 +899,7 @@ async function opBulkImport(uid, payload, env, claims) {
     const lid = (p.localId && segOk(String(p.localId))) ? String(p.localId) : crypto.randomUUID();
     const fid = lid; map[p.localId || lid] = fid;
     if (p.kinship === "\u0646\u0641\u0633\u064a") selfCount++;
+    if (selfDeceasedRule({ kinship: p.kinship, alive: p.alive })) { p.alive = true; delete p.death_date; delete p.deathYear; }   // C271: \u00ab\u0646\u0641\u0633\u064a\u00bb \u062d\u064a\u064c\u0651 \u062f\u0627\u0626\u0645\u0627\u064b (\u0627\u0644\u0631\u0641\u0639 \u0627\u0644\u0643\u0627\u0645\u0644 \u0644\u0627 \u064a\u0641\u0634\u0644 \u0628\u0633\u0628\u0628\u0647)
     const f = { deleted: { booleanValue: false }, createdTs: { timestampValue: now }, updatedTs: { timestampValue: now } };
     const ftsSub = {};
     for (const k of ALLOWED) if (k in p) { f[k] = toFsValue(capVal(k === "locations" ? cleanLocations(p[k]) : p[k])); ftsSub[k] = { timestampValue: now }; }
@@ -2012,8 +2036,9 @@ async function opChatSend(uid, payload, env, ctx) {
     else if (payload.msg.reply.day) msg.reply = { id: msg.reply.id, by: null, text: "", day: rday, missing: true };
     else msg.reply.unv = true;   // \u0639\u0645\u064a\u0644\u064c \u0642\u062f\u064a\u0645 \u0644\u0645 \u064a\u0631\u0633\u0644 \u064a\u0648\u0645 \u0627\u0644\u0623\u0635\u0644 \u21d2 \u064a\u0628\u0642\u0649 \u0646\u0635\u0651\u0647 \u0645\u0648\u0633\u0648\u0645\u0627\u064b \u00ab\u063a\u064a\u0631 \u0645\u062a\u062d\u0642\u064e\u0651\u0642\u00bb (\u0627\u0644\u0639\u0645\u064a\u0644 \u0627\u0644\u062c\u062f\u064a\u062f \u064a\u0631\u0633\u0644 \u0627\u0644\u064a\u0648\u0645 \u062f\u0627\u0626\u0645\u0627\u064b)
   }
-  const dis = fsInt(c, "disappear");
-  if (dis > 0) msg.exp = ts + dis * 1000;
+  const dis = fsInt(c, "disappear") > 0 ? Math.max(fsInt(c, "disappear"), DIS_MIN_S) : 0;   // C315: never under 3 months
+  // C314: group tools (tasks, poll, bill, fund) are working records and do not expire with disappearing messages (a task list was being deleted)
+  if (dis > 0 && ["tasks", "poll", "bill", "fund"].indexOf(msg.type) < 0) msg.exp = ts + dis * 1000;
   const sendWrites = (sh) => (msg.extra && msg.extra.mid ? [{ delete: DOC_ROOT + "/mediaq/" + cid + "~" + msg.extra.mid }] : []).concat([
     { update: { name: DOC_ROOT + "/chats/" + cid + "/days/" + sh.key, fields: { msgs: { mapValue: { fields: { [msg.id]: toFsValue(msg) } } } } },
       updateMask: { fieldPaths: [fp("msgs", msg.id)] } },
@@ -2079,12 +2104,13 @@ async function deleteMedia(token, cid, mid) {
 }
 /* v35: \u062d\u062c\u0632 \u0627\u0644\u0631\u0641\u0639 \u2014 \u0627\u0644\u062c\u0647\u0627\u0632 \u064a\u0637\u0644\u0628 \u0627\u0644\u0625\u0630\u0646 \u0642\u0628\u0644 \u0631\u0641\u0639 \u0623\u064a\u0651 \u0648\u0633\u064a\u0637 (\u0627\u0644\u0642\u0648\u0627\u0639\u062f \u062a\u0631\u0641\u0636 \u0648\u0633\u064a\u0637\u0627\u064b \u0628\u0644\u0627 \u062d\u062c\u0632 \u0641\u064a mediaq).
    \u062d\u062f\u064c\u0651 \u064a\u0648\u0645\u064a\u0651 \u0644\u0643\u0644\u0651 \u0645\u0633\u062a\u062e\u062f\u0645\u060c \u0648\u0645\u0627 \u0644\u0645 \u064a\u064f\u0631\u0633\u064e\u0644 \u062e\u0644\u0627\u0644 \u0662\u0664 \u0633\u0627\u0639\u0629 \u064a\u062d\u0630\u0641\u0647 \u0627\u0644\u0640Cron (\u0643\u0627\u0646\u062a \u0627\u0644\u0631\u0641\u0639\u0627\u062a \u0627\u0644\u0645\u062a\u0631\u0648\u0643\u0629 \u062a\u0628\u0642\u0649 \u0625\u0644\u0649 \u0627\u0644\u0623\u0628\u062f = \u062a\u062e\u0632\u064a\u0646\u064c \u0645\u062c\u0651\u0627\u0646\u064a\u0651 \u0628\u0644\u0627 \u062d\u062f\u0651). */
-const MEDIA_DAY_MAX = 300 * 1024 * 1024;
+const MEDIA_DAY_MAX = 300 * 1024 * 1024;   // 300 ميغابايت يومياً لكلّ مستخدم
+const MEDIA_MAX = 70 * 1024 * 1024, MEDIA_MAX_CHUNKS = 140;   // حدّ الوسيط الواحد (فيديو/ملفّ) — يطابق sawa-chat.js وقواعد Firestore (n ≤ 140)
 async function opMediaBegin(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const { cid, mid } = payload || {}, size = Math.floor(Number((payload || {}).size) || 0);
   if (!MEDIA_ID.test(String(mid || ""))) throw new Error("bad media id");
-  if (!(size > 0 && size <= 16 * 1024 * 1024)) throw new Error("bad size");
+  if (!(size > 0 && size <= MEDIA_MAX)) throw new Error("bad size");
   await requireChatMember(token, cid, uid);
   const day = dayKey(Date.now()), q = await fsGet(token, "quota/" + uid).catch(() => null);
   const used = q && fstr(q, "d") === day ? fsInt(q, "bytes") : 0;
@@ -2253,14 +2279,16 @@ async function opChatSettings(uid, payload, env) {
     const mem = await fsGet(token, "groups/" + cid.slice(4) + "/members/" + uid).catch(() => null);
     if (["owner", "editor"].indexOf(fstr(mem, "role")) < 0) throw new Error("only family editors can change this");
   }
-  const allowed = [0, 3600, 86400, 604800, 7776000];
-  const dis = Number(payload.disappear || 0);
+  // C315: disappearing messages last at least 3 months (older apps that still send 1 h / 24 h / 7 days get 3 months)
+  const allowed = [0, 3600, 86400, 604800, DIS_MIN_S, 15552000, 31536000];
+  let dis = Number(payload.disappear || 0);
   if (allowed.indexOf(dis) < 0) throw new Error("bad value");
+  if (dis > 0 && dis < DIS_MIN_S) dis = DIS_MIN_S;
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: { disappear: { integerValue: String(dis) }, disappearBy: { stringValue: uid }, disOn: { booleanValue: true } } }, updateMask: { fieldPaths: ["disappear", "disappearBy", "disOn"] } }]);
   return { disappear: dis };
 }
 // \u0625\u0639\u062f\u0627\u062f\u0627\u062a\u064a \u0641\u064a \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0627\u062a \u062a\u062a\u0632\u0627\u0645\u0646 \u0628\u064a\u0646 \u0623\u062c\u0647\u0632\u062a\u064a: \u0623\u0631\u0634\u0641\u0629\u060c \u062a\u062b\u0628\u064a\u062a\u060c \u0643\u062a\u0645\u060c \u0642\u0641\u0644\u060c \u0645\u062c\u0644\u0651\u062f\u0627\u062a\u060c \u0633\u0645\u0627\u062a\u060c \u0646\u063a\u0645\u0627\u062a\u060c \u0645\u0645\u064a\u0651\u0632\u0629\u060c \u0645\u062d\u0630\u0648\u0641\u0629 \u0639\u0646\u062f\u064a\u060c \u0645\u062d\u0638\u0648\u0631\u0648\u0646
-const PREF_KEYS = ["archived", "pinned", "muted", "locked", "folders", "folderOf", "themes", "tones", "starred", "hidden", "blocked", "drafts", "cleared", "broadcasts", "nick"];
+const PREF_KEYS = ["archived", "pinned", "muted", "locked", "folders", "folderOf", "themes", "tones", "starred", "hidden", "blocked", "drafts", "cleared", "broadcasts", "nick", "hideSeen"];   // C314: hideSeen = hide my last seen
 // \u0627\u0644\u062a\u0633\u0645\u064a\u0627\u062a: \u062d\u062a\u0651\u0649 \u0663\u0660\u0660 \u062c\u0647\u0629 \u0627\u062a\u0651\u0635\u0627\u0644\u060c \u0643\u0644\u0651 \u0627\u0633\u0645 \u2264 \u0664\u0660 \u062d\u0631\u0641\u0627\u064b
 function capNick(v) {
   const o = {}; let n = 0;
@@ -2297,6 +2325,24 @@ async function opChatPrefs(uid, payload, env) {
   return { prefs: data };
 }
 /* \u062a\u0646\u0638\u064a\u0641 \u0627\u0644\u0631\u0633\u0627\u0626\u0644 \u0627\u0644\u0645\u0624\u0642\u0651\u062a\u0629 (Cron \u0643\u0644\u0651 \u0661\u0665 \u062f\u0642\u064a\u0642\u0629): \u0645\u062d\u0627\u062f\u062b\u0627\u062a\u064c \u0641\u064a\u0647\u0627 disappear > 0 \u21d2 \u064a\u064f\u062d\u0630\u0641 \u0645\u0627 \u0627\u0646\u062a\u0647\u0649 \u0623\u062c\u0644\u0647 */
+// C315: disappearing messages: at least 3 months, a push warning 3 days before they go, and starred messages are never deleted.
+const DIS_MIN_S = 7776000, DIS_MIN_MS = DIS_MIN_S * 1000, DIS_WARN_MS = 3 * 86400000;
+// Effective deletion time: messages sent with a shorter timer (before C315) still wait 3 months from when they were sent.
+function disExp(m) { return m && m.exp ? Math.max(Number(m.exp) || 0, (Number(m.ts) || 0) + DIS_MIN_MS) : 0; }
+// Ids of this chat's messages that any member starred (chat prefs "starred": [{ id, conversationId }]).
+async function disStarred(token, c, cid) {
+  const keep = new Set(), members = fsArr(c, "members").filter(u => segOk(String(u || ""))).slice(0, 100);
+  if (!members.length) return keep;
+  const res = await gfetch(FS_BASE + ":batchGet", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ documents: members.map(u => DOC_ROOT + "/accounts/" + u + "/chatprefs/main") }) });
+  if (!res.ok) throw new Error("starred lookup " + res.status);   // unknown => delete nothing this round
+  for (const r of (await res.json()) || []) {
+    if (!r.found) continue;
+    let d = {}; try { d = JSON.parse(fstr(r.found, "data") || "{}"); } catch (e) { d = {}; }
+    for (const x of Array.isArray(d.starred) ? d.starred : []) if (x && x.id && (!x.conversationId || x.conversationId === cid)) keep.add(String(x.id));
+  }
+  return keep;
+}
 async function cleanupDisappearing(env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   // v35: \u064a\u0645\u0631\u0651 \u0639\u0644\u0649 \u0643\u0644\u0651 \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0627\u062a \u0628\u0627\u0644\u062f\u0648\u0631 (\u0645\u0624\u0634\u0651\u0631\u064c \u0645\u062d\u0641\u0648\u0638 \u0641\u064a meta/cleanup) \u2014 \u0643\u0627\u0646 \u064a\u0639\u0627\u0644\u062c \u0623\u0648\u0651\u0644 \u0661\u0660 \u0645\u062d\u0627\u062f\u062b\u0627\u062a \u0641\u0642\u0637 \u0625\u0644\u0649 \u0627\u0644\u0623\u0628\u062f.
@@ -2331,12 +2377,26 @@ async function cleanupDisappearing(env) {
   for (const c of rows.concat(legacy)) {
     const cid = c.name.split("/").pop();
     const days = await fsList(token, "chats/" + cid + "/days");
-    let pending = 0;
+    let pending = 0, soonest = 0;
+    let keep = null;   // C315: starred ids, fetched only when something is due
     for (const d of days) {
       const msgs = (d.fields && d.fields.msgs && d.fields.msgs.mapValue.fields) || {};
       const ids = Object.keys(msgs);
-      const gone = ids.filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && m.exp < now; });
-      pending += ids.filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && m.exp >= now; }).length;
+      let gone = ids.filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && disExp(m) < now; });
+      const live = ids.filter(id => { const m = fsToJs(msgs[id]); return m && m.exp && disExp(m) >= now; });
+      pending += live.length;
+      for (const id of live) { const e = disExp(fsToJs(msgs[id])); if (!soonest || e < soonest) soonest = e; }
+      if (gone.length || (live.length && soonest - now < DIS_WARN_MS)) {
+        if (!keep) { try { keep = await disStarred(token, c, cid); } catch (e) { slog("warn", "dis.starred", { cid, err: e && e.message }); keep = null; } }
+        if (!keep) { pending += gone.length; continue; }   // could not read stars: keep everything for now
+        // Starred messages lose their timer for good
+        const kept = ids.filter(id => keep.has(id) && (gone.indexOf(id) >= 0 || live.indexOf(id) >= 0));
+        if (kept.length) {
+          await fsCommit(token, [{ update: { name: d.name, fields: {} }, updateMask: { fieldPaths: kept.map(id => fp("msgs", id, "exp")) } }]).catch(() => {});
+          gone = gone.filter(id => !keep.has(id));
+          pending -= live.filter(id => keep.has(id)).length;
+        }
+      }
       if (!gone.length) continue;
       pending += gone.length;   // \u0645\u0627 \u0644\u0645 \u064a\u064f\u062d\u0630\u0641 \u0641\u064a \u0647\u0630\u0647 \u0627\u0644\u062f\u0648\u0631\u0629 \u064a\u064f\u062d\u0633\u0628 \u062d\u062a\u0651\u0649 \u064a\u064f\u062d\u0630\u0641
       let budget = LIM(env).dis; const ready = [];
@@ -2349,6 +2409,9 @@ async function cleanupDisappearing(env) {
       }
       if (!ready.length) continue;
       pending -= ready.length;
+      // C314: an expired task list (sent before the exemption) also leaves the My tasks index
+      const tdel = ready.filter(id => { const m = fsToJs(msgs[id]); return m && m.type === "tasks"; }).map(id => ({ delete: DOC_ROOT + "/tasklists/" + cid + "~" + id }));
+      if (tdel.length) await fsCommit(token, tdel).catch(() => {});
       if (ready.length === ids.length) await fsCommit(token, [{ delete: d.name }]);
       else await fsCommit(token, [{ update: { name: d.name, fields: {} }, updateMask: { fieldPaths: ready.map(id => fp("msgs", id)) } }]);
       removed += ready.length;
@@ -2357,6 +2420,15 @@ async function cleanupDisappearing(env) {
         updateMask: { fieldPaths: ["last.del", "last.text"] } }]).catch(() => {});
     }
     // \u0627\u0644\u0645\u0624\u0642\u0651\u062a\u0629 \u0645\u0637\u0641\u0623\u0629 \u0648\u0644\u0645 \u064a\u0628\u0642\u064e \u0645\u0627 \u0644\u0647 \u0623\u062c\u0644 \u21d2 \u062a\u062e\u0631\u062c \u0645\u0646 \u0627\u0644\u062f\u0648\u0631
+    // C315: one push to the members 3 days before the next messages are deleted (at most once every 3 days per chat)
+    if (pending > 0 && soonest && soonest - now < DIS_WARN_MS && now - fsInt(c, "disWarnTs") > DIS_WARN_MS) {
+      const name = fstr(c, "name"), daysLeft = Math.max(1, Math.ceil((soonest - now) / 86400000));
+      const body = "\u0633\u062a\u064f\u062d\u0630\u0641 \u0631\u0633\u0627\u0626\u0644 \u0645\u0624\u0642\u0651\u062a\u0629 \u062e\u0644\u0627\u0644 " + daysLeft + " \u0623\u064a\u0651\u0627\u0645 \u2014 \u0627\u062d\u0641\u0638 \u0627\u0644\u0645\u0647\u0645\u0651 \u0628\u0627\u0644\u0646\u062c\u0645\u0629 \u2b50";
+      try {
+        await pushTo(token, fsArr(c, "members"), strData({ t: "msg", cid, title: name || "\u0633\u0648\u0627", body, ts: Date.now() }));
+        await fsCommit(token, [{ update: { name: c.name, fields: { disWarnTs: { integerValue: String(now) } } }, updateMask: { fieldPaths: ["disWarnTs"] } }]);
+      } catch (e) { slog("warn", "dis.warn", { cid, err: e && e.message }); }
+    }
     if (!fsInt(c, "disappear") && pending <= 0) await fsCommit(token, [{ update: { name: c.name, fields: {} }, updateMask: { fieldPaths: ["disOn"] } }]).catch(() => {});
   }
   return { chats: rows.length + legacy.length, removed };
@@ -2862,6 +2934,91 @@ async function opChatMyTasks(uid, payload, env) {
   const lists = rows.filter(r => chats[r.cid]).map(r => ({ cid: r.cid, chat: chats[r.cid].name, admin: chats[r.cid].admin, day: r.day, id: r.id, by: r.by, title: r.title, ts: r.ts,
     tasks: (r.tasks || []).map(t => ({ id: t.id, text: t.text, assigneeId: t.a || null, dueAt: t.due || null, status: t.st, note: t.note || "", doneBy: t.db || null, doneAt: t.da || null })) }));
   return { lists };
+}
+
+/* ---------- C271 (v126): \u0645\u0648\u0627\u0639\u064a\u062f \u0635\u0644\u0629 \u0627\u0644\u0631\u062d\u0645 \u0627\u0644\u0645\u0631\u0646\u0629 \u2014 kin.remind.set + \u0627\u0644\u0645\u062c\u062f\u0648\u0650\u0644 ----------
+   kinrem/{uid} = { on, hour (0\u201323, \u0628\u062a\u0648\u0642\u064a\u062a \u0627\u0644\u0645\u0633\u062a\u062e\u062f\u0645), tz (getTimezoneOffset \u0628\u0627\u0644\u062f\u0642\u0627\u0626\u0642), lang, items: [{ id, n: \u0627\u0644\u0627\u0633\u0645 \u0627\u0644\u0623\u0648\u0651\u0644, e: \u0627\u0644\u0645\u062f\u0651\u0629 \u0628\u0627\u0644\u0623\u064a\u0651\u0627\u0645 1\u2013365, l: \u0645\u0631\u062c\u0639 \u0622\u062e\u0631 \u062a\u0648\u0627\u0635\u0644 (ms) }],
+                    sent: { id: \u0622\u062e\u0631 \u062a\u0630\u0643\u064a\u0631\u064d \u0644\u0647 }, last: \u0622\u062e\u0631 \u0625\u0634\u0639\u0627\u0631, rq: \u0645\u0648\u0639\u062f \u0627\u0644\u062a\u0634\u063a\u064a\u0644 \u0627\u0644\u0642\u0627\u062f\u0645 (ms\u060c 0 = \u0644\u0627 \u0634\u064a\u0621) }
+   \u0627\u0644\u0642\u0627\u0639\u062f\u0629: \u064a\u062d\u064a\u0646 \u0627\u0644\u0642\u0631\u064a\u0628 \u064a\u0648\u0645 (max(l, sent) + e) \u0641\u064a \u00ab\u0627\u0644\u0633\u0627\u0639\u0629\u00bb \u0627\u0644\u0645\u062e\u062a\u0627\u0631\u0629. \u0627\u0644\u0645\u062a\u0623\u062e\u0651\u0631 \u0623\u0635\u0644\u0627\u064b \u21d0 \u0623\u0648\u0651\u0644 \u00ab\u0633\u0627\u0639\u0629\u00bb \u0642\u0627\u062f\u0645\u0629.
+   \u0625\u0634\u0639\u0627\u0631\u064c \u0648\u0627\u062d\u062f \u064a\u062c\u0645\u0639 \u0643\u0644\u0651 \u0645\u0646 \u062d\u0627\u0646 (\u0644\u0627 \u0625\u0634\u0639\u0627\u0631 \u0644\u0643\u0644\u0651 \u0642\u0631\u064a\u0628)\u060c \u0648\u0644\u0627 \u0623\u0643\u062b\u0631 \u0645\u0646 \u0625\u0634\u0639\u0627\u0631\u064d \u0643\u0644\u0651 \u0661\u0662 \u0633\u0627\u0639\u0629. \u0648\u0627\u0644\u0645\u062f\u0651\u0629 \u0628\u0639\u062f \u0627\u0644\u062a\u0630\u0643\u064a\u0631 \u062a\u0628\u062f\u0623 \u0645\u0646 \u062c\u062f\u064a\u062f
+   (\u064a\u0648\u0645\u064a\u0651\u0627\u064b \u21d0 \u063a\u062f\u0627\u064b\u060c \u0623\u0633\u0628\u0648\u0639\u064a\u0651\u0627\u064b \u21d0 \u0628\u0639\u062f \u0623\u0633\u0628\u0648\u0639) \u0625\u0644\u0649 \u0623\u0646 \u064a\u0633\u062c\u0651\u0644 \u0627\u0644\u0645\u0633\u062a\u062e\u062f\u0645 \u062a\u0648\u0627\u0635\u0644\u0647 \u0641\u064a\u062a\u063a\u064a\u0651\u0631 l. */
+const KIN_DAY = 86400000, KIN_MIN_GAP = 12 * 3600000, KIN_MAX_ITEMS = 300;
+function kinHour(h) { const x = Math.round(Number(h)); return x >= 0 && x <= 23 ? x : 18; }
+function kinTz(z) { const x = Math.round(Number(z)); return x >= -840 && x <= 840 ? x : 0; }
+function kinDayStart(t, tz) { const off = -kinTz(tz) * 60000; return Math.floor((t + off) / KIN_DAY) * KIN_DAY - off; }
+// \u0623\u0648\u0651\u0644 \u00ab\u0633\u0627\u0639\u0629 \u062a\u0630\u0643\u064a\u0631\u00bb \u0628\u0639\u062f t
+function kinSlot(t, hour, tz) { let x = kinDayStart(t, tz) + kinHour(hour) * 3600000; if (x <= t) x += KIN_DAY; return x; }
+// \u0646\u0642\u064a\u0651\u0629: \u0645\u0646 \u062d\u0627\u0646 \u0627\u0644\u0622\u0646\u061f \u0648\u0645\u062a\u0649 \u0627\u0644\u062a\u0634\u063a\u064a\u0644 \u0627\u0644\u0642\u0627\u062f\u0645\u061f
+function kinPlan(doc, now) {
+  const due = [];
+  if (!doc || doc.on === false || !Array.isArray(doc.items) || !doc.items.length) return { due, rq: 0 };
+  const sent = doc.sent || {}, nowSlot = kinSlot(now, doc.hour, doc.tz);
+  let rq = 0;
+  for (const it of doc.items) {
+    const e = Math.round(Number(it.e));
+    if (!(e >= 1 && e <= 365)) continue;
+    const base = Math.max(Number(it.l) || 0, Number(sent[it.id]) || 0);
+    const fireAt = kinDayStart(base + e * KIN_DAY, doc.tz) + kinHour(doc.hour) * 3600000;
+    if (fireAt <= now) due.push(it);
+    const eff = fireAt > now ? fireAt : nowSlot;
+    if (!rq || eff < rq) rq = eff;
+  }
+  return { due, rq };
+}
+function kinItems(list, now) {
+  const seen = {}, out = [];
+  for (const x of (Array.isArray(list) ? list : []).slice(0, KIN_MAX_ITEMS)) {
+    const id = String((x && x.id) || "").slice(0, 80), e = Math.round(Number(x && x.e)), l = Math.round(Number(x && x.l));
+    if (!id || seen[id] || !(e >= 1 && e <= 365)) continue;
+    seen[id] = 1;
+    out.push({ id, n: String((x && x.n) || "").replace(/[\u0000-\u001f<>]/g, "").slice(0, 40), e, l: l > 0 && l <= now + KIN_DAY ? l : now });
+  }
+  return out;
+}
+function kinBody(due, lang) {
+  const en = lang === "en", names = due.map((x) => x.n).filter(Boolean);
+  if (!names.length) return en ? "It's time to check in with your relatives" : "\u062d\u0627\u0646 \u0645\u0648\u0639\u062f \u0627\u0644\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0623\u0642\u0627\u0631\u0628\u0643";
+  if (names.length === 1) return en ? "Time to reach out to " + names[0] : "\u062d\u0627\u0646 \u0645\u0648\u0639\u062f \u0627\u0644\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 " + names[0];
+  if (names.length === 2) return en ? "Time to reach out to " + names[0] + " and " + names[1] : "\u062d\u0627\u0646 \u0645\u0648\u0639\u062f \u0627\u0644\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 " + names[0] + " \u0648" + names[1];
+  return en ? "Time to reach out to " + names.slice(0, 2).join(", ") + " and " + (names.length - 2) + " more"
+            : "\u062d\u0627\u0646 \u0645\u0648\u0639\u062f \u0627\u0644\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 " + names.slice(0, 2).join("\u060c ") + " \u0648" + (names.length - 2) + " \u063a\u064a\u0631\u0647\u0645\u0627";
+}
+function kinDocJs(d) { return d ? fsToJs({ mapValue: { fields: d.fields || {} } }) || {} : {}; }
+async function opKinRemindSet(uid, payload, env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const now = Date.now(), p = payload || {};
+  const on = p.on !== false, items = on ? kinItems(p.items, now) : [];
+  const name = DOC_ROOT + "/kinrem/" + uid;
+  if (!items.length) { await fsCommit(token, [{ delete: name }]); return { kin: 0, next: 0 }; }
+  const prev = kinDocJs(await fsGet(token, "kinrem/" + uid).catch(() => null));
+  const sent = {}, ps = (prev && prev.sent) || {};
+  for (const it of items) if (Number(ps[it.id]) > 0) sent[it.id] = Number(ps[it.id]);
+  const doc = { on: true, hour: kinHour(p.hour), tz: kinTz(p.tz), lang: p.lang === "en" ? "en" : "ar", items, sent, last: Number(prev && prev.last) || 0 };
+  const { rq } = kinPlan(doc, now);
+  await fsCommit(token, [{ update: { name, fields: toFsValue(Object.assign({}, doc, { rq, ts: now })).mapValue.fields } }]);
+  return { kin: items.length, next: rq };
+}
+async function kinReminders(env) {
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const now = Date.now(), L = LIM(env);
+  const res = await gfetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "kinrem" }], where: { compositeFilter: { op: "AND", filters: [
+      { fieldFilter: { field: { fieldPath: "rq" }, op: "GREATER_THAN", value: { integerValue: "0" } } },
+      { fieldFilter: { field: { fieldPath: "rq" }, op: "LESS_THAN_OR_EQUAL", value: { integerValue: String(now) } } }] } }, limit: L.rem + 1 } }) });
+  const rows = ((await res.json()) || []).filter(r => r.document).map(r => r.document);
+  let sent = 0;
+  for (const d of rows.slice(0, L.rem)) {
+    const uid = d.name.split("/").pop(), x = kinDocJs(d);
+    const doc = { on: x.on !== false, hour: kinHour(x.hour), tz: kinTz(x.tz), lang: x.lang === "en" ? "en" : "ar", items: Array.isArray(x.items) ? x.items : [], sent: Object.assign({}, x.sent || {}), last: Number(x.last) || 0 };
+    const { due } = kinPlan(doc, now);
+    const send = due.length > 0 && now - doc.last >= KIN_MIN_GAP;
+    if (send) { for (const it of due) doc.sent[it.id] = now; doc.last = now; }
+    const { rq } = kinPlan(doc, now);
+    // \u0623\u0648\u0651\u0644\u0627\u064b: \u0627\u0644\u0645\u0648\u0639\u062f \u0627\u0644\u0642\u0627\u062f\u0645 (\u0644\u0627 \u062a\u0643\u0631\u0627\u0631 \u0644\u0648 \u062a\u0639\u062b\u0651\u0631 \u0627\u0644\u0625\u0631\u0633\u0627\u0644)
+    await fsCommit(token, [{ update: { name: d.name, fields: { rq: { integerValue: String(rq) }, sent: toFsValue(doc.sent), last: { integerValue: String(doc.last) } } }, updateMask: { fieldPaths: ["rq", "sent", "last"] } }]).catch(e => slog("warn", "kinrem", { err: e && e.message }));
+    if (send) sent += await pushTo(token, [uid], strData({ t: "kin", title: doc.lang === "en" ? "\ud83e\udd32 Family ties" : "\ud83e\udd32 \u0635\u0644\u0629 \u0627\u0644\u0631\u062d\u0645", body: kinBody(due, doc.lang), n: due.length, ts: now }));
+  }
+  return { reminders: rows.length, sent };
 }
 
 // \u0627\u0644\u062a\u0630\u0643\u064a\u0631 (\u0645\u0646 \u0627\u0644\u0645\u062c\u062f\u0648\u0650\u0644): \u0642\u0627\u0626\u0645\u0629\u064c \u0648\u0627\u062d\u062f\u0629 \u0641\u064a \u0643\u0644\u0651 \u062a\u0634\u063a\u064a\u0644
@@ -3710,7 +3867,7 @@ async function opProfileGet(uid, payload, env, claims) {
   const cd = p.code ? { code: p.code, findable: p.findable } : await ensureCode(token, uid, claims, false).catch(() => ({ code: null, findable: true }));
   const emailVerified = await ensureEmailIndex(token, uid, claims, p).catch(() => false);
   return { profile: { name: p.name, phone: p.phone, phoneVerified: !!p.phoneVerified, verifiedBy: p.phoneVerified ? (p.verifiedBy || "whatsapp") : null, emailVerified, email: emailVerified ? claims.email : null, googleName: claims.name || null, code: cd.code, findable: cd.findable,
-    anon: !!(claims.firebase && claims.firebase.sign_in_provider === "anonymous") }, verify: verifyConfig(env) };
+    anon: !!(claims.firebase && claims.firebase.sign_in_provider === "anonymous") }, verify: verifyConfig(env, !!(await otpManager(env, claims))) };
 }
 /* ---------- 43) \u0627\u0644\u062a\u062d\u0642\u0651\u0642 \u0645\u0646 \u0627\u0644\u0647\u0648\u064a\u0651\u0629 (C43) ----------
    \u2022 \u0627\u0644\u0628\u0631\u064a\u062f: Google \u064a\u0648\u062b\u0651\u0642\u0647\u060c \u0648\u062d\u0633\u0627\u0628 \u0627\u0644\u0628\u0631\u064a\u062f \u064a\u0648\u062b\u064e\u0651\u0642 \u0628\u0631\u0627\u0628\u0637 Firebase (email_verified \u0641\u064a \u0627\u0644\u0631\u0645\u0632). \u0646\u0641\u0647\u0631\u0633\u0647 emails/{sha256(\u0627\u0644\u0628\u0631\u064a\u062f)} = { uid } \u0644\u064a\u064f\u0639\u062b\u0631 \u0639\u0644\u064a\u0643 \u0628\u0647.
@@ -3718,9 +3875,22 @@ async function opProfileGet(uid, payload, env, claims) {
      \u0648Meta \u062a\u0633\u062a\u062f\u0639\u064a /wa/webhook \u0641\u0646\u0642\u0631\u0623 \u0631\u0642\u0645 \u0627\u0644\u0645\u0631\u0633\u0644 \u0627\u0644\u0645\u0648\u062b\u064e\u0651\u0642 \u0639\u0646\u062f \u0648\u0627\u062a\u0633\u0627\u0628 \u0648\u0646\u0637\u0627\u0628\u0642 \u0627\u0644\u0631\u0645\u0632. \u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u0630\u064a \u0623\u0631\u0633\u0644 \u0627\u0644\u0631\u0645\u0632 \u0647\u0648 \u0627\u0644\u0630\u064a \u064a\u064f\u0648\u062b\u064e\u0651\u0642 (\u0648\u064a\u062d\u0644\u0651 \u0645\u062d\u0644\u0651 \u0627\u0644\u0645\u0643\u062a\u0648\u0628).
      \u0627\u0644\u0623\u0633\u0631\u0627\u0631: WA_NUMBER (\u0631\u0642\u0645 \u0633\u0648\u0627 \u0628\u0635\u064a\u063a\u0629 \u0623\u0631\u0642\u0627\u0645\u064d \u062f\u0648\u0644\u064a\u0651\u0629 \u0628\u0644\u0627 +) \u00b7 WA_VERIFY_TOKEN (\u0643\u0644\u0645\u0629 \u062a\u062d\u0642\u0651\u0642 \u0627\u0644\u0640webhook) \u00b7 WA_APP_SECRET (\u062a\u0648\u0642\u064a\u0639 Meta)
      \u00b7 \u0627\u062e\u062a\u064a\u0627\u0631\u064a\u0651\u0627\u0646 \u0644\u0644\u0631\u062f\u0651: WA_TOKEN \u0648 WA_PHONE_ID. */
-function verifyConfig(env) {
-  const wa = !!(env.WA_NUMBER && env.WA_VERIFY_TOKEN && env.WA_APP_SECRET);
-  return { whatsapp: wa, waNumber: wa ? String(env.WA_NUMBER).replace(/\D/g, "") : null };
+/* C303: \u0627\u0644\u062a\u062d\u0642\u0651\u0642 \u0628\u0627\u0644\u0631\u0645\u0632 (OTP \u0639\u0628\u0631 \u0648\u0627\u062a\u0633\u0627\u0628) \u0644\u0644\u0645\u062f\u064a\u0631 \u0641\u0642\u0637 \u2014 \u0627\u0644\u0645\u0627\u0644\u0643 (ADMIN_EMAIL) \u0623\u0648 \u0645\u062f\u064a\u0631\u064c \u0641\u064a \u0627\u0644\u0641\u0631\u064a\u0642.
+   \u0627\u0644\u0628\u0627\u0642\u0648\u0646: \u00ab\u0639\u0628\u0631 \u0645\u0639\u0627\u0631\u0641\u0643\u00bb \u0648\u062d\u062f\u0647. \u0627\u0644\u062e\u0627\u062f\u0645 \u064a\u0631\u0641\u0636 phone.start \u0644\u063a\u064a\u0631\u0647\u0645\u060c \u0641\u0644\u0627 \u064a\u064f\u0646\u0634\u0623 \u0631\u0645\u0632\u064c \u064a\u0642\u0628\u0644\u0647 /wa/webhook. */
+async function otpManager(env, claims) { return adminCan(env, claims, "admin").catch(() => null); }
+function verifyConfig(env, mgr) {
+  const wa = !!(env.WA_NUMBER && env.WA_VERIFY_TOKEN && env.WA_APP_SECRET) && !!mgr;
+  const r = { whatsapp: wa, waNumber: wa ? String(env.WA_NUMBER).replace(/\D/g, "") : null, sms: smsReady(env) && !!mgr, mgr: !!mgr };
+  // C306: للمدير فقط — أسماء الأسرار (لا القيم) الناقصة والموجودة، ليعرف لماذا «قيد التجهيز»
+  if (mgr) {
+    const t = twilioCfg(env);
+    const g = gateCfg(env);
+    r.smsMissing = smsReady(env) ? [] : [!g.user && "SMSGATE_USER", !g.pass && "SMSGATE_PASS"].filter(Boolean);   // C312
+    r.smsVia = smsProv(env);
+    r.waMissing = ["WA_NUMBER", "WA_VERIFY_TOKEN", "WA_APP_SECRET"].filter(k => !env[k]);
+    try { r.envSeen = Object.keys(env).filter(k => /twilio|smsgate|^wa_/i.test(k)).sort(); } catch (e) { r.envSeen = []; }
+  }
+  return r;
 }
 async function sha256Hex(t) {
   const h = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t)));
@@ -3740,7 +3910,9 @@ async function ensureEmailIndex(token, uid, claims, p) {
 }
 function otpCode() { const a = new Uint32Array(1); crypto.getRandomValues(a); return String(100000 + (a[0] % 900000)); }
 async function opPhoneStart(uid, payload, env, claims) {
-  const cfg = verifyConfig(env);
+  const mgr = !!(await otpManager(env, claims));
+  if (!mgr) throw new Error("manager_only");   // C303
+  const cfg = verifyConfig(env, mgr);
   if (!cfg.whatsapp) return { enabled: false };
   if (!codeRate(uid, "otp", 6)) throw new Error("rate_limited");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -3762,8 +3934,152 @@ async function opPhoneStatus(uid, payload, env) {
   const c = PROFILE_CACHE.get(uid); if (c) { c.phoneVerified = v; c.phone = phone; }
   const exp = Number(d && d.fields && d.fields.otpExp && d.fields.otpExp.integerValue || 0);
   const vouches = phone ? await vouchCount(token, uid, phone) : { n: 0, names: [] };
-  return { phone, phoneVerified: v, verifiedBy: v ? (fstr(d, "verifiedBy") || "whatsapp") : null, pending: !v && exp > Date.now(), mismatch: fstr(d, "otpMismatch") || null,
+  return { phone, phoneVerified: v, verifiedBy: v ? (fstr(d, "verifiedBy") || "whatsapp") : null, pending: !v && exp > Date.now(), otpOpen: exp > Date.now(), mismatch: fstr(d, "otpMismatch") || null,
     vouches: vouches.n, vouchers: vouches.names, needed: VOUCH_NEEDED };
+}
+/* ---------- C304) \u0631\u0645\u0632 SMS \u0644\u0644\u0645\u062f\u064a\u0631 \u0641\u0642\u0637 (Twilio Verify) ----------
+   Twilio \u064a\u0648\u0644\u0651\u062f \u0627\u0644\u0631\u0645\u0632 \u0648\u064a\u0631\u0633\u0644\u0647 \u0648\u064a\u062a\u062d\u0642\u0651\u0642 \u0645\u0646\u0647 \u2014 \u0644\u0627 \u0646\u062e\u0632\u0651\u0646 \u0627\u0644\u0631\u0645\u0632. \u0646\u062e\u0632\u0651\u0646 \u0641\u0642\u0637 smsPhone/smsExp \u0641\u064a accounts/{uid}.
+   \u0627\u0644\u0623\u0633\u0631\u0627\u0631 (Secret): TWILIO_SID \xb7 TWILIO_TOKEN \xb7 TWILIO_VERIFY_SID. \u0628\u0644\u0627 \u0623\u062d\u062f\u0647\u0627 \u21d2 \xab\u0642\u064a\u062f \u0627\u0644\u062a\u062c\u0647\u064a\u0632\xbb.
+   phone.smsStart \u21d2 \u0631\u0633\u0627\u0644\u0629 \u0625\u0644\u0649 \u0631\u0642\u0645 \u0627\u0644\u062d\u0633\u0627\u0628 \xb7 phone.smsCheck { code } \u21d2 phoneVerified (verifiedBy = "sms"). */
+// C306: يقبل أيضاً أسماء Twilio الشائعة، ويزيل المسافات/الأسطر الملصوقة مع القيم
+function twilioCfg(env) {
+  const v = (...ks) => { for (const k of ks) { const x = env[k]; if (typeof x === "string" && x.trim()) return x.trim(); } return ""; };
+  return { sid: v("TWILIO_SID", "TWILIO_ACCOUNT_SID"), token: v("TWILIO_TOKEN", "TWILIO_AUTH_TOKEN"),
+    vsid: v("TWILIO_VERIFY_SID", "TWILIO_VERIFY_SERVICE_SID", "TWILIO_SERVICE_SID", "TWILIO_VERIFY_SERVICE") };
+}
+function smsReady(env) { return !!smsProv(env); }
+/* C312: \u0628\u0648\u0651\u0627\u0628\u0629 SMS \u0628\u0647\u0627\u062a\u0641 \u0623\u0646\u062f\u0631\u0648\u064a\u062f \u2014 \u062a\u0637\u0628\u064a\u0642 \xabSMS Gateway for Android\xbb (\u0645\u0641\u062a\u0648\u062d \u0627\u0644\u0645\u0635\u062f\u0631\u060c sms-gate.app) \u0641\u064a \u0648\u0636\u0639 \u0627\u0644\u0633\u062d\u0627\u0628\u0629.
+   \u0627\u0644\u062e\u0627\u062f\u0645 \u064a\u0648\u0644\u0651\u062f \u0627\u0644\u0631\u0645\u0632 \u0648\u064a\u062d\u0641\u0638 \u0628\u0635\u0645\u062a\u0647 \u0641\u0642\u0637 (SHA-256 \u0645\u0639 uid)\u060c \u0648\u064a\u0637\u0644\u0628 \u0645\u0646 \u0627\u0644\u0647\u0627\u062a\u0641 \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0645\u0646 \u0634\u0631\u064a\u062d\u062a\u0647.
+   \u0627\u0644\u0623\u0633\u0631\u0627\u0631: SMSGATE_USER \xb7 SMSGATE_PASS (\u0645\u0646 \u0627\u0644\u062a\u0637\u0628\u064a\u0642 \u2190 Cloud Server) \xb7 \u0627\u062e\u062a\u064a\u0627\u0631\u064a\u0651\u0627\u064b SMSGATE_URL (\u062e\u0627\u062f\u0645\u064c \u062e\u0627\u0635\u0651). Twilio \u064a\u064f\u0642\u062f\u064e\u0651\u0645 \u0625\u0646 \u0648\u064f\u062c\u062f. */
+function gateCfg(env) {
+  const v = (k) => (typeof env[k] === "string" ? env[k].trim() : "");
+  return { user: v("SMSGATE_USER"), pass: v("SMSGATE_PASS"), url: (v("SMSGATE_URL") || "https://api.sms-gate.app/3rdparty/v1").replace(/\/+$/, "") };
+}
+function smsProv(env) {
+  const t = twilioCfg(env); if (t.sid && t.token && t.vsid) return "twilio";
+  const g = gateCfg(env); if (g.user && g.pass) return "gate";
+  return null;
+}
+async function gateSend(env, phone, text) {
+  const g = gateCfg(env);
+  let r;
+  try {
+    r = await fetch(g.url + "/message", { method: "POST", headers: { Authorization: "Basic " + btoa(g.user + ":" + g.pass), "Content-Type": "application/json" },
+      body: JSON.stringify({ textMessage: { text }, phoneNumbers: [phone] }) });
+  } catch (e) { slog("warn", "sms.gate", { err: e && e.message }); throw new Error("sms_failed:net"); }
+  if (r.status === 401 || r.status === 403) throw new Error("sms_auth");
+  if (r.status === 429) throw new Error("rate_limited");
+  if (!r.ok) {
+    let t = ""; try { t = await r.text(); } catch (e) {}
+    let why = ""; try { const j = JSON.parse(t); why = j.message || j.error || ""; } catch (e) { why = t; }
+    why = String(why).replace(/[^\x20-\x7e]/g, "").slice(0, 100);   // C313: \u0633\u0628\u0628 \u0627\u0644\u0628\u0648\u0651\u0627\u0628\u0629 \u064a\u0635\u0644 \u0625\u0644\u0649 \u0627\u0644\u0645\u062f\u064a\u0631
+    slog("warn", "sms.gate", { st: r.status, body: why });
+    throw new Error("sms_failed:" + r.status + (why ? ":" + why : ""));
+  }
+  let b = {}; try { b = await r.json(); } catch (e) {}
+  return { id: b.id || null, state: b.state || null };
+}
+const smsHash = (uid, code) => sha256Hex("sawa-sms|" + uid + "|" + code);
+async function twilioVerify(env, path, form) {
+  const t = twilioCfg(env);
+  const r = await fetch("https://verify.twilio.com/v2/Services/" + encodeURIComponent(t.vsid) + "/" + path, {
+    method: "POST", headers: { Authorization: "Basic " + btoa(t.sid + ":" + t.token), "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(form).toString() });
+  let b = {}; try { b = await r.json(); } catch (e) {}
+  if (r.status === 429 || b.code === 60203 || b.code === 20429) throw new Error("rate_limited");
+  if (r.status === 404 || b.code === 20404) throw new Error("sms_expired");
+  if (b.code === 60200 || b.code === 21211 || b.code === 60205 || b.code === 21408) throw new Error("bad_phone");
+  if (r.status === 401 || b.code === 20003) throw new Error("sms_auth");   // C306: SID/Token خاطئان
+  if (!r.ok) { slog("warn", "sms.twilio", { st: r.status, code: b.code || null }); throw new Error("sms_failed:" + (b.code || r.status)); }
+  return b;
+}
+async function opSmsStart(uid, payload, env, claims) {
+  if (!(await otpManager(env, claims))) throw new Error("manager_only");
+  if (!smsReady(env)) return { enabled: false };
+  if (!codeRate(uid, "sms", 3)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  if (!(await rateGate(token, [["sms:u:" + uid, 5, 3600], ["sms:ud:" + uid, 10, 86400]]))) throw new Error("rate_limited");
+  const p = await profileOf(token, uid);
+  const phone = cleanPhone(p.phone);
+  if (!phone) throw new Error("no_phone");
+  if (/^\+249/.test(phone) && !/^\+249\d{9}$/.test(phone)) throw new Error("bad_phone_sd");   // C313: \u0631\u0642\u0645 \u0633\u0648\u062f\u0627\u0646\u064a\u0651 = 249 \u062b\u0645\u0651 \u0669 \u0623\u0631\u0642\u0627\u0645
+  const exp = Date.now() + 10 * 60 * 1000, prov = smsProv(env);
+  const f = { smsPhone: { stringValue: phone }, smsExp: { integerValue: String(exp) } }, mask = ["smsPhone", "smsExp"];
+  if (prov === "gate") {   // C312
+    const code = otpCode();
+    f.smsHash = { stringValue: await smsHash(uid, code) }; f.smsTries = { integerValue: "0" }; mask.push("smsHash", "smsTries");
+    await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields: f }, updateMask: { fieldPaths: mask } }]);   // \u064a\u064f\u062d\u0641\u0638 \u0642\u0628\u0644 \u0627\u0644\u0625\u0631\u0633\u0627\u0644 \u0643\u064a \u0644\u0627 \u062a\u0635\u0644 \u0631\u0633\u0627\u0644\u0629\u064c \u0628\u0631\u0645\u0632\u064d \u063a\u064a\u0631 \u0645\u062d\u0641\u0648\u0638
+    await gateSend(env, phone, "\u0631\u0645\u0632 \u0633\u0648\u0627: " + code + " \u2014 \u0644\u0627 \u062a\u0634\u0627\u0631\u0643\u0647 \u0645\u0639 \u0623\u062d\u062f. \u0635\u0627\u0644\u062d \u0661\u0660 \u062f\u0642\u0627\u0626\u0642.");
+    return { enabled: true, phone, exp, via: "gate" };
+  }
+  await twilioVerify(env, "Verifications", { To: phone, Channel: "sms" });
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields: f }, updateMask: { fieldPaths: mask } }]);
+  return { enabled: true, phone, exp };
+}
+async function opSmsCheck(uid, payload, env, claims) {
+  if (!(await otpManager(env, claims))) throw new Error("manager_only");
+  if (!smsReady(env)) return { enabled: false };
+  const code = String((payload && payload.code) || "").replace(/[\u0660-\u0669]/g, d => "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669".indexOf(d)).replace(/\D/g, "");
+  if (!/^\d{4,10}$/.test(code)) throw new Error("bad_code");
+  if (!codeRate(uid, "smschk", 6)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  if (!(await rateGate(token, [["smschk:u:" + uid, 10, 3600]]))) throw new Error("rate_limited");
+  const acc = await fsGet(token, "accounts/" + uid).catch(() => null);
+  const phone = fstr(acc, "smsPhone"), exp = Number(acc && acc.fields && acc.fields.smsExp && acc.fields.smsExp.integerValue || 0);
+  if (!phone || exp < Date.now()) throw new Error("sms_expired");
+  if (cleanPhone(fstr(acc, "phone")) !== phone) throw new Error("sms_expired");   // \u062a\u063a\u064a\u0651\u0631 \u0627\u0644\u0631\u0642\u0645 \u0628\u0639\u062f \u0627\u0644\u0625\u0631\u0633\u0627\u0644
+  if (smsProv(env) === "gate") {   // C312: \u0645\u0642\u0627\u0631\u0646\u0629 \u0627\u0644\u0628\u0635\u0645\u0629 \xb7 \u0665 \u0645\u062d\u0627\u0648\u0644\u0627\u062a \u062b\u0645\u0651 \u064a\u0644\u0632\u0645 \u0631\u0645\u0632\u064c \u062c\u062f\u064a\u062f
+    const want = fstr(acc, "smsHash"), tries = Number(acc && acc.fields && acc.fields.smsTries && acc.fields.smsTries.integerValue || 0);
+    if (!want || tries >= 5) throw new Error("sms_expired");
+    const got = await smsHash(uid, code);
+    if (!(got.length === want.length && timingEq(got, want))) {
+      await fsCommit(token, [{ update: { name: DOC_ROOT + "/accounts/" + uid, fields: { smsTries: { integerValue: String(tries + 1) } } }, updateMask: { fieldPaths: ["smsTries"] } }]);
+      return { enabled: true, verified: false, left: 4 - tries };
+    }
+  } else {
+    const r = await twilioVerify(env, "VerificationCheck", { To: phone, Code: code });
+    if (r.status !== "approved") return { enabled: true, verified: false };
+  }
+  await markPhoneVerified(token, uid, phone, "sms");
+  return { enabled: true, verified: true, phone };
+}
+// C304/C308: \u062a\u0648\u062b\u064a\u0642 \u0627\u0644\u0631\u0642\u0645 \u0628\u0639\u062f \u0646\u062c\u0627\u062d \u0627\u0644\u0631\u0645\u0632
+async function markPhoneVerified(token, uid, phone, by) {
+  const prevOwner = fstr(await fsGet(token, "phones/" + phone).catch(() => null), "uid"), now = String(Date.now());
+  const writes = [
+    { update: { name: DOC_ROOT + "/accounts/" + uid, fields: { phone: { stringValue: phone }, phoneVerified: { booleanValue: true }, verifiedBy: { stringValue: by }, phoneVerifiedAt: { integerValue: now }, smsPhone: { nullValue: null }, smsExp: { nullValue: null }, smsHash: { nullValue: null }, smsTries: { nullValue: null } } },
+      updateMask: { fieldPaths: ["phone", "phoneVerified", "verifiedBy", "phoneVerifiedAt", "smsPhone", "smsExp", "smsHash", "smsTries"] } },
+    { update: { name: DOC_ROOT + "/phones/" + phone, fields: { uid: { stringValue: uid }, by: { stringValue: by }, ts: { integerValue: now } } } }];
+  // \u0631\u0642\u0645\u064c \u0648\u0627\u062d\u062f \u0644\u062d\u0633\u0627\u0628\u064d \u0648\u0627\u062d\u062f (\u0643\u0645\u0627 \u0641\u064a waVerify)
+  if (prevOwner && prevOwner !== uid) writes.push({ update: { name: DOC_ROOT + "/accounts/" + prevOwner, fields: { phoneVerified: { booleanValue: false } } }, updateMask: { fieldPaths: ["phoneVerified"] } });
+  await fsCommit(token, writes);
+  PROFILE_CACHE.delete(uid); if (prevOwner) PROFILE_CACHE.delete(prevOwner);
+}
+/* C308: SMS \u0639\u0628\u0631 Firebase Phone Auth (\u062e\u0637\u0651\u0629 Blaze) \u2014 \u0628\u0644\u0627 Twilio \u0648\u0644\u0627 \u0623\u0633\u0631\u0627\u0631.
+   \u0627\u0644\u062a\u0637\u0628\u064a\u0642 \u064a\u0631\u0633\u0644 \u0627\u0644\u0631\u0645\u0632 \u0648\u064a\u0631\u0628\u0637 \u0627\u0644\u0631\u0642\u0645 \u0628\u062d\u0633\u0627\u0628 Firebase \u0644\u0644\u0645\u0633\u062a\u062e\u062f\u0645 (linkWithCredential / updatePhoneNumber)\u060c
+   \u062b\u0645\u0651 \u064a\u0637\u0644\u0628 phone.fbCheck \u0628\u0631\u0645\u0632\u064d \u0645\u062d\u062f\u064e\u0651\u062b. \u0646\u062b\u0642 \u0641\u0642\u0637 \u0628\u0640 phone_number \u062f\u0627\u062e\u0644 \u0631\u0645\u0632 Firebase \u0627\u0644\u0645\u0648\u0642\u064e\u0651\u0639 (claims) \u2014 \u0644\u0627 \u0628\u0634\u064a\u0621\u064d \u064a\u0631\u0633\u0644\u0647 \u0627\u0644\u0639\u0645\u064a\u0644. */
+/* C311: \u0644\u0644\u0645\u062f\u064a\u0631 \u2014 \u0642\u0631\u0627\u0621\u0629 \u0625\u0639\u062f\u0627\u062f \u0627\u0644\u0645\u0635\u0627\u062f\u0642\u0629 \u0627\u0644\u0641\u0639\u0644\u064a\u0651 \u0645\u0646 Firebase (\u0642\u0631\u0627\u0621\u0629\u064c \u0641\u0642\u0637): \u0647\u0644 Phone \u0645\u0641\u0639\u064e\u0651\u0644\u060c \u0648\u0633\u064a\u0627\u0633\u0629 \u0645\u0646\u0627\u0637\u0642 SMS\u060c \u0648\u0639\u062f\u062f \u0623\u0631\u0642\u0627\u0645 \u0627\u0644\u062a\u062c\u0631\u0628\u0629.
+   \u064a\u0641\u0633\u0651\u0631 \xaboperation-not-allowed\xbb \u0628\u0645\u0627 \u0647\u0648 \u0645\u062d\u0641\u0648\u0638\u064c \u0641\u0639\u0644\u0627\u064b \u0628\u062f\u0644 \u0627\u0644\u062a\u062e\u0645\u064a\u0646. */
+async function opSmsConfig(uid, payload, env, claims) {
+  if (!(await otpManager(env, claims))) throw new Error("manager_only");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const r = await gfetch("https://identitytoolkit.googleapis.com/admin/v2/projects/" + PROJECT_ID + "/config", { headers: { Authorization: "Bearer " + token } });
+  let b = {}; try { b = await r.json(); } catch (e) {}
+  if (!r.ok) return { ok2: false, status: r.status, err: (b.error && (b.error.status || b.error.message)) || null };
+  const ph = (b.signIn && b.signIn.phoneNumber) || {}, rc = b.smsRegionConfig || null;
+  let region = "default";
+  if (rc && rc.allowlistOnly) region = "allow:" + ((rc.allowlistOnly.allowedRegions || []).join(",") || "-");
+  else if (rc && rc.allowByDefault) region = "deny:" + ((rc.allowByDefault.disallowedRegions || []).join(",") || "-");
+  return { ok2: true, phone: !!ph.enabled, tests: Object.keys(ph.testPhoneNumbers || {}).length, region, project: PROJECT_ID };
+}
+async function opFbPhoneCheck(uid, payload, env, claims) {
+  if (!(await otpManager(env, claims))) throw new Error("manager_only");
+  const phone = cleanPhone(claims && claims.phone_number);
+  if (!phone) throw new Error("no_fb_phone");
+  if (!codeRate(uid, "fbchk", 6)) throw new Error("rate_limited");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  await markPhoneVerified(token, uid, phone, "sms");
+  return { verified: true, phone };
 }
 /* ---------- 44) \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u0631\u0642\u0645 \u0639\u0628\u0631 \u0627\u0644\u0645\u0639\u0627\u0631\u0641 (C44) ----------
    \u0628\u0644\u0627 Meta \u0648\u0644\u0627 SMS: \u0635\u0627\u062d\u0628 \u0627\u0644\u0631\u0642\u0645 \u064a\u0637\u0644\u0628 \u0645\u0646 \u0645\u0639\u0627\u0631\u0641\u0647 (\u062c\u0647\u0627\u062a \u0627\u062a\u0651\u0635\u0627\u0644 \u0645\u062a\u0628\u0627\u062f\u0644\u0629) \u062a\u0623\u0643\u064a\u062f \u0623\u0646\u0651 \u0647\u0630\u0627 \u0631\u0642\u0645\u0647. \u0643\u0644\u0651 \u0645\u0624\u0643\u0650\u0651\u062f\u064d \u064a\u062c\u0628 \u0623\u0646 \u064a\u0643\u0648\u0646
@@ -4380,13 +4696,15 @@ async function opCallTel(uid, payload, env, request) {
   const str = (v, n) => String(v == null ? "" : v).replace(/[\u0000-\u001f]/g, " ").slice(0, n);
   const num = (v, lo, hi) => { const x = Number(v); return Number.isFinite(x) ? Math.max(lo, Math.min(hi, Math.round(x))) : null; };
   const d = { k: str(p.k, 16), role: str(p.role, 10), eng: str(p.eng, 12), mode: str(p.mode, 6), plat: str(p.plat, 30), model: str(p.model, 40), ver: str(p.ver, 12), net: str(p.net, 16),
-    ok: !!p.ok, setup: num(p.setup, 0, 120000), secs: num(p.secs, 0, 86400), reason: str(p.reason, 16), route: str(p.route, 8), osr: str(p.osr, 40),   // C236: مسار/وضع صوت iOS في الجماعيّة والغرف proto: str(p.proto, 6), relay: str(p.relay, 32),
+    ok: !!p.ok, setup: num(p.setup, 0, 120000), secs: num(p.secs, 0, 86400), reason: str(p.reason, 16), route: str(p.route, 8), osr: str(p.osr, 40),   // C327: مسار/وضع صوت iOS في الجماعيّة والغرف proto: str(p.proto, 6), relay: str(p.relay, 32),
     n: num(p.n, 0, 50), rst: num(p.rst, 0, 100), err: str(p.err, 40), up: p.up ? 1 : 0, ck: p.ck ? 1 : 0, vis: p.vis ? 1 : 0, rtt: qaStatClean(p.rtt), jit: qaStatClean(p.jit), loss: qaStatClean(p.loss), jb: qaStatClean(p.jb), fps: qaStatClean(p.fps), h: qaStatClean(p.h),
     // C215: \u0646\u0648\u0639 NAT \u0641\u064a \u0634\u0628\u0643\u0629 \u0627\u0644\u0647\u0627\u062a\u0641 (\u0642\u064a\u0627\u0633\u0647 \u0642\u0628\u0644 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629) \u0648\u0646\u0648\u0639 \u0627\u0644\u0639\u0646\u0648\u0627\u0646\u064a\u0646 \u0627\u0644\u0645\u062e\u062a\u0627\u0631\u064a\u0646 \u2014 \u064a\u0641\u0633\u0651\u0631 \u0644\u0645\u0627\u0630\u0627 \u0644\u0645 \u064a\u0643\u0646 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u0645\u0628\u0627\u0634\u0631\u0627\u064b
     nat: TEL_NAT.has(p.nat) ? p.nat : "", nsx: num(p.nsx, 0, 20), v6: p.v6 ? 1 : 0,
     lct: TEL_CAND.has(p.lct) ? p.lct : "", rct: TEL_CAND.has(p.rct) ? p.rct : "", fam: p.fam === "4" || p.fam === "6" ? p.fam : "",
     qd: num(p.qd, 0, 4320),
+    cs: str(p.cs, 40), r0: str(p.r0, 8),   // C292: مرشّحات كلّ طرف (hNsNpNrNvNmN) · المسار الأوّل
     v6l: p.v6l ? 1 : 0, v6r: p.v6r ? 1 : 0, pw: p.pw ? 1 : 0,
+    bt: num(p.bt, 0, 120000), aw: num(p.aw, 0, 120000), ics: /^[msf]$/.test(String(p.ics || "")) ? p.ics : "",   // C324: app boot -> answer (answered from the phone screen) · caller: accept -> answer SDP · ICE source (memory/stored/fetched)
     // C228: \u0627\u0644\u062f\u0648\u0644\u0629 \u0648\u0646\u0642\u0637\u0629 Cloudflare (\u0645\u0646 \u0627\u0644\u062e\u0627\u062f\u0645 \u0644\u0627 \u0645\u0646 \u0627\u0644\u0647\u0627\u062a\u0641) \u00b7 \u0627\u0644\u0648\u0633\u064a\u0637 \u0627\u0644\u0645\u062e\u062a\u0627\u0631 \u0648\u0643\u064a\u0641 \u0627\u062e\u062a\u064a\u0631 (p = \u0644\u0644\u0637\u0631\u0641\u064a\u0646 \u00b7 h = \u0628\u062a\u0648\u062c\u064a\u0647 \u0627\u0644\u0645\u062a\u0651\u0635\u0644 \u00b7 o = \u0642\u064a\u0627\u0633 \u0647\u0627\u062a\u0641\u064a \u0648\u062d\u062f\u0647) \u0648\u0632\u0645\u0646\u0647 \u0639\u0646\u062f \u0627\u0644\u0637\u0631\u0641\u064a\u0646
     ...cfGeo(request), rsel: RLY_ID.test(String(p.rsel || "")) ? String(p.rsel) : "", psel: /^[pho]$/.test(String(p.psel || "")) ? p.psel : "", rms: num(p.rms, 0, 15000), pms: num(p.pms, 0, 15000) };   // C218: pw = \u0627\u0644\u0645\u0633\u062a\u0642\u0628\u0650\u0644 \u0627\u0633\u062a\u0639\u0645\u0644 \u0627\u0644\u0627\u062a\u0651\u0635\u0627\u0644 \u0627\u0644\u0645\u064f\u062c\u0647\u064e\u0651\u0632 \u0623\u062b\u0646\u0627\u0621 \u0627\u0644\u0631\u0646\u064a\u0646   // C217: \u0639\u0631\u0636 \u0647\u0630\u0627 \u0627\u0644\u0637\u0631\u0641 / \u0627\u0644\u0637\u0631\u0641 \u0627\u0644\u0622\u062e\u0631 \u0639\u0646\u0648\u0627\u0646 IPv6 \u0639\u0627\u0645\u0651\u0627\u064b \u0641\u064a \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0629   // C216: \u062f\u0642\u0627\u0626\u0642 \u062a\u0623\u062e\u0651\u0631 \u0627\u0644\u0633\u062c\u0644\u0651 \u0641\u064a \u0637\u0627\u0628\u0648\u0631 \u0627\u0644\u0647\u0627\u062a\u0641 (\u0623\u064f\u0639\u064a\u062f \u0625\u0631\u0633\u0627\u0644\u0647 \u0644\u0627\u062d\u0642\u0627\u064b)
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -4860,7 +5178,7 @@ async function storyWrite(token, uid, name, aud, hide, items) {
 }
 async function storyDropMedia(token, owner, it) {
   if (!it || !it.mid || !/^[a-z0-9]{6,32}$/.test(String(it.mid))) return;
-  const base = DOC_ROOT + "/stories/" + owner + "/media/" + it.mid, n = Math.min(40, Number(it.n) || 33);
+  const base = DOC_ROOT + "/stories/" + owner + "/media/" + it.mid, n = Math.min(MEDIA_MAX_CHUNKS, Number(it.n) || MEDIA_MAX_CHUNKS);
   const w = [{ delete: base }]; for (let i = 0; i < n; i++) w.push({ delete: base + "/c/" + i });
   await fsCommit(token, w).catch(() => {});
 }
@@ -4870,7 +5188,7 @@ async function opStoryBegin(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const mid = String((payload || {}).mid || ""), size = Math.floor(Number((payload || {}).size) || 0);
   if (!/^[a-z0-9]{6,32}$/.test(mid)) throw new Error("bad media id");
-  if (!(size > 0 && size <= 16 * 1024 * 1024)) throw new Error("bad size");
+  if (!(size > 0 && size <= MEDIA_MAX)) throw new Error("bad size");
   const day = dayKey(Date.now()), q = await fsGet(token, "quota/" + uid).catch(() => null);
   const used = q && fstr(q, "d") === day ? fsInt(q, "bytes") : 0;
   if (used + size > MEDIA_DAY_MAX) throw new Error("media quota");
@@ -4888,7 +5206,7 @@ async function storyqGc(env, max) {
   let n = 0;
   for (const d of rows) {
     const u = fstr(d, "uid"), mid = fstr(d, "mid");
-    try { if (segOk(u)) await storyDropMedia(token, u, { mid, n: 40 }); await fsCommit(token, [{ delete: d.name }]); n++; } catch (e) { slog("warn", "storyqGc", { err: e && e.message }); }
+    try { if (segOk(u)) await storyDropMedia(token, u, { mid, n: MEDIA_MAX_CHUNKS }); await fsCommit(token, [{ delete: d.name }]); n++; } catch (e) { slog("warn", "storyqGc", { err: e && e.message }); }
   }
   return { gc: n };
 }
@@ -5002,7 +5320,7 @@ async function opMomentBegin(uid, payload, env) {
   if (!codeRate(uid, "momb", 60)) throw new Error("rate_limited");
   const p = payload || {}, pid = String(p.pid || ""), mid = String(p.mid || ""), size = Math.floor(Number(p.size) || 0);
   if (!momPidOk(pid) || !momMidOk(mid)) throw new Error("bad id");
-  if (!(size > 0 && size <= 16 * 1024 * 1024)) throw new Error("bad size");
+  if (!(size > 0 && size <= MEDIA_MAX)) throw new Error("bad size");
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const ex = await momGet(token, pid);
   if (ex) throw new Error("exists");
@@ -5126,7 +5444,7 @@ async function momNewPush(token, env, uid, pid, me, au, men, media) {
 }
 async function momDropMedia(token, pid, it) {
   if (!it || !momMidOk(String(it.mid || ""))) return;
-  const base = DOC_ROOT + "/moments/" + pid + "/media/" + it.mid, n = Math.min(40, Number(it.n) || 33);
+  const base = DOC_ROOT + "/moments/" + pid + "/media/" + it.mid, n = Math.min(MEDIA_MAX_CHUNKS, Number(it.n) || MEDIA_MAX_CHUNKS);
   const w = [{ delete: base }]; for (let i = 0; i < n; i++) w.push({ delete: base + "/c/" + i });
   await fsCommit(token, w).catch(() => {});
 }
@@ -5377,7 +5695,7 @@ async function momentqGc(env, max) {
   let n = 0;
   for (const d of rows) {
     const pid = fstr(d, "pid"), mid = fstr(d, "mid");
-    try { if (momPidOk(pid) && !(await momGet(token, pid))) await momDropMedia(token, pid, { mid, n: 40 }); await fsCommit(token, [{ delete: d.name }]); n++; } catch (e) { slog("warn", "momentqGc", { err: e && e.message }); }
+    try { if (momPidOk(pid) && !(await momGet(token, pid))) await momDropMedia(token, pid, { mid, n: MEDIA_MAX_CHUNKS }); await fsCommit(token, [{ delete: d.name }]); n++; } catch (e) { slog("warn", "momentqGc", { err: e && e.message }); }
   }
   return { gc: n };
 }
@@ -5550,9 +5868,9 @@ async function opAccountDelete(uid, payload, env, claims) {
   const ph = fstr(acc, "phone"), eh = fstr(acc, "emailHash");
   if (ph && fstr(await fsGet(token, "phones/" + ph).catch(() => null), "uid") === uid) writes.push({ delete: P("phones/" + ph) });
   if (eh && fstr(await fsGet(token, "emails/" + eh).catch(() => null), "uid") === uid) writes.push({ delete: P("emails/" + eh) });
-  for (const k of ["mset", "quota", "turncred", "stories"]) writes.push({ delete: P(k + "/" + uid) });
+  for (const k of ["mset", "quota", "turncred", "stories", "kinrem"]) writes.push({ delete: P(k + "/" + uid) });
   for (const q of [{ uid: uid }, { by: uid }]) for (const d of await fsQueryEq(token, "famreq", q, 100).catch(() => [])) writes.push({ delete: d.name });
-  purge.push({ id: "story_" + uid, kind: "story" }, { id: "moments_" + uid, kind: "moments" });
+  purge.push({ id: "story_" + uid, kind: "story" }, { id: "moments_" + uid, kind: "moments" }, { id: "pfm_" + uid, kind: "pfm" });   // C263: + pfm
   // \u0644\u062d\u0638\u0627\u062a\u064a \u062a\u062e\u062a\u0641\u064a \u0641\u0648\u0631\u0627\u064b (\u062c\u0645\u0647\u0648\u0631\u064c \u0641\u0627\u0631\u063a) \u062b\u0645\u0651 \u062a\u064f\u062d\u0630\u0641 \u0643\u0627\u0645\u0644\u0629\u064b \u0645\u0639 \u0648\u0633\u0627\u0626\u0637\u0647\u0627 \u0648\u062a\u0639\u0644\u064a\u0642\u0627\u062a\u0647\u0627 \u0628\u0627\u0644\u0645\u062c\u062f\u0648\u0650\u0644
   try {
     const res = await gfetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
@@ -5632,6 +5950,7 @@ async function purgeWork(env, budget) {
       else if (kind === "chat") finished = await purgeChat(token, fstr(j, "cid"), spend);
       else if (kind === "moments") finished = await purgeMoments(token, uid, spend);   // C210
       else if (kind === "story") finished = await purgeStory(token, uid, spend);
+      else if (kind === "pfm") finished = segOk(String(uid)) ? await purgePfm(PFM_DEPS, token, uid, spend, purgeColl) : true;   // C263
       else finished = true;
     } catch (e) { slog("warn", "purge", { kind, err: e && e.message }); }
     if (finished && spend()) { await fsCommit(token, [{ delete: j.name }]).catch(() => {}); done++; }
@@ -6011,12 +6330,28 @@ function rateOk(uid) {
 }
 // \u0643\u0644\u0651 \u0645\u0639\u0631\u0651\u0641\u064d \u064a\u062f\u062e\u0644 \u0645\u0633\u0627\u0631 Firestore: \u0628\u0644\u0627 \u00ab/\u00bb \u0648\u0644\u0627 \u00ab..\u00bb \u0648\u0644\u0627 \u0637\u0648\u0644\u064d \u0645\u0641\u0631\u0637
 const ID_KEYS = ["groupId", "personId", "eventId", "relationId", "reviewId", "token", "uid", "from", "to", "cid", "for"];   // C198: + for (vouch.respond)
-function badIds(p) {
+// push.*: الـtoken رمز FCM/APNs (فيه «:») ويُجزَّأ بـtokenId قبل أيّ مسار — لا يُفحص كمعرّف
+const RAW_TOKEN_OPS = new Set(["push.register", "push.check", "push.unregister"]);
+function badIds(p, op) {
   if (!p || typeof p !== "object") return null;
-  for (const k of ID_KEYS) if (k in p && p[k] != null && !segOk(String(p[k]))) return k;
+  for (const k of ID_KEYS) {
+    if (k === "token" && RAW_TOKEN_OPS.has(op)) continue;
+    if (k in p && p[k] != null && !segOk(String(p[k]))) return k;
+  }
   if (Array.isArray(p.groupIds) && p.groupIds.some(x => !segOk(String(x)))) return "groupIds";
   return null;
 }
+
+/* C263: Personal Accountant — pfm/pfm-worker.mjs gets the Worker's own Firestore helpers. */
+const PFM_DEPS = { DOC_ROOT, toFsValue, fsToJs, fsGet, fsList, fsQuerySub, fsCommit, getToken: (env) => getAccessToken(JSON.parse(env.SA_JSON)),
+  // C263 P2: range query for the due-recurring cron, and budget / reminder pushes (data-only, shown by sw.js / the native shells)
+  runQuery: async (token, sq) => {
+    const res = await gfetch(FS_BASE + ":runQuery", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ structuredQuery: sq }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error("firestore query: " + JSON.stringify(data));
+    return (data || []).filter(r => r.document).map(r => r.document);
+  },
+  push: (token, uid, title, body) => pushTo(token, [uid], strData({ t: "pfm", title, body: String(body || "").slice(0, 300), ts: Date.now() })) };
 
 async function handleRequest(request, env, ctx, meta) {
     PUSH_ENV = env;   // C151
@@ -6026,6 +6361,19 @@ async function handleRequest(request, env, ctx, meta) {
   try { if (new URL(request.url).pathname === "/wa/webhook") return await waWebhook(request, env, ctx); } catch (e) { return new Response("webhook error", { status: 500 }); }
   try { if (request.method === "POST" && new URL(request.url).pathname === "/ack") return await deviceAck(request, env); } catch (e) { slog("error", "ack.fail", { err: String(e && e.message || e).slice(0, 300) }); return json({ ok: false, error: publicErr(e) }, 500); }
   try { if (request.method === "GET" && new URL(request.url).pathname === "/av") return await avatarImg(request, env); } catch (e) { return new Response("", { status: 500 }); }   // C152
+  // C267 (P4): the public pay page — no Authorization; the unguessable link token picks the invoice and its issuer.
+  if (request.method === "POST" && new URL(request.url).pathname === "/pfm/pay") {
+    try {
+      let b = {}; try { b = await request.json(); } catch (e) {}
+      meta.op = "pfm.pay"; stat("ops:pfm.pay");
+      const r = await handlePfmPublic(String(b.op || ""), b.payload, env, PFM_DEPS, request.headers.get("CF-Connecting-IP") || "?");
+      return json({ ok: true, ...r });
+    } catch (e) {
+      const pub = publicErr(e);
+      if (isTransientErr(e)) return json({ ok: false, error: "server_error: busy", retry: true }, 503);
+      return json({ ok: false, error: pub }, /^rate_limited/.test(pub) ? 429 : /^not_found/.test(pub) ? 404 : 400);
+    }
+  }
   let statOp = null;
   try {
     const auth = request.headers.get("Authorization") || "";
@@ -6044,7 +6392,7 @@ async function handleRequest(request, env, ctx, meta) {
     meta.op = statOp; stat("ops:" + statOp); stat("req");
     // \u0627\u0644\u0639\u0645\u0644\u064a\u0651\u0627\u062a \u0627\u0644\u062b\u0642\u064a\u0644\u0629 \u0642\u0631\u064a\u0628\u0629 \u0645\u0646 \u062d\u062f\u0651 \u0665\u0660 \u0637\u0644\u0628\u0627\u064b \u0641\u0631\u0639\u064a\u0651\u0627\u064b \u2014 \u0644\u0627 \u0646\u0636\u064a\u0641 \u0625\u0644\u064a\u0647\u0627 \u0627\u0644\u0625\u0631\u0633\u0627\u0644
     if (ctx && ctx.waitUntil && !HEAVY_OPS.has(statOp)) ctx.waitUntil(flushStats(env));
-    const bad = badIds(body.payload);
+    const bad = badIds(body.payload, op);
     if (bad) return json({ ok: false, error: "bad id: " + bad }, 400);
 
     // \u0627\u0633\u0645 \u00ab\u0633\u0648\u0627\u00bb \u0627\u0644\u0645\u062d\u0641\u0648\u0638 \u064a\u0633\u0628\u0642 \u0627\u0633\u0645 Google \u0641\u064a \u0643\u0644\u0651 \u0627\u0644\u0639\u0645\u0644\u064a\u0651\u0627\u062a (\u0630\u0627\u0643\u0631\u0629 \u0645\u0624\u0642\u0651\u062a\u0629 \u2014 \u0644\u0627 \u0642\u0631\u0627\u0621\u0629 \u0641\u064a \u0643\u0644\u0651 \u0637\u0644\u0628)
@@ -6054,6 +6402,10 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "profile.get") { const r = await opProfileGet(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "profile.set") { const r = await opProfileSet(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "phone.start") { const r = await opPhoneStart(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+    if (op === "phone.smsStart") { const r = await opSmsStart(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C304
+    if (op === "phone.smsConfig") { const r = await opSmsConfig(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C311
+    if (op === "phone.fbCheck") { const r = await opFbPhoneCheck(uid, body.payload, env, claims); return json({ ok: true, ...r }); }   // C308
+    if (op === "phone.smsCheck") { const r = await opSmsCheck(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "phone.status") { const r = await opPhoneStatus(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "find.phone") { const r = await opFindBy(uid, body.payload, env, "phone", claims); return json({ ok: true, ...r }); }
     // C53: \u0637\u0644\u0628\u064c \u0648\u0627\u062d\u062f \u0639\u0646\u062f \u0627\u0644\u0625\u0642\u0644\u0627\u0639 \u0628\u062f\u0644 \u062b\u0644\u0627\u062b\u0629 (people.list + chat.prefs + code.requests) \u2014 \u064a\u0648\u0641\u0651\u0631 \u0631\u062d\u0644\u062a\u064a\u0646 \u0625\u0644\u0649 \u0627\u0644\u062e\u0627\u062f\u0645 \u0639\u0644\u0649 \u0627\u0644\u0634\u0628\u0643\u0627\u062a \u0627\u0644\u0628\u0637\u064a\u0626\u0629
@@ -6169,6 +6521,7 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "gcall.start") { const r = await opGcallStart(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
     if (op === "gcall.room") { const r = await opGcallRoom(uid, body.payload, env); return json({ ok: true, ...r }); }   // C178
     if (op === "gcall.add") { const r = await opGcallAdd(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
+    if (op === "kin.remind.set") { const r = await opKinRemindSet(uid, body.payload, env); return json({ ok: true, ...r }); }   // C271
     if (op === "sched.set") { const r = await opSchedSet(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }
     if (op === "sched.join") { const r = await opSchedJoin(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "sched.list") { const r = await opSchedList(uid, body.payload, env); return json({ ok: true, ...r }); }
@@ -6246,6 +6599,7 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "member.remove") { const r = await opMemberRemove(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "member.transferOwner") { const r = await opMemberTransferOwner(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }   // C206
     if (op === "group.settings") { const r = await opGroupSettings(uid, body.payload, env); return json({ ok: true, ...r }); }
+    if (statOp.startsWith("pfm.") || statOp.startsWith("inv.")) { const r = await handlePfmOp(op, uid, body.payload, env, PFM_DEPS); return json({ ok: true, ...r }); }   // C263
     return json({ ok: false, error: "unknown op: " + op }, 400);
   } catch (e) {
     if (statOp) { stat("err:" + statOp); if (ctx && ctx.waitUntil) ctx.waitUntil(flushStats(env)); }
@@ -6269,6 +6623,7 @@ export default {
       let r = { reminders: 0 };
       try { r = await schedReminders(env); } catch (e) { slog("warn", "reminders", { err: e && e.message }); }
       try { await taskReminders(env); } catch (e) { slog("warn", "taskrem", { err: e && e.message }); }   // C173
+      try { await kinReminders(env); } catch (e) { slog("warn", "kinrem", { err: e && e.message }); }   // C271
       const job = (name, f) => f().catch(e => slog("warn", "job", { job: name, err: e && e.message }));
       if (L.free) {   // \u0627\u0644\u0645\u062c\u0651\u0627\u0646\u064a\u0651\u0629: \u0665\u0660 \u0637\u0644\u0628\u0627\u064b \u0641\u0631\u0639\u064a\u0651\u0627\u064b \u21d2 \u0645\u0647\u0645\u0651\u0629\u064c \u0648\u0627\u062d\u062f\u0629 \u0641\u064a \u0643\u0644\u0651 \u062a\u0634\u063a\u064a\u0644 (\u0643\u0645\u0627 \u0641\u064a C178)
         if (r.reminders) return;
@@ -6276,13 +6631,14 @@ export default {
         if (slot === 3) return job("health", () => healthRun(env));
         if (slot === 0) { await job("cleanup", () => cleanupDisappearing(env)); await job("tel gc", () => telGc(env, 100)); await job("rl gc", () => rlGc(env, 100)); }
         else if (slot === 1) { await job("calls cleanup", () => cleanupCalls(env)); await job("media gc", () => mediaGc(env, L.media)); await job("story gc", () => storyGc(env, L.story)); await job("storyq gc", () => storyqGc(env, L.q)); await job("momentq gc", () => momentqGc(env, L.q)); }
-        else await job("purge", () => purgeWork(env, L.purge));
+        else { await job("pfm", () => pfmCron(env, PFM_DEPS, 10)); await job("purge", () => purgeWork(env, L.purge)); }   // C263 P2
         return;
       }
       // C180: \u0627\u0644\u062e\u0637\u0651\u0629 \u0627\u0644\u0645\u062f\u0641\u0648\u0639\u0629 \u2014 \u0643\u0644\u0651 \u0627\u0644\u0645\u0647\u0627\u0645\u0651 \u0641\u064a \u0643\u0644\u0651 \u062a\u0634\u063a\u064a\u0644 (\u0627\u0644\u0645\u0631\u0627\u0642\u0628\u0629 \u0643\u0644\u0651 \u0665 \u062f\u0642\u0627\u0626\u0642)
       await Promise.all([job("health", () => healthRun(env)), job("cleanup", () => cleanupDisappearing(env)), job("calls cleanup", () => cleanupCalls(env)), job("quality", () => qualityWatch(env))]);   // C181: \u0645\u0644\u062e\u0651\u0635 \u0627\u0644\u062c\u0648\u062f\u0629
       await job("media gc", () => mediaGc(env, L.media)); await job("story gc", () => storyGc(env, L.story));
       await job("storyq gc", () => storyqGc(env, L.q)); await job("momentq gc", () => momentqGc(env, L.q)); await job("tel gc", () => telGc(env, 200)); await job("rl gc", () => rlGc(env, 300));
+      await job("pfm", () => pfmCron(env, PFM_DEPS, 40));   // C263 P2: recurring entries due + reminders
       await job("purge", () => purgeWork(env, L.purge));   // \u062d\u0630\u0641 \u0627\u0644\u062d\u0633\u0627\u0628\u0627\u062a: \u0645\u0627 \u062a\u0628\u0642\u0651\u0649 \u0645\u0646 \u0639\u0627\u0626\u0644\u0627\u062a\u064d \u0648\u0645\u062d\u0627\u062f\u062b\u0627\u062a
     })());
   },
