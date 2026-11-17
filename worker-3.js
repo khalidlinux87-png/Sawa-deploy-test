@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v140-r2";         // C326: chat media in Cloudflare R2 (binary upload, streamed video)
+const VER = "v140-r2";         // C334: chat media in Cloudflare R2 (binary upload, streamed video)
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -2024,7 +2024,7 @@ async function opChatSend(uid, payload, env, ctx) {
   if (msg.extra && msg.extra.mid) {   // \u0627\u0644\u0648\u0633\u064a\u0637 \u0631\u0641\u0639\u0647 \u0627\u0644\u0645\u0631\u0633\u0644 \u0646\u0641\u0633\u0647 \u0641\u064a \u0647\u0630\u0647 \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0629 \u0648\u0627\u0643\u062a\u0645\u0644
     if (!meta || fstr(meta, "by") !== uid || !fbool(meta, "done")) throw new Error("media not uploaded");
     msg.extra.size = fsInt(meta, "size"); msg.extra.mime = fstr(meta, "mime") || msg.extra.mime || null;
-    if (fbool(meta, "r2")) msg.extra.r2 = true; else delete msg.extra.r2;   // C326: الوسيط في R2 ⇒ العميل يطلب رابطاً موقَّعاً بدل القطع
+    if (fbool(meta, "r2")) msg.extra.r2 = true; else delete msg.extra.r2;   // C334: الوسيط في R2 ⇒ العميل يطلب رابطاً موقَّعاً بدل القطع
   }
   if (peek[msg.id]) {
     if (peek[msg.id].by !== uid) throw new Error("message id taken");
@@ -2095,7 +2095,7 @@ async function dayPeek(token, cid, day, ids) {
 }
 /* ---------- \u0627\u0644\u0648\u0633\u0627\u0626\u0637 (C4): chats/{cid}/media/{mid} (\u0648\u0635\u0641) + media/{mid}/c/{i} (\u0642\u0637\u0639 base64 \u2264 \u0667\u0660\u0660 \u0623\u0644\u0641 \u062d\u0631\u0641)
    \u064a\u0643\u062a\u0628\u0647\u0627 \u0627\u0644\u062c\u0647\u0627\u0632 \u0645\u0628\u0627\u0634\u0631\u0629\u064b (\u0642\u0648\u0627\u0639\u062f Firestore: \u0639\u0636\u0648\u064c \u0648\u0645\u0627\u0644\u0643\u0647\u0627)\u060c \u0648\u064a\u062d\u0630\u0641\u0647\u0627 \u0627\u0644\u062e\u0627\u062f\u0645: \u062d\u0630\u0641\u064c \u0644\u0644\u062c\u0645\u064a\u0639 \u00b7 \u0645\u0634\u0627\u0647\u062f\u0629 \u0645\u0631\u0651\u0629 \u00b7 \u0627\u0646\u062a\u0647\u0627\u0621 \u0627\u0644\u0623\u062c\u0644. */
-/* C326: وسائط المحادثات في Cloudflare R2 (الربط MEDIA ← الحاوية sawa-media) — رفعٌ وتنزيلٌ ثنائيّ مباشر، والفيديو يُشغَّل وهو يُنزَّل (Range).
+/* C334: وسائط المحادثات في Cloudflare R2 (الربط MEDIA ← الحاوية sawa-media) — رفعٌ وتنزيلٌ ثنائيّ مباشر، والفيديو يُشغَّل وهو يُنزَّل (Range).
    الرفع:  PUT /m/{cid}/{mid}?u&z&e&s  (رابطٌ يصدره media.begin: HMAC "up|cid|mid|uid|size|exp") ⇒ R2 c/{cid}/{mid} ثمّ يكتب الخادم وصف الوسيط (done, r2) في Firestore.
    التنزيل: GET /m/{cid}/{mid}?u&e&s   (رمزٌ للمحادثة كلّها يصدره media.tok لعضوها: HMAC "dl|cid|uid|exp"، صالحٌ 24–48 ساعة).
    الحذف: deleteMedia/purgeChat يحذفان الكائن أيضاً. بلا الربط MEDIA يبقى كلّ شيءٍ على Firestore كما كان. */
@@ -2166,7 +2166,7 @@ async function deleteMedia(token, cid, mid) {
   const chunks = await fsList(token, base + "/c");
   const writes = chunks.map(d => ({ delete: d.name })).concat([{ delete: DOC_ROOT + "/" + base }]);
   await commitChunks(token, writes);
-  if (R2) await R2.delete(r2Key(cid, mid)).catch(e => slog("warn", "r2.delete", { err: e && e.message }));   // C326
+  if (R2) await R2.delete(r2Key(cid, mid)).catch(e => slog("warn", "r2.delete", { err: e && e.message }));   // C334
   return chunks.length;
 }
 /* v35: \u062d\u062c\u0632 \u0627\u0644\u0631\u0641\u0639 \u2014 \u0627\u0644\u062c\u0647\u0627\u0632 \u064a\u0637\u0644\u0628 \u0627\u0644\u0625\u0630\u0646 \u0642\u0628\u0644 \u0631\u0641\u0639 \u0623\u064a\u0651 \u0648\u0633\u064a\u0637 (\u0627\u0644\u0642\u0648\u0627\u0639\u062f \u062a\u0631\u0641\u0636 \u0648\u0633\u064a\u0637\u0627\u064b \u0628\u0644\u0627 \u062d\u062c\u0632 \u0641\u064a mediaq).
@@ -2187,7 +2187,7 @@ async function opMediaBegin(uid, payload, env) {
     { update: { name: DOC_ROOT + "/quota/" + uid, fields: { d: { stringValue: day }, bytes: { integerValue: String(used + size) } } } },
   ]);
   const out = { ok: true, left: MEDIA_DAY_MAX - used - size };
-  // C326: مع R2 يرفع الجهاز الملفّ كما هو (بلا base64 ولا قطع) إلى رابطٍ موقَّع — العميل القديم يتجاهل up فيرفع إلى Firestore كما كان
+  // C334: مع R2 يرفع الجهاز الملفّ كما هو (بلا base64 ولا قطع) إلى رابطٍ موقَّع — العميل القديم يتجاهل up فيرفع إلى Firestore كما كان
   if (R2 && (payload || {}).r2) {
     const exp = Date.now() + 2 * 3600000;
     out.up = "/m/" + cid + "/" + mid + "?u=" + encodeURIComponent(uid) + "&z=" + size + "&e=" + exp + "&s=" + (await r2Sig(env, ["up", cid, mid, uid, size, exp].join("|")));
@@ -6107,7 +6107,7 @@ async function purgeChat(token, cid, spend) {
   for (const m of media) {
     if (!(await purgeColl(token, "chats/" + cid + "/media/" + m.name.split("/").pop() + "/c", spend))) return false;
     if (!spend()) return false;
-    if (R2) await R2.delete(r2Key(cid, m.name.split("/").pop())).catch(() => {});   // C326
+    if (R2) await R2.delete(r2Key(cid, m.name.split("/").pop())).catch(() => {});   // C334
     await fsCommit(token, [{ delete: m.name }]).catch(() => {});
   }
   if (!spend()) return false;
@@ -6431,7 +6431,7 @@ async function handleRequest(request, env, ctx, meta) {
     PUSH_ENV = env;   // C151
   notifyChat.env = env;   // v65: \u062a\u0648\u0642\u064a\u0639 \u0625\u0642\u0631\u0627\u0631 \u00ab\u0648\u0635\u0644\u062a\u00bb \u0641\u064a \u0625\u0634\u0639\u0627\u0631\u0627\u062a \u0627\u0644\u0631\u0633\u0627\u0626\u0644
   try { const u0 = new URL(request.url); if (isAuthProxyPath(u0.pathname)) return await authProxy(request, u0); } catch (e) { return new Response("auth proxy error", { status: 502 }); }
-  R2 = env.MEDIA || null;   // C326
+  R2 = env.MEDIA || null;   // C334
   if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
   try { const u1 = new URL(request.url); if (u1.pathname.indexOf("/m/") === 0) return await r2Route(request, env, u1); } catch (e) { slog("error", "r2.route", { err: String(e && e.message || e).slice(0, 300) }); return r2Err(500, "media error"); }
   try { if (new URL(request.url).pathname === "/wa/webhook") return await waWebhook(request, env, ctx); } catch (e) { return new Response("webhook error", { status: 500 }); }
@@ -6616,7 +6616,7 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "chat.prefs") { const r = await opChatPrefs(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "people.list") { const r = await opPeopleList(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "people.invite") { const r = await opPeopleInvite(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
-    if (op === "media.tok") { const r = await opMediaTok(uid, body.payload, env); return json({ ok: true, ...r }); }   // C326
+    if (op === "media.tok") { const r = await opMediaTok(uid, body.payload, env); return json({ ok: true, ...r }); }   // C334
     if (op === "media.begin") { const r = await opMediaBegin(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "story.begin") { const r = await opStoryBegin(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "people.peek") { const r = await opPeoplePeek(uid, body.payload, env); return json({ ok: true, ...r }); }
@@ -6693,7 +6693,7 @@ export default {
   // Cron (wrangler.toml: [triggers] crons = ["*/5 * * * *"]): \u062a\u0630\u0643\u064a\u0631\u0627\u062a \u0627\u0644\u0645\u0648\u0627\u0639\u064a\u062f \u0643\u0644\u0651 \u062a\u0634\u063a\u064a\u0644\u061b \u0648\u0627\u0644\u062a\u0646\u0638\u064a\u0641 \u0628\u0627\u0644\u062a\u0646\u0627\u0648\u0628
   // (\u062d\u062f\u0651 \u0665\u0660 \u0637\u0644\u0628\u0627\u064b \u0641\u0631\u0639\u064a\u0651\u0627\u064b \u0644\u0643\u0644\u0651 \u062a\u0634\u063a\u064a\u0644: \u0644\u0627 \u062a\u0646\u0638\u064a\u0641 \u0641\u064a \u062a\u0634\u063a\u064a\u0644\u064d \u0623\u0631\u0633\u0644 \u062a\u0630\u0643\u064a\u0631\u0627\u064b)
   async scheduled(event, env, ctx) {
-    PUSH_ENV = env; notifyChat.env = env; R2 = env.MEDIA || null;   // C326
+    PUSH_ENV = env; notifyChat.env = env; R2 = env.MEDIA || null;   // C334
     ctx.waitUntil((async () => {
       const L = LIM(env);
       await flushStats(env, true);
