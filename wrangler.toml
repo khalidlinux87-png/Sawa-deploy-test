@@ -8,3 +8,8 @@ TURN_PROVIDER = "pair"
 
 [triggers]
 crons = ["*/5 * * * *"]
+
+# C334: وسائط المحادثات (فيديو · صور · ملفّات) — أنشئ الحاوية sawa-media في Cloudflare ← R2 قبل النشر
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "sawa-media"

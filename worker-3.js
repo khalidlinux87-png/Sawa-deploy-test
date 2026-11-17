@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v140-callosr";    // call telemetry keeps the iOS audio route/mode (osr) for groups and rooms
+const VER = "v141-r2";         // C334: chat media in Cloudflare R2 (binary upload, streamed video) · includes v140-callosr
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -130,11 +130,11 @@ async function authProxy(request, u) {
 }
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type, Range",
   // C214: \u064a\u062d\u0641\u0638 \u0627\u0644\u0645\u062a\u0635\u0641\u0651\u062d \u0646\u062a\u064a\u062c\u0629 \u0637\u0644\u0628 \u0627\u0644\u0641\u062d\u0635 \u0627\u0644\u0645\u0633\u0628\u0642 (OPTIONS) \u064a\u0648\u0645\u0627\u064b \u2014 \u0643\u0627\u0646 \u0643\u0644\u0651 \u0637\u0644\u0628\u064d \u064a\u0633\u0628\u0642\u0647 \u0630\u0647\u0627\u0628\u064c \u0648\u0625\u064a\u0627\u0628\u064c \u0625\u0636\u0627\u0641\u064a\u0651 (Chrome \u064a\u0642\u0635\u0631\u0647\u0627 \u0639\u0644\u0649 \u0633\u0627\u0639\u062a\u064a\u0646)
   "Access-Control-Max-Age": "86400",
-  "Access-Control-Expose-Headers": "Server-Timing, Retry-After",
+  "Access-Control-Expose-Headers": "Server-Timing, Retry-After, Content-Range, Content-Length, Accept-Ranges",
 };
 
 /* C198/\u0661\u0660: \u0645\u0642\u0627\u0631\u0646\u0629 \u062b\u0627\u0628\u062a\u0629 \u0627\u0644\u0632\u0645\u0646 \u0644\u0644\u062a\u0648\u0642\u064a\u0639\u0627\u062a \u0648\u0627\u0644\u0631\u0645\u0648\u0632 \u0627\u0644\u0633\u0631\u0651\u064a\u0651\u0629 (=== \u062a\u062a\u0648\u0642\u0651\u0641 \u0639\u0646\u062f \u0623\u0648\u0651\u0644 \u062d\u0631\u0641\u064d \u0645\u062e\u062a\u0644\u0641) */
@@ -2024,6 +2024,7 @@ async function opChatSend(uid, payload, env, ctx) {
   if (msg.extra && msg.extra.mid) {   // \u0627\u0644\u0648\u0633\u064a\u0637 \u0631\u0641\u0639\u0647 \u0627\u0644\u0645\u0631\u0633\u0644 \u0646\u0641\u0633\u0647 \u0641\u064a \u0647\u0630\u0647 \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0629 \u0648\u0627\u0643\u062a\u0645\u0644
     if (!meta || fstr(meta, "by") !== uid || !fbool(meta, "done")) throw new Error("media not uploaded");
     msg.extra.size = fsInt(meta, "size"); msg.extra.mime = fstr(meta, "mime") || msg.extra.mime || null;
+    if (fbool(meta, "r2")) msg.extra.r2 = true; else delete msg.extra.r2;   // C334: الوسيط في R2 ⇒ العميل يطلب رابطاً موقَّعاً بدل القطع
   }
   if (peek[msg.id]) {
     if (peek[msg.id].by !== uid) throw new Error("message id taken");
@@ -2094,12 +2095,78 @@ async function dayPeek(token, cid, day, ids) {
 }
 /* ---------- \u0627\u0644\u0648\u0633\u0627\u0626\u0637 (C4): chats/{cid}/media/{mid} (\u0648\u0635\u0641) + media/{mid}/c/{i} (\u0642\u0637\u0639 base64 \u2264 \u0667\u0660\u0660 \u0623\u0644\u0641 \u062d\u0631\u0641)
    \u064a\u0643\u062a\u0628\u0647\u0627 \u0627\u0644\u062c\u0647\u0627\u0632 \u0645\u0628\u0627\u0634\u0631\u0629\u064b (\u0642\u0648\u0627\u0639\u062f Firestore: \u0639\u0636\u0648\u064c \u0648\u0645\u0627\u0644\u0643\u0647\u0627)\u060c \u0648\u064a\u062d\u0630\u0641\u0647\u0627 \u0627\u0644\u062e\u0627\u062f\u0645: \u062d\u0630\u0641\u064c \u0644\u0644\u062c\u0645\u064a\u0639 \u00b7 \u0645\u0634\u0627\u0647\u062f\u0629 \u0645\u0631\u0651\u0629 \u00b7 \u0627\u0646\u062a\u0647\u0627\u0621 \u0627\u0644\u0623\u062c\u0644. */
+/* C334: وسائط المحادثات في Cloudflare R2 (الربط MEDIA ← الحاوية sawa-media) — رفعٌ وتنزيلٌ ثنائيّ مباشر، والفيديو يُشغَّل وهو يُنزَّل (Range).
+   الرفع:  PUT /m/{cid}/{mid}?u&z&e&s  (رابطٌ يصدره media.begin: HMAC "up|cid|mid|uid|size|exp") ⇒ R2 c/{cid}/{mid} ثمّ يكتب الخادم وصف الوسيط (done, r2) في Firestore.
+   التنزيل: GET /m/{cid}/{mid}?u&e&s   (رمزٌ للمحادثة كلّها يصدره media.tok لعضوها: HMAC "dl|cid|uid|exp"، صالحٌ 24–48 ساعة).
+   الحذف: deleteMedia/purgeChat يحذفان الكائن أيضاً. بلا الربط MEDIA يبقى كلّ شيءٍ على Firestore كما كان. */
+let R2 = null, r2Hmac = null;
+function r2Key(cid, mid) { return "c/" + cid + "/" + mid; }
+async function r2Sig(env, s) {
+  if (!r2Hmac) r2Hmac = await crypto.subtle.importKey("raw", new TextEncoder().encode((JSON.parse(env.SA_JSON).private_key || "") + "|r2media"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", r2Hmac, new TextEncoder().encode(s)));
+  return Array.from(sig.slice(0, 20)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+async function r2SigOk(env, s, got) {
+  const want = await r2Sig(env, s), g = String(got || "");
+  if (g.length !== want.length) return false;
+  let d = 0; for (let i = 0; i < want.length; i++) d |= want.charCodeAt(i) ^ g.charCodeAt(i);
+  return d === 0;
+}
+async function opMediaTok(uid, payload, env) {
+  if (!R2) return { r2: false };
+  const cid = String((payload || {}).cid || "");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  await requireChatMember(token, cid, uid);
+  const exp = (Math.floor(Date.now() / 86400000) + 2) * 86400000;   // ثابتٌ طوال اليوم ⇒ الرابط نفسه ⇒ يعمل مخزن المتصفّح
+  return { r2: true, q: "?u=" + encodeURIComponent(uid) + "&e=" + exp + "&s=" + (await r2Sig(env, ["dl", cid, uid, exp].join("|"))), exp };
+}
+const R2_HDR = { "Access-Control-Allow-Origin": "*", "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges", "Vary": "Origin" };
+function r2Err(status, msg) { return new Response(JSON.stringify({ ok: false, error: msg, ver: VER }), { status, headers: Object.assign({ "Content-Type": "application/json", "Cache-Control": "no-store" }, R2_HDR) }); }
+async function r2Route(request, env, url) {
+  const m = url.pathname.match(/^\/m\/([^/]+)\/([^/]+)$/);
+  if (!m) return r2Err(404, "not found");
+  const cid = decodeURIComponent(m[1]), mid = decodeURIComponent(m[2]), q = url.searchParams;
+  if (!segOk(cid) || !MEDIA_ID.test(mid)) return r2Err(400, "bad id");
+  if (!R2) return r2Err(503, "media storage off");
+  const uid = String(q.get("u") || ""), exp = Number(q.get("e") || 0);
+  if (!segOk(uid) || !(exp > Date.now())) return r2Err(403, "expired");
+  if (request.method === "PUT") {
+    const size = Math.floor(Number(q.get("z") || 0));
+    if (!(size > 0 && size <= MEDIA_MAX)) return r2Err(400, "bad size");
+    if (!(await r2SigOk(env, ["up", cid, mid, uid, size, exp].join("|"), q.get("s")))) return r2Err(403, "bad signature");
+    const len = Number(request.headers.get("Content-Length") || 0);
+    if (!(len > 0 && len <= size)) return r2Err(411, "bad length");
+    const mime = String(request.headers.get("Content-Type") || "application/octet-stream").split(";")[0].trim().slice(0, 100) || "application/octet-stream";
+    const obj = await R2.put(r2Key(cid, mid), request.body, { httpMetadata: { contentType: mime }, customMetadata: { by: uid } });
+    if (!obj || obj.size > size) { await R2.delete(r2Key(cid, mid)).catch(() => {}); return r2Err(400, "too big"); }
+    const token = await getAccessToken(JSON.parse(env.SA_JSON));
+    await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid + "/media/" + mid, fields: {
+      by: { stringValue: uid }, mime: { stringValue: mime }, size: { integerValue: String(obj.size) }, name: { stringValue: "" },
+      n: { integerValue: "0" }, ts: { integerValue: String(Date.now()) }, done: { booleanValue: true }, r2: { booleanValue: true } } } }]);
+    return new Response(JSON.stringify({ ok: true, size: obj.size, ver: VER }), { headers: Object.assign({ "Content-Type": "application/json", "Cache-Control": "no-store" }, R2_HDR) });
+  }
+  if (request.method !== "GET" && request.method !== "HEAD") return r2Err(405, "method");
+  if (!(await r2SigOk(env, ["dl", cid, uid, exp].join("|"), q.get("s")))) return r2Err(403, "bad signature");
+  const obj = await R2.get(r2Key(cid, mid), { range: request.headers, onlyIf: request.headers });
+  if (!obj) return r2Err(404, "gone");
+  const h = new Headers(R2_HDR);
+  obj.writeHttpMetadata(h);
+  h.set("ETag", obj.httpEtag); h.set("Accept-Ranges", "bytes"); h.set("Cache-Control", "private, max-age=86400");
+  if (!("body" in obj)) return new Response(null, { status: 304, headers: h });
+  if (obj.range && request.headers.get("Range")) {
+    const off = obj.range.offset || 0, ln = obj.range.length != null ? obj.range.length : obj.size - off;
+    h.set("Content-Range", "bytes " + off + "-" + (off + ln - 1) + "/" + obj.size);
+    return new Response(request.method === "HEAD" ? null : obj.body, { status: 206, headers: h });
+  }
+  return new Response(request.method === "HEAD" ? null : obj.body, { status: 200, headers: h });
+}
 async function deleteMedia(token, cid, mid) {
   if (!MEDIA_ID.test(String(mid || ""))) return 0;
   const base = "chats/" + cid + "/media/" + mid;
   const chunks = await fsList(token, base + "/c");
   const writes = chunks.map(d => ({ delete: d.name })).concat([{ delete: DOC_ROOT + "/" + base }]);
   await commitChunks(token, writes);
+  if (R2) await R2.delete(r2Key(cid, mid)).catch(e => slog("warn", "r2.delete", { err: e && e.message }));   // C334
   return chunks.length;
 }
 /* v35: \u062d\u062c\u0632 \u0627\u0644\u0631\u0641\u0639 \u2014 \u0627\u0644\u062c\u0647\u0627\u0632 \u064a\u0637\u0644\u0628 \u0627\u0644\u0625\u0630\u0646 \u0642\u0628\u0644 \u0631\u0641\u0639 \u0623\u064a\u0651 \u0648\u0633\u064a\u0637 (\u0627\u0644\u0642\u0648\u0627\u0639\u062f \u062a\u0631\u0641\u0636 \u0648\u0633\u064a\u0637\u0627\u064b \u0628\u0644\u0627 \u062d\u062c\u0632 \u0641\u064a mediaq).
@@ -2119,7 +2186,13 @@ async function opMediaBegin(uid, payload, env) {
     { update: { name: DOC_ROOT + "/mediaq/" + cid + "~" + mid, fields: { uid: { stringValue: uid }, cid: { stringValue: cid }, mid: { stringValue: mid }, size: { integerValue: String(size) }, ts: { integerValue: String(Date.now()) } } } },
     { update: { name: DOC_ROOT + "/quota/" + uid, fields: { d: { stringValue: day }, bytes: { integerValue: String(used + size) } } } },
   ]);
-  return { ok: true, left: MEDIA_DAY_MAX - used - size };
+  const out = { ok: true, left: MEDIA_DAY_MAX - used - size };
+  // C334: مع R2 يرفع الجهاز الملفّ كما هو (بلا base64 ولا قطع) إلى رابطٍ موقَّع — العميل القديم يتجاهل up فيرفع إلى Firestore كما كان
+  if (R2 && (payload || {}).r2) {
+    const exp = Date.now() + 2 * 3600000;
+    out.up = "/m/" + cid + "/" + mid + "?u=" + encodeURIComponent(uid) + "&z=" + size + "&e=" + exp + "&s=" + (await r2Sig(env, ["up", cid, mid, uid, size, exp].join("|")));
+  }
+  return out;
 }
 // \u0627\u0644\u0640Cron: \u0631\u0641\u0639\u0627\u062a\u064c \u062d\u064f\u062c\u0632\u062a \u0648\u0644\u0645 \u062a\u064f\u0631\u0633\u0644 \u062e\u0644\u0627\u0644 \u0662\u0664 \u0633\u0627\u0639\u0629 \u21d2 \u062a\u064f\u062d\u0630\u0641 \u0645\u0639 \u0642\u0637\u0639\u0647\u0627
 async function mediaGc(env, max) {
@@ -6034,6 +6107,7 @@ async function purgeChat(token, cid, spend) {
   for (const m of media) {
     if (!(await purgeColl(token, "chats/" + cid + "/media/" + m.name.split("/").pop() + "/c", spend))) return false;
     if (!spend()) return false;
+    if (R2) await R2.delete(r2Key(cid, m.name.split("/").pop())).catch(() => {});   // C334
     await fsCommit(token, [{ delete: m.name }]).catch(() => {});
   }
   if (!spend()) return false;
@@ -6357,7 +6431,9 @@ async function handleRequest(request, env, ctx, meta) {
     PUSH_ENV = env;   // C151
   notifyChat.env = env;   // v65: \u062a\u0648\u0642\u064a\u0639 \u0625\u0642\u0631\u0627\u0631 \u00ab\u0648\u0635\u0644\u062a\u00bb \u0641\u064a \u0625\u0634\u0639\u0627\u0631\u0627\u062a \u0627\u0644\u0631\u0633\u0627\u0626\u0644
   try { const u0 = new URL(request.url); if (isAuthProxyPath(u0.pathname)) return await authProxy(request, u0); } catch (e) { return new Response("auth proxy error", { status: 502 }); }
+  R2 = env.MEDIA || null;   // C334
   if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
+  try { const u1 = new URL(request.url); if (u1.pathname.indexOf("/m/") === 0) return await r2Route(request, env, u1); } catch (e) { slog("error", "r2.route", { err: String(e && e.message || e).slice(0, 300) }); return r2Err(500, "media error"); }
   try { if (new URL(request.url).pathname === "/wa/webhook") return await waWebhook(request, env, ctx); } catch (e) { return new Response("webhook error", { status: 500 }); }
   try { if (request.method === "POST" && new URL(request.url).pathname === "/ack") return await deviceAck(request, env); } catch (e) { slog("error", "ack.fail", { err: String(e && e.message || e).slice(0, 300) }); return json({ ok: false, error: publicErr(e) }, 500); }
   try { if (request.method === "GET" && new URL(request.url).pathname === "/av") return await avatarImg(request, env); } catch (e) { return new Response("", { status: 500 }); }   // C152
@@ -6540,6 +6616,7 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "chat.prefs") { const r = await opChatPrefs(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "people.list") { const r = await opPeopleList(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "people.invite") { const r = await opPeopleInvite(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+    if (op === "media.tok") { const r = await opMediaTok(uid, body.payload, env); return json({ ok: true, ...r }); }   // C334
     if (op === "media.begin") { const r = await opMediaBegin(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "story.begin") { const r = await opStoryBegin(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "people.peek") { const r = await opPeoplePeek(uid, body.payload, env); return json({ ok: true, ...r }); }
@@ -6616,7 +6693,7 @@ export default {
   // Cron (wrangler.toml: [triggers] crons = ["*/5 * * * *"]): \u062a\u0630\u0643\u064a\u0631\u0627\u062a \u0627\u0644\u0645\u0648\u0627\u0639\u064a\u062f \u0643\u0644\u0651 \u062a\u0634\u063a\u064a\u0644\u061b \u0648\u0627\u0644\u062a\u0646\u0638\u064a\u0641 \u0628\u0627\u0644\u062a\u0646\u0627\u0648\u0628
   // (\u062d\u062f\u0651 \u0665\u0660 \u0637\u0644\u0628\u0627\u064b \u0641\u0631\u0639\u064a\u0651\u0627\u064b \u0644\u0643\u0644\u0651 \u062a\u0634\u063a\u064a\u0644: \u0644\u0627 \u062a\u0646\u0638\u064a\u0641 \u0641\u064a \u062a\u0634\u063a\u064a\u0644\u064d \u0623\u0631\u0633\u0644 \u062a\u0630\u0643\u064a\u0631\u0627\u064b)
   async scheduled(event, env, ctx) {
-    PUSH_ENV = env; notifyChat.env = env;
+    PUSH_ENV = env; notifyChat.env = env; R2 = env.MEDIA || null;   // C334
     ctx.waitUntil((async () => {
       const L = LIM(env);
       await flushStats(env, true);
