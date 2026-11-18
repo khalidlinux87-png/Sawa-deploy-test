@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v141-r2";         // C334: chat media in Cloudflare R2 (binary upload, streamed video) · includes v140-callosr
+const VER = "v142-missed";   // C341: missed calls kept in the callee inbox (inbox/{to}/m_{id}) · stale unanswered calls ⇒ missed after 4 min · includes v141-r2
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -3881,8 +3881,15 @@ async function cleanupCalls(env) {
   let n = 0;
   // \u0661:\u0661 \u0642\u062f\u064a\u0645\u0629 (\u0644\u0645 \u064a\u062d\u0630\u0641\u0647\u0627 \u0627\u0644\u0645\u062a\u0651\u0635\u0644) \u00b7 \u062c\u0645\u0627\u0639\u064a\u0651\u0629 \u0628\u0644\u0627 \u0623\u062d\u062f \u0623\u0648 \u0623\u0642\u062f\u0645 \u0645\u0646 \u0661\u0662 \u0633\u0627\u0639\u0629
   try {
-    const calls = await rtdbGet(token, "calls", '&orderBy="ts"&endAt=' + (now - 3600000) + "&limitToFirst=30");
-    for (const k in (calls || {})) { upd["calls/" + k] = null; n++; }
+    // C341: \u0645\u0643\u0627\u0644\u0645\u0629 \u0644\u0645 \u064a\u064f\u0631\u062f\u0651 \u0639\u0644\u064a\u0647\u0627 \u0648\u0644\u0645 \u064a\u064f\u0628\u0644\u063a \u0627\u0644\u0645\u062a\u0651\u0635\u0644 \u0639\u0646\u0647\u0627 (\u0623\u064f\u063a\u0644\u0642 \u062a\u0637\u0628\u064a\u0642\u0647 \u0623\u0648 \u0627\u0646\u0642\u0637\u0639 \u0623\u062b\u0646\u0627\u0621 \u0627\u0644\u0631\u0646\u064a\u0646) \u21d2 \u00ab\u0641\u0627\u0626\u062a\u0629\u00bb \u0641\u064a \u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0633\u062a\u0642\u0628\u0650\u0644 \u0628\u0639\u062f \u0664 \u062f\u0642\u0627\u0626\u0642
+    const calls = await rtdbGet(token, "calls", '&orderBy="ts"&endAt=' + (now - 240000) + "&limitToFirst=40");
+    for (const k in (calls || {})) {
+      const c = calls[k] || {};
+      if (c.acc) { if (now - (c.ts || 0) > 3600000) { upd["calls/" + k] = null; n++; } continue; }
+      if (!c.missedPush && c.from && c.to && segOk(String(c.to)) && ["declined", "busy"].indexOf(c.state) < 0)
+        Object.assign(upd, missedInbox(c.to, k, c.from, c.fromName, c.type, c.ts));
+      upd["calls/" + k] = null; n++;
+    }
   } catch (e) {}
   try {
     const gs = await rtdbGet(token, "gcalls", '&orderBy="ts"&endAt=' + (now - 2 * 3600000) + "&limitToFirst=40");
@@ -4928,6 +4935,10 @@ async function telGc(env, n) {
   if (rows.length) await fsCommit(token, rows);
   return rows.length;
 }
+// C341: \u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u0627\u0626\u062a\u0629 \u0645\u062d\u0641\u0648\u0638\u0629 \u0644\u0644\u0645\u0633\u062a\u0642\u0628\u0650\u0644 \u2014 sawa-rtc \u064a\u0636\u064a\u0641\u0647\u0627 \u0625\u0644\u0649 \u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0643\u0627\u0644\u0645\u0627\u062a \u062b\u0645\u0651 \u064a\u062d\u0630\u0641\u0647\u0627
+function missedInbox(to, callId, from, fromName, type, ts) {
+  return { ["inbox/" + to + "/m_" + callId]: { missed: 1, from, fromName: String(fromName || "").slice(0, 80), type: type === "video" ? "video" : "audio", ts: Number(ts) || Date.now() } };
+}
 async function opCallMissed(uid, payload, env, claims, ctx) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const to = payload && payload.to;
@@ -4943,8 +4954,9 @@ async function opCallMissed(uid, payload, env, claims, ctx) {
   const call = await rtdbGet(token, "calls/" + callId).catch(() => null);
   if (!call || call.from !== uid || call.to !== to || call.acc || ["ringing", "missed", "ended"].indexOf(call.state) < 0 || call.missedPush) return { sent: 0 };
   if (!(await rateGate(token, [["miss:" + uid + ":" + to, 20, 3600]]))) return { sent: 0 };   // C208: \u0643\u0627\u0644\u0631\u0646\u064a\u0646
-  await rtdbPatch(token, { ["calls/" + callId + "/missedPush"]: Date.now() }).catch(() => {});
   const name = memberIdFields(claims).name.stringValue || "\u0633\u0648\u0627";
+  // C341: \u0627\u0644\u0641\u0627\u0626\u062a\u0629 \u062a\u0628\u0642\u0649 \u0641\u064a \u0635\u0646\u062f\u0648\u0642 \u0627\u0644\u0645\u0633\u062a\u0642\u0628\u0650\u0644 (inbox/{to}/m_{id}) \u0641\u062a\u0638\u0647\u0631 \u0641\u064a \u0633\u062c\u0644\u0651 \u0645\u0643\u0627\u0644\u0645\u0627\u062a\u0647 \u0645\u062a\u0649 \u0641\u064f\u062a\u062d \u0627\u0644\u062a\u0637\u0628\u064a\u0642 (\u0643\u0627\u0646 \u0627\u0644\u0633\u062c\u0644\u0651 \u0645\u0646 \u0627\u0644\u062a\u0637\u0628\u064a\u0642 \u0627\u0644\u0645\u0641\u062a\u0648\u062d \u0648\u062d\u062f\u0647)
+  await rtdbPatch(token, { ["calls/" + callId + "/missedPush"]: Date.now(), ...missedInbox(to, callId, uid, name, payload.type, call.ts) }).catch(() => {});
   const job = pushTo(token, [to], strData({ t: "missed", call: callId, from: uid, cid: dmId(uid, to), title: name,
     body: payload.type === "video" ? "\ud83d\udcf9 \u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u064a\u062f\u064a\u0648 \u0641\u0627\u0626\u062a\u0629" : "\ud83d\udcde \u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u0627\u0626\u062a\u0629", ts: Date.now() }));
   if (ctx && ctx.waitUntil) { ctx.waitUntil(job); return { queued: true }; }
