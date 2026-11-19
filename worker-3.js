@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v142-missed";   // C341: missed calls kept in the callee inbox (inbox/{to}/m_{id}) · stale unanswered calls ⇒ missed after 4 min · includes v141-r2
+const VER = "v143-gdedup";   // C346: group.new dedup (same name+members within 2 min) · includes v142-missed (C341: missed calls kept in the callee inbox (inbox/{to}/m_{id}) · stale unanswered calls ⇒ missed after 4 min · includes v141-r2
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -2544,6 +2544,7 @@ async function writeMembers(token, cid, members, admins, names, banned) {
     updateMask: { fieldPaths: mask }, currentDocument: { exists: true } }]);
   await rtdbSetChatMembers(token, cid, members);
 }
+const GROUP_DEDUP_MS = 120000;   // C346
 async function opGroupCreate2(uid, payload, env, claims) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
   const name = String((payload && payload.name) || "").trim().slice(0, 80);
@@ -2554,6 +2555,17 @@ async function opGroupCreate2(uid, payload, env, claims) {
   const members = [uid].concat(want.filter(u => (u in contacts) && !blk.has(u)));
   const names = { [uid]: memberIdFields(claims).name.stringValue || null };
   members.forEach(u => { if (u !== uid) names[u] = contacts[u]; });
+  // C346: منع التكرار — الطلب نفسه (الاسم + الأعضاء) من المستخدم نفسه خلال دقيقتين ⇒ المجموعة نفسها (كانت كلّ ضغطةٍ مجموعةً جديدة)
+  const dedupKey = await sha256Hex(name + "|" + members.slice().sort().join(","));
+  const dedupPath = "accounts/" + uid + "/chatprefs/gnew";
+  if (!payload.e2e) {
+    const prev = await fsGet(token, dedupPath).catch(() => null);
+    if (prev && fstr(prev, "k") === dedupKey && Date.now() - fsInt(prev, "ts") < GROUP_DEDUP_MS) {
+      const pc = await fsGet(token, "chats/" + fstr(prev, "cid")).catch(() => null);
+      if (pc && fstr(pc, "type") === "group" && fstr(pc, "createdBy") === uid && fsArr(pc, "members").indexOf(uid) >= 0)
+        return { cid: fstr(prev, "cid"), name: fstr(pc, "name"), members: fsArr(pc, "members"), names, skipped: want.filter(u => !(u in contacts) || blk.has(u)), dedup: true };
+    }
+  }
   const cid = "grp_" + crypto.randomUUID().replace(/-/g, "").slice(0, 20), now = Date.now();
   const dk = payload.e2e ? await e2eDevKey(payload.e2e) : null;   // v36: \u0645\u062c\u0645\u0648\u0639\u0629\u064c \u0633\u0631\u0651\u064a\u0651\u0629
   const gf = {
@@ -2563,10 +2575,11 @@ async function opGroupCreate2(uid, payload, env, claims) {
   if (dk) gf.e2e = toFsValue({ on: true, devs: { [uid]: dk.d }, keys: { [dk.d]: { u: uid, k: dk.k, ts: now } } });
   await fsCommit(token, [{ update: { name: DOC_ROOT + "/chats/" + cid, fields: gf },
     currentDocument: { exists: false } }]);
+  if (!dk) await fsCommit(token, [{ update: { name: DOC_ROOT + "/" + dedupPath, fields: { k: { stringValue: dedupKey }, cid: { stringValue: cid }, ts: { integerValue: String(now) } } } }]).catch(() => {});
   await rtdbSetChatMembers(token, cid, members);
   await sysMsg(token, cid, uid, "created", { name });
   if (dk) await sysMsg(token, cid, uid, "e2e_on", {});
-  return { cid, members, skipped: want.filter(u => !(u in contacts) || blk.has(u)) };
+  return { cid, name, members, names, skipped: want.filter(u => !(u in contacts) || blk.has(u)) };
 }
 async function opGroupUpdate(uid, payload, env) {
   const token = await getAccessToken(JSON.parse(env.SA_JSON));
@@ -5963,6 +5976,7 @@ async function opAccountDelete(uid, payload, env, claims) {
     for (const r of ((await res.json()) || []).filter(r => r.document)) writes.push({ update: { name: r.document.name, fields: { aud: { arrayValue: { values: [] } }, gone: { booleanValue: true } } }, updateMask: { fieldPaths: ["aud", "gone"] } });
   } catch (e) {}
   writes.push({ delete: P("accounts/" + uid + "/chatprefs/main") });
+  writes.push({ delete: P("accounts/" + uid + "/chatprefs/gnew") });   // C346
   const code = fstr(acc, "code");
   if (code) writes.push({ delete: P("codes/" + code) });
   // \u0627\u0644\u0639\u0627\u0626\u0644\u0627\u062a: \u0644\u0627 \u064a\u0645\u0644\u0643\u0647\u0627 \u21d2 \u064a\u062e\u0631\u062c \u0627\u0644\u0622\u0646 \u00b7 \u064a\u0645\u0644\u0643\u0647\u0627 \u21d2 \u0645\u0647\u0645\u0651\u0629 \u0644\u0644\u0640Cron (\u0646\u0642\u0644 \u0627\u0644\u0645\u0644\u0643\u064a\u0651\u0629 \u0623\u0648 \u0627\u0644\u062d\u0630\u0641 \u0627\u0644\u0643\u0627\u0645\u0644)
