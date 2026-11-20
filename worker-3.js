@@ -13,7 +13,7 @@ import { handlePfmOp, purgePfm, pfmCron, handlePfmPublic } from "./pfm/pfm-worke
    \u26a0\ufe0f \u0625\u0646 \u0623\u064f\u0639\u064a\u062f \u0625\u0646\u0634\u0627\u0621 \u0645\u0634\u0631\u0648\u0639 Firebase \u0628\u0645\u0639\u0631\u0651\u0641\u064d \u062c\u062f\u064a\u062f\u060c \u063a\u064a\u0651\u0631 PROJECT_ID.
    ============================================================ */
 
-const VER = "v143-gdedup";   // C346: group.new dedup (same name+members within 2 min) · includes v142-missed (C341: missed calls kept in the callee inbox (inbox/{to}/m_{id}) · stale unanswered calls ⇒ missed after 4 min · includes v141-r2
+const VER = "v144-stlike";   // C350: story.like (like a story, owner notified once) · includes v143-gdedup (C346: group.new dedup (same name+members within 2 min) · includes v142-missed (C341: missed calls kept in the callee inbox (inbox/{to}/m_{id}) · stale unanswered calls ⇒ missed after 4 min · includes v141-r2
 // C197: \u0627\u0644\u0633\u062c\u0644\u0651 \u0627\u0644\u0645\u0646\u0638\u064e\u0651\u0645 \u2014 \u0633\u0637\u0631 JSON \u0648\u0627\u062d\u062f \u0644\u0643\u0644\u0651 \u062d\u062f\u062b { lvl, ev, ts, ...\u062d\u0642\u0648\u0644 } (Workers Logs \u062a\u0641\u0647\u0631\u0633 \u0627\u0644\u062d\u0642\u0648\u0644 \u0644\u0644\u0628\u062d\u062b \u0648\u0627\u0644\u062a\u0635\u0641\u064a\u0629).
 function slog(lvl, ev, f) {
   const r = { lvl, ev: String(ev), ts: new Date().toISOString(), ver: VER };
@@ -5370,6 +5370,38 @@ async function opStoryAudience(uid, payload, env, claims) {
   await storyWrite(token, uid, name, aud, hide, items);
   return { aud: aud.length, hide };
 }
+// C350: \u0627\u0644\u0625\u0639\u062c\u0627\u0628 \u0628\u0642\u0635\u0651\u0629 \u2014 \u064a\u064f\u062d\u0641\u0638 \u0641\u064a \u0648\u062b\u064a\u0642\u0629 \u0627\u0644\u0645\u0634\u0627\u0647\u062f\u0629 \u0646\u0641\u0633\u0647\u0627 (seen/{sid~viewer}.like) \u0641\u064a\u0631\u0627\u0647 \u0635\u0627\u062d\u0628\u0647\u0627 \u0641\u064a \u00ab\u0645\u0646 \u0634\u0627\u0647\u062f \u0642\u0635\u0651\u062a\u0643\u00bb\u061b
+//       \u0623\u0648\u0651\u0644 \u0625\u0639\u062c\u0627\u0628\u064d \u0628\u0627\u0644\u0642\u0635\u0651\u0629 \u21d2 \u0625\u0634\u0639\u0627\u0631\u064c \u0644\u0635\u0627\u062d\u0628\u0647\u0627 (\u0625\u0644\u0651\u0627 \u0625\u0646 \u062d\u0638\u0631 \u0627\u0644\u0645\u064f\u0639\u062c\u0650\u0628). on:false \u21d2 \u0633\u062d\u0628 \u0627\u0644\u0625\u0639\u062c\u0627\u0628 \u0628\u0644\u0627 \u0625\u0634\u0639\u0627\u0631.
+async function opStoryLike(uid, payload, env, claims, ctx) {
+  if (!codeRate(uid, "stlk", 300)) throw new Error("rate_limited");
+  const owner = String((payload && payload.owner) || ""), sid = String((payload && payload.sid) || ""), on = !!(payload && payload.on);
+  if (!segOk(owner) || !/^s[a-z0-9]{4,20}$/.test(sid)) throw new Error("bad id");
+  if (owner === uid) throw new Error("own story");
+  const token = await getAccessToken(JSON.parse(env.SA_JSON));
+  const doc = await fsGet(token, "stories/" + owner);
+  if (!doc || fsArr(doc, "aud").indexOf(uid) < 0) throw new Error("not found");
+  const it = storyItems(doc).find(x => x.id === sid);
+  if (!it || Number(it.exp) <= Date.now()) throw new Error("expired");
+  const path = "stories/" + owner + "/seen/" + sid + "~" + uid;
+  const prev = await fsGet(token, path).catch(() => null);
+  const had = !!fstr(prev, "like");
+  if (had === on) return { on };
+  const now = Date.now(), f = { sid: { stringValue: sid }, by: { stringValue: uid }, like: { stringValue: on ? "\u2764\ufe0f" : "" } }, mask = ["sid", "by", "like"];
+  if (!prev || !prev.fields || !prev.fields.ts) { f.ts = { integerValue: String(now) }; mask.push("ts"); }
+  if (on) { f.lts = { integerValue: String(now) }; mask.push("lts"); }
+  await fsCommit(token, [{ update: { name: DOC_ROOT + "/" + path, fields: f }, updateMask: { fieldPaths: mask } }]);
+  if (on && !(prev && prev.fields && prev.fields.lts)) {   // \u0625\u0634\u0639\u0627\u0631\u064c \u0645\u0631\u0651\u0629\u064b \u0644\u0643\u0644\u0651 \u0642\u0635\u0651\u0629\u064d \u0648\u0645\u064f\u0639\u062c\u0650\u0628 (\u0644\u0627 \u062a\u0643\u0631\u0627\u0631 \u0639\u0646\u062f \u0627\u0644\u0633\u062d\u0628 \u062b\u0645\u0651 \u0627\u0644\u0625\u0639\u0627\u062f\u0629)
+    const blk = await blockedSet(token, [owner], uid).catch(() => new Set());
+    if (!blk.has(owner)) {
+      const me = String((await myName(token, uid, claims)) || "\u0645\u0633\u062a\u062e\u062f\u0645 \u0633\u0648\u0627").slice(0, 80);
+      const snip = it.t === "text" ? String(it.text || "").replace(/\s+/g, " ").slice(0, 70) : "";
+      const ak = await ackSig(env, "av|" + uid);
+      const job = pushTo(token, [owner], strData({ t: "story", owner, sid, from: uid, ak, title: me, body: "\u2764\ufe0f \u0623\u0639\u062c\u0628\u062a\u0647 \u0642\u0635\u0651\u062a\u0643" + (snip ? " \u00b7 " + snip : ""), ts: now })).catch(e => slog("warn", "push", { err: e && e.message }));
+      if (ctx && ctx.waitUntil) ctx.waitUntil(job); else await job;
+    }
+  }
+  return { on };
+}
 // ============================================================
 //  C133: \u0644\u062d\u0638\u0627\u062a \u0627\u0644\u0623\u0635\u062f\u0642\u0627\u0621 \u2014 \u0645\u0646\u0634\u0648\u0631\u0627\u062a\u064c \u062f\u0627\u0626\u0645\u0629 (\u0646\u0635\u0651 \u00b7 \u062d\u062a\u0651\u0649 \u0664 \u0635\u0648\u0631 \u0623\u0648 \u0641\u064a\u062f\u064a\u0648 \u2264 \u0663\u0660 \u062b \u00b7 \u0645\u0648\u0642\u0639 \u00b7 \u0627\u0633\u062a\u0637\u0644\u0627\u0639) \u00b7 \u0625\u0639\u062c\u0627\u0628 \u0648\u062a\u0639\u0644\u064a\u0642\u0627\u062a \u00b7 \u062c\u0645\u0647\u0648\u0631\u064c \u0644\u0643\u0644\u0651 \u0644\u062d\u0638\u0629
 //  moments/{pid} = { by, name, aud[] (\u064a\u0634\u0645\u0644 \u0635\u0627\u062d\u0628\u0647\u0627), mode, text, media[], loc, poll{q,opts[]}, votes{uid:idx}, likes[], cc, ts }
@@ -6650,6 +6682,7 @@ async function handleRequest(request, env, ctx, meta) {
     if (op === "people.accept") { const r = await opPeopleAccept(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "story.post") { const r = await opStoryPost(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "story.delete") { const r = await opStoryDelete(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
+    if (op === "story.like") { const r = await opStoryLike(uid, body.payload, env, claims, ctx); return json({ ok: true, ...r }); }   // C350
     if (op === "story.view") { const r = await opStoryView(uid, body.payload, env); return json({ ok: true, ...r }); }
     if (op === "story.audience") { const r = await opStoryAudience(uid, body.payload, env, claims); return json({ ok: true, ...r }); }
     if (op === "code.of") { const r = await opCodeOf(uid, body.payload, env); return json({ ok: true, ...r }); }
